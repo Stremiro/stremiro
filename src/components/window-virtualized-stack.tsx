@@ -19,7 +19,8 @@ export function focusedRowRange(range: Range, focusedIndex: number): number[] {
   if (focusedIndex >= 0 && focusedIndex < range.count) {
     const first = Math.max(0, focusedIndex - 1);
     const last = Math.min(range.count - 1, focusedIndex + 1);
-    if (first >= indices[0] && last <= indices[indices.length - 1]) return indices;
+    if (first >= (indices[0] ?? Infinity) && last <= (indices[indices.length - 1] ?? -Infinity))
+      return indices;
     for (let index = first; index <= last; index += 1) {
       if (!indices.includes(index)) indices.push(index);
     }
@@ -62,7 +63,7 @@ export function WindowVirtualizedStack<T>({
     [focusedIndex],
   );
   const getRowKey = useCallback(
-    (index: number) => getItemKey(items[index], index),
+    (index: number) => getItemKey(items[index]!, index),
     [getItemKey, items],
   );
 

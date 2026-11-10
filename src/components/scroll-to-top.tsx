@@ -17,6 +17,7 @@ export function ScrollToTop() {
     if (!sentinel) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
+        if (!entry) return;
         const next = !entry.isIntersecting && entry.boundingClientRect.bottom < 0;
         // Hiding the control must not strand focus inside it.
         if (!next && document.activeElement === controlRef.current) {

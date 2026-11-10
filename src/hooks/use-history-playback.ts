@@ -8,6 +8,7 @@ import { boundNavigate, currentPathWithSearch } from '@/lib/navigation';
 import { claimPlaybackLaunch, isCurrentPlaybackLaunch } from '@/lib/player-navigation';
 import { expandedSessionState, usePlayerSession } from '@/lib/player-session';
 import { toLocalDate } from '@/lib/schedule-dates';
+import { isSeriesLikeMediaType } from '@/lib/utils';
 
 // Resume-from-history click: resolves the Rust playback plan before navigating. Ref guard blocks double-fires; late completion is dropped after unmount.
 export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
@@ -39,7 +40,7 @@ export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
         presentation === 'mini' &&
         session?.id === row.id &&
         isSameMediaKind(session.type, row.type_) &&
-        (row.type_ === 'movie' ||
+        (!isSeriesLikeMediaType(row.type_) ||
           (session.season === String(row.absolute_season ?? row.season) &&
             session.episode === String(row.absolute_episode ?? row.episode)))
       ) {

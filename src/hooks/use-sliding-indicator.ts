@@ -1,7 +1,5 @@
 import { type RefObject, useLayoutEffect, useState } from 'react';
 
-export const SLIDING_ACCENT_PILL_CLASS =
-  'nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-lg bg-(--accent-nav)';
 export const SLIDING_ACCENT_BAR_CLASS =
   'nav-sliding-bar pointer-events-none absolute left-0 top-0 w-[3px] rounded-r-full bg-(--accent-nav)';
 
@@ -14,13 +12,13 @@ interface IndicatorBounds {
 
 export function useSlidingIndicator<Key extends string, Item extends HTMLElement>(
   activeKey: Key | undefined,
-  containerRef: RefObject<HTMLElement | null>,
+  containerRef: RefObject<HTMLElement | null> | HTMLElement | null,
   itemRefs: RefObject<Map<Key, Item>>,
 ) {
   const [indicator, setIndicator] = useState<IndicatorBounds | null>(null);
 
   useLayoutEffect(() => {
-    const container = containerRef.current;
+    const container = containerRef instanceof HTMLElement ? containerRef : containerRef?.current;
     if (!container) return;
     const measure = () => {
       const item = activeKey ? itemRefs.current.get(activeKey) : undefined;

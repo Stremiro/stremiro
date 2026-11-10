@@ -257,19 +257,24 @@ pub(crate) fn write_atomic_file(
     ));
     let mut created = false;
     let write_outcome: std::io::Result<()> = (|| {
-        retry_transient_fs(|| {
+        let file = retry_transient_fs(|| {
             std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp_path)
-        })
-        .inspect(|_| created = true)?;
-        // Our temp now: a transient mid-write failure re-opens+truncates it.
+        })?;
+        created = true;
+        let mut initial_file = Some(file);
+        // Keep the exclusive-create handle for the first write; only a transient
+        // mid-write failure needs to re-open and truncate our temp.
         retry_transient_fs(|| {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&temp_path)?;
+            let mut file = match initial_file.take() {
+                Some(file) => file,
+                None => std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&temp_path)?,
+            };
             file.write_all(bytes)?;
             file.sync_all()
         })?;

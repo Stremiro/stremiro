@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Loader2, Play, Star } from 'lucide-react';
-import { memo, type MouseEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { type MouseEvent, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
 import { GenreIcon } from '@/components/genre-icon';
@@ -16,7 +16,7 @@ import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api, type MediaItem } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
-import { currentPathWithSearch, navigateToDetails } from '@/lib/navigation';
+import { currentPathWithSearch, navigateToDetailsMorph } from '@/lib/navigation';
 import { buildDetailsRoute, resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
@@ -65,10 +65,7 @@ function HeroCarouselIndicators({
         onClick={() => onStep(-1)}
         className={ARROW_BUTTON_CLASS_NAME}
       >
-        <ChevronLeft
-          aria-hidden='true'
-          className='h-[18px] w-[18px] transition-transform duration-150 group-hover/step:-translate-x-0.5 motion-reduce:transition-none'
-        />
+        <ChevronLeft aria-hidden='true' className='h-[18px] w-[18px]' />
       </button>
       <span
         aria-live='polite'
@@ -95,10 +92,7 @@ function HeroCarouselIndicators({
         onClick={() => onStep(1)}
         className={ARROW_BUTTON_CLASS_NAME}
       >
-        <ChevronRight
-          aria-hidden='true'
-          className='h-[18px] w-[18px] transition-transform duration-150 group-hover/step:translate-x-0.5 motion-reduce:transition-none'
-        />
+        <ChevronRight aria-hidden='true' className='h-[18px] w-[18px]' />
       </button>
     </div>
   );
@@ -111,47 +105,47 @@ function useHeroCarouselState(itemCount: number) {
   const pendingIndexRef = useRef<number | null>(null);
   const activeIndex = itemCount > 0 ? currentIndex % itemCount : 0;
 
-  const cancelTransition = useCallback(() => {
+  const cancelTransition = () => {
     clearTimer(transitionTimeoutRef);
     pendingIndexRef.current = null;
-  }, []);
+  };
 
-  const goTo = useCallback(
-    (nextIndex: number) => {
-      cancelTransition();
-      if (prefersReducedMotion()) {
-        setCurrentIndex(nextIndex);
-        setIsTransitioning(false);
-        return;
-      }
-      pendingIndexRef.current = nextIndex;
-      setIsTransitioning(true);
-      transitionTimeoutRef.current = window.setTimeout(() => {
-        setCurrentIndex(nextIndex);
-        setIsTransitioning(false);
-        transitionTimeoutRef.current = null;
-        pendingIndexRef.current = null;
-      }, HERO_TRANSITION_DURATION_MS);
-    },
-    [cancelTransition],
-  );
+  const goTo = (nextIndex: number) => {
+    cancelTransition();
+    if (prefersReducedMotion()) {
+      setCurrentIndex(nextIndex);
+      setIsTransitioning(false);
+      return;
+    }
+    pendingIndexRef.current = nextIndex;
+    setIsTransitioning(true);
+    transitionTimeoutRef.current = window.setTimeout(() => {
+      setCurrentIndex(nextIndex);
+      setIsTransitioning(false);
+      transitionTimeoutRef.current = null;
+      pendingIndexRef.current = null;
+    }, HERO_TRANSITION_DURATION_MS);
+  };
 
   // Rapid steps retarget the in-flight transition instead of being dropped.
-  const handleStep = useCallback(
-    (delta: number) => {
-      if (itemCount <= 1) return;
-      const index = ((pendingIndexRef.current ?? activeIndex) + delta + itemCount) % itemCount;
-      if (index === activeIndex) {
-        cancelTransition();
-        setIsTransitioning(false);
-        return;
-      }
-      goTo(index);
-    },
-    [activeIndex, cancelTransition, goTo, itemCount],
-  );
+  const handleStep = (delta: number) => {
+    if (itemCount <= 1) return;
+    const index = ((pendingIndexRef.current ?? activeIndex) + delta + itemCount) % itemCount;
+    if (index === activeIndex) {
+      cancelTransition();
+      setIsTransitioning(false);
+      return;
+    }
+    goTo(index);
+  };
 
-  useEffect(() => cancelTransition, [cancelTransition]);
+  useEffect(
+    () => () => {
+      clearTimer(transitionTimeoutRef);
+      pendingIndexRef.current = null;
+    },
+    [],
+  );
 
   return {
     activeIndex,
@@ -209,7 +203,7 @@ function HeroTitle({
   );
 }
 
-export const Hero = memo(function Hero({ items }: HeroProps) {
+export function Hero({ items }: HeroProps) {
   const queryClient = useQueryClient();
   const isOnline = useOnlineStatus();
   const [isOffscreen, setIsOffscreen] = useState(false);
@@ -253,8 +247,8 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
       return;
     }
 
-    const nextItem = items[(activeIndex + 1) % items.length];
-    const previousItem = items[(activeIndex - 1 + items.length) % items.length];
+    const nextItem = items[(activeIndex + 1) % items.length]!;
+    const previousItem = items[(activeIndex - 1 + items.length) % items.length]!;
     // Two slides share one neighbor on both sides.
     const candidateItems = nextItem === previousItem ? [nextItem] : [nextItem, previousItem];
 
@@ -308,7 +302,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
         <div aria-hidden='true' className={HERO_CONTENT_CLASS}>
           <div className='flex w-full items-end justify-between gap-10'>
             <div className='flex min-w-0 max-w-2xl flex-1 flex-col items-start'>
-              <div className='mb-5 flex h-[150px] w-[440px] max-w-full items-end md:h-[185px]'>
+              <div className='mb-4 flex h-[128px] w-[440px] max-w-full items-end md:h-[160px]'>
                 <Skeleton className='h-16 w-80 max-w-full bg-white/[0.08] md:h-20' />
               </div>
               <div className='flex h-4 items-center gap-3'>
@@ -316,11 +310,15 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                 <Skeleton className='h-3 w-10 bg-white/[0.06]' />
                 <Skeleton className='h-3 w-10 bg-white/[0.06]' />
               </div>
-              <div className='mt-4 w-full max-w-xl space-y-2.5 lg:hidden'>
+              <div className='mt-2.5 flex h-7 items-center gap-4'>
+                <Skeleton className='h-3 w-16 bg-white/[0.05]' />
+                <Skeleton className='h-3 w-20 bg-white/[0.05]' />
+              </div>
+              <div className='mt-3 w-full max-w-xl space-y-2.5 lg:hidden'>
                 <Skeleton className='h-3.5 w-full bg-white/[0.05]' />
                 <Skeleton className='h-3.5 w-4/5 bg-white/[0.05]' />
               </div>
-              <div className='mt-5 flex gap-2'>
+              <div className='mt-4 flex gap-2'>
                 <Skeleton className='h-11 w-[108px] rounded-md bg-white/[0.08]' />
                 <Skeleton className='h-11 w-11 rounded-md bg-white/[0.06]' />
                 <Skeleton className='hidden h-11 w-20 rounded-md bg-white/[0.05] sm:block' />
@@ -330,10 +328,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
               <Skeleton className='ml-auto h-3.5 w-full bg-white/[0.05]' />
               <Skeleton className='ml-auto h-3.5 w-full bg-white/[0.05]' />
               <Skeleton className='ml-auto h-3.5 w-3/4 bg-white/[0.05]' />
-              <div className='flex justify-end gap-1.5 pt-1'>
-                <Skeleton className='h-7 w-16 rounded-md bg-white/[0.05]' />
-                <Skeleton className='h-7 w-20 rounded-md bg-white/[0.05]' />
-              </div>
             </div>
           </div>
         </div>
@@ -349,7 +343,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const prefetchActiveDetails = () =>
     isOnline && prefetchDetailsRouteData(queryClient, { mediaId: item.id, mediaType: item.type });
   const openDetails = (event: MouseEvent<HTMLAnchorElement>) =>
-    navigateToDetails(
+    navigateToDetailsMorph(
       event,
       detailsPath,
       { state: { from } },
@@ -453,7 +447,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   onClick={openDetails}
                   onFocus={prefetchActiveDetails}
                   onPointerEnter={prefetchActiveDetails}
-                  className='relative mb-5 flex h-[150px] w-[440px] max-w-full items-end rounded-md transition-opacity duration-150 hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 focus-visible:ring-offset-4 focus-visible:ring-offset-black/40 motion-reduce:transition-none md:h-[185px]'
+                  className='relative mb-4 flex h-[128px] w-[440px] max-w-full items-end rounded-md transition-opacity duration-150 hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 focus-visible:ring-offset-4 focus-visible:ring-offset-black/40 motion-reduce:transition-none md:h-[160px]'
                 >
                   <HeroTitle
                     key={`${item.type}:${item.id}`}
@@ -475,13 +469,28 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   )}
                 </div>
 
+                {genrePills.length > 0 && (
+                  <div className='mt-2.5 flex max-w-full flex-wrap items-center gap-x-4 gap-y-1'>
+                    {genrePills.map((genre) => (
+                      <Link
+                        key={genre}
+                        to={searchGenrePath(item.type, genre)}
+                        title={`Browse ${genre}`}
+                        className={GENRE_LINK_CLASS}
+                      >
+                        <GenreIcon genre={genre} />
+                        {genre}
+                      </Link>
+                    ))}
+                  </div>
+                )}
                 {description && (
-                  <p className='mt-4 max-w-xl text-sm leading-[1.65] text-zinc-100/90 line-clamp-2 [text-shadow:0_1px_10px_rgba(0,0,0,0.75)] lg:hidden'>
+                  <p className='mt-3 max-w-xl text-sm leading-[1.65] text-zinc-100/90 line-clamp-2 [text-shadow:0_1px_10px_rgba(0,0,0,0.75)] lg:hidden'>
                     {description}
                   </p>
                 )}
 
-                <div className='mt-5 flex flex-wrap items-center gap-2'>
+                <div className='mt-4 flex flex-wrap items-center gap-2'>
                   <Button
                     size='sm'
                     variant={null}
@@ -529,18 +538,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   >
                     <SaveIndicator saved={isInLibrary} />
                   </Button>
-                  <Link
-                    to={detailsPath}
-                    state={{ from }}
-                    onClick={openDetails}
-                    onFocus={prefetchActiveDetails}
-                    onPointerEnter={prefetchActiveDetails}
-                    aria-label={`Details for ${item.title}`}
-                    className='hidden h-11 items-center gap-1 rounded-md px-3 text-sm font-medium text-white/80 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/60 motion-reduce:transition-none sm:inline-flex'
-                  >
-                    Details
-                    <ChevronRight aria-hidden='true' className='h-3.5 w-3.5' />
-                  </Link>
                 </div>
               </div>
 
@@ -549,21 +546,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   <p className='text-sm leading-[1.7] text-white/85 line-clamp-4 [text-shadow:0_1px_2px_rgba(0,0,0,0.9),0_2px_16px_rgba(0,0,0,0.7)]'>
                     {description}
                   </p>
-                )}
-                {genrePills.length > 0 && (
-                  <div className='mt-4 flex flex-wrap items-center justify-end gap-1.5'>
-                    {genrePills.map((genre) => (
-                      <Link
-                        key={genre}
-                        to={searchGenrePath(item.type, genre)}
-                        title={`Browse ${genre}`}
-                        className={cn(GENRE_LINK_CLASS, 'inline-flex items-center gap-1.5')}
-                      >
-                        <GenreIcon genre={genre} />
-                        {genre}
-                      </Link>
-                    ))}
-                  </div>
                 )}
               </div>
             </div>
@@ -578,4 +560,4 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
       />
     </section>
   );
-});
+}

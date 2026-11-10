@@ -36,7 +36,11 @@ export function isKeyCaptureTarget(target: EventTarget | null, key?: string): bo
   );
 }
 
-export function handleRadioGroupKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
+/** Shared arrow/Home/End navigation for roving radio groups and tabs. */
+export function handleRovingGroupKeyDown(
+  event: KeyboardEvent<HTMLButtonElement>,
+  role: 'radio' | 'tab' = 'radio',
+): void {
   if (
     event.defaultPrevented ||
     event.altKey ||
@@ -46,27 +50,29 @@ export function handleRadioGroupKeyDown(event: KeyboardEvent<HTMLButtonElement>)
     event.nativeEvent.isComposing
   )
     return;
-  const radios = Array.from(
+  if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key))
+    return;
+  const buttons = Array.from(
     event.currentTarget
-      .closest('[role="radiogroup"]')
+      .closest(role === 'tab' ? '[role="tablist"]' : '[role="radiogroup"]')
       ?.querySelectorAll<HTMLButtonElement>(
-        'button[role="radio"]:not(:disabled):not([aria-disabled="true"])',
+        `button[role="${role}"]:not(:disabled):not([aria-disabled="true"])`,
       ) ?? [],
   );
-  const index = radios.indexOf(event.currentTarget);
+  const index = buttons.indexOf(event.currentTarget);
   if (index < 0) return;
   let nextIndex: number;
   if (event.key === 'ArrowRight' || event.key === 'ArrowDown')
-    nextIndex = (index + 1) % radios.length;
+    nextIndex = (index + 1) % buttons.length;
   else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp')
-    nextIndex = (index - 1 + radios.length) % radios.length;
+    nextIndex = (index - 1 + buttons.length) % buttons.length;
   else if (event.key === 'Home') nextIndex = 0;
-  else if (event.key === 'End') nextIndex = radios.length - 1;
+  else if (event.key === 'End') nextIndex = buttons.length - 1;
   else return;
   event.preventDefault();
   if (nextIndex === index) return;
-  radios[nextIndex].focus({ preventScroll: true });
-  radios[nextIndex].click();
+  buttons[nextIndex]!.focus({ preventScroll: true });
+  buttons[nextIndex]!.click();
 }
 
 /** Run `onMounted` with the first `selector` match, retrying one frame for virtual rows. */

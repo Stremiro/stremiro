@@ -1,4 +1,4 @@
-use super::config_store::AddonConfig;
+use super::config_store::{strip_ascii_prefix_ignore_case, AddonConfig};
 use super::history_helpers::STREAM_KEY_MAX_CHARS;
 use super::language::{bracketed_language_tags, flag_language_tags};
 use crate::providers::addon_resource::is_magnet_url;
@@ -7,6 +7,7 @@ use crate::providers::addons::{
     StreamDeliveryKind, StreamFlags, StreamPresentation, StreamReleaseKind, StreamResolution,
     StreamResolutionTier,
 };
+use crate::providers::fetch_policy::{is_ip_literal_https, is_plain_http_url};
 use crate::providers::{non_blank, push_unique, CONTENT_HASH_URN_PREFIX};
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -200,8 +201,9 @@ pub(crate) fn parse_playback_url(input: &str) -> Option<reqwest::Url> {
     }
     let parsed = reqwest::Url::parse(input).ok()?;
     (parsed.as_str().len() <= PLAYBACK_URL_MAX_BYTES
-        && matches!(parsed.scheme(), "http" | "https")
-        && parsed.has_host())
+        && is_plain_http_url(&parsed)
+        && parsed.has_host()
+        && !is_ip_literal_https(&parsed))
     .then_some(parsed)
 }
 
@@ -296,14 +298,11 @@ fn magnet_xt_hash(url: &str) -> Option<String> {
     parsed
         .query_pairs()
         .filter(|(key, _)| key.eq_ignore_ascii_case("xt"))
-        .filter_map(|(_, value)| {
-            let lowered = value.to_ascii_lowercase();
-            lowered
-                .strip_prefix(CONTENT_HASH_URN_PREFIX)
-                .or_else(|| lowered.strip_prefix("urn:btmh:"))
-                .map(str::to_string)
+        .find_map(|(_, value)| {
+            let hash = strip_ascii_prefix_ignore_case(&value, CONTENT_HASH_URN_PREFIX)
+                .or_else(|| strip_ascii_prefix_ignore_case(&value, "urn:btmh:"))?;
+            (!hash.is_empty()).then(|| hash.to_ascii_lowercase())
         })
-        .find(|hash| !hash.is_empty())
 }
 
 /// 64-bit stream-URL fingerprint: first 8 bytes of SHA-256 over the canonicalized URL.
@@ -342,7 +341,7 @@ fn normalize_stream_dedup_url(mut parsed: reqwest::Url) -> String {
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
-    pairs.sort();
+    pairs.sort_unstable();
     parsed.query_pairs_mut().clear().extend_pairs(
         pairs
             .iter()
@@ -456,10 +455,8 @@ fn strip_display_pictographs(value: &str) -> Cow<'_, str> {
     {
         return Cow::Borrowed(trimmed);
     }
-
-    let spaced = STREAM_PICTOGRAPH_REGEX.replace_all(value, " ");
-    let normalized = join_words(spaced.split_whitespace(), ' ');
-    let unpadded = STREAM_BRACKET_PADDING_REGEX.replace_all(&normalized, "${1}${2}");
+    let spaced = STREAM_PICTOGRAPH_REGEX.replace_all(trimmed, " ");
+    let unpadded = STREAM_BRACKET_PADDING_REGEX.replace_all(&spaced, "${1}${2}");
     let cleaned = STREAM_EMPTY_BRACKETS_REGEX.replace_all(&unpadded, " ");
     Cow::Owned(join_words(
         cleaned.trim_matches(is_display_edge).split_whitespace(),
@@ -509,7 +506,6 @@ fn build_stream_presentation(
     let texts = stream.match_texts();
     let flags = texts.flags;
 
-    let is_dts = !flags.dts_hd && flags.dts;
     let (is_dual_audio, is_multi_audio) = stream_audio_evidence(stream, flags);
 
     StreamPresentation {
@@ -541,9 +537,11 @@ fn build_stream_presentation(
         },
         audio_label: if flags.atmos {
             Some("Atmos")
+        } else if flags.truehd {
+            Some("TrueHD")
         } else if flags.dts_hd {
             Some("DTS-HD")
-        } else if is_dts {
+        } else if flags.dts {
             Some("DTS")
         } else if flags.eac3 {
             Some("DD+")
@@ -694,8 +692,7 @@ pub(crate) fn merge_unique_streams(
     for stream in streams {
         // `prepare_addon_streams` already keyed the stream; recompute nothing.
         let key = &stream.stream_key;
-        if !key.is_empty() && !seen.contains(key) {
-            seen.insert(key.clone());
+        if !key.is_empty() && seen.insert(key.clone()) {
             merged.push(stream);
         }
     }
@@ -724,7 +721,8 @@ pub(crate) fn build_stream_query_ids(
     episode: Option<u32>,
     absolute_episode: Option<u32>,
 ) -> Vec<String> {
-    if media_type == "movie" {
+    // Non-episodic addon catalog types address streams by title id like movies.
+    if !matches!(media_type, "series" | "anime") {
         return vec![id.to_string()];
     }
     let (Some(s), Some(e)) = (season, episode) else {
@@ -833,7 +831,7 @@ pub(crate) fn stream_quality_score(flags: StreamFlags) -> i32 {
         score += 50;
     }
 
-    if flags.atmos {
+    if flags.atmos || flags.truehd {
         score += 15;
     } else if flags.dts_hd {
         score += 13;

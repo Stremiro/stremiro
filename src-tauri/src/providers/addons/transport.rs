@@ -1,5 +1,7 @@
 use super::{AddonStream, MAX_PROXY_HEADERS_BYTES};
-use crate::providers::addon_resource::{build_resource_url, is_fetchable_http_url, is_magnet_url};
+use crate::providers::addon_resource::{
+    build_resource_url, is_magnet_url, parse_fetchable_http_url,
+};
 use crate::providers::ttl_cache::{
     hash_segment, FetchContract, FetchFailure, FetchFailureCooldown, InFlight, TtlCache,
 };
@@ -130,9 +132,12 @@ pub(super) fn truncate_stream_item(stream: &mut AddonStream) {
     {
         stream.content_hash = None;
     }
-    // Strip non-fetchable URLs at ingress so they can't pollute selector rows/dedup keys.
+    // Strip non-fetchable or unplayable URLs at ingress so they can't pollute selector rows/dedup keys.
     let url_blocked = stream.url.as_deref().is_some_and(|url| {
-        url.chars().nth(2_048).is_some() || (!is_magnet_url(url) && !is_fetchable_http_url(url))
+        url.chars().nth(2_048).is_some()
+            || (!is_magnet_url(url)
+                && parse_fetchable_http_url(url)
+                    .is_none_or(|parsed| fetch_policy::is_ip_literal_https(&parsed)))
     });
     if url_blocked {
         stream.url = None;
@@ -571,7 +576,7 @@ impl AddonTransport {
 pub(crate) fn sanitize_addon_log(value: &str) -> String {
     // Any query value may carry credentials.
     static TOKEN_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"([?&][^=&#\s]+=)[^&#\s]+").expect("valid regex"));
+        LazyLock::new(|| Regex::new(r"([?&][^=&#\s]*=)[^&#\s]+").expect("valid regex"));
     // Path/pipe-delimited config pairs (`/opt=a|service=KEY/`); long values only, so protocol extras like `skip=50` stay readable.
     static CONFIG_PAIR_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"([/|;,][^=&#\s/|;,?]+=)[^&#\s/|;,?]{16,}").expect("valid regex")
@@ -592,7 +597,7 @@ pub(crate) fn sanitize_addon_log(value: &str) -> String {
 /// Replace `scheme://user:pass@host` with `scheme://[redacted-userinfo]@host`.
 fn redact_userinfo_authority(value: &str) -> String {
     static USERINFO_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@").expect("valid regex"));
+        LazyLock::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s?#]+@").expect("valid regex"));
 
     USERINFO_RE
         .replace_all(value, "$1[redacted-userinfo]@")

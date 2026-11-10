@@ -1,4 +1,4 @@
-import { memo, useId, useRef, useState, type Ref } from 'react';
+import { useId, useRef, type Ref } from 'react';
 import { Check, CheckCheck, ChevronLeft, Link2, Play, RotateCcw } from 'lucide-react';
 import type { Episode } from '@/lib/api';
 import { InlineMenu } from '@/components/inline-menu';
@@ -10,10 +10,6 @@ import { useLocalDay } from '@/hooks/use-local-day';
 import { copyText } from '@/lib/notify';
 import { formatAirDate, parseLocalScheduleDate, SHORT_DATE_FORMATTER } from '@/lib/schedule-dates';
 import { cn, formatSeasonEpisode, getEpisodeTitle } from '@/lib/utils';
-
-// Clears the watched toggle and emphasis badge pinned to the card's top edge.
-const SYNOPSIS_TOP_CLEARANCE_PX = 48;
-const MIN_SYNOPSIS_LINES = 2;
 
 export type EpisodeEmphasis = 'resume' | 'next' | null;
 
@@ -38,7 +34,7 @@ interface EpisodeCardProps {
   onMarkWatchedThrough?: (episode: Episode) => void;
 }
 
-function EpisodeCardInner({
+export function EpisodeCard({
   episode,
   emphasis,
   isSpoiler,
@@ -59,31 +55,12 @@ function EpisodeCardInner({
   const [thumbnail, onThumbnailError] = useFailedSrc(episode.thumbnail);
   const descriptionId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
-  const textRef = useRef<HTMLDivElement>(null);
-  const synopsisRef = useRef<HTMLDivElement>(null);
   const menu = useInlineMenu({
     rootRef,
     returnFocus: () => rootRef.current?.querySelector('button'),
   });
   const watchedLocked = isWatchedDisabled || isWatchedPending;
 
-  // Hover grows the synopsis into whatever height the artwork leaves instead of a fixed clamp.
-  const [synopsisLines, setSynopsisLines] = useState(MIN_SYNOPSIS_LINES);
-  const fitSynopsis = () => {
-    const root = rootRef.current;
-    const text = textRef.current;
-    const synopsis = synopsisRef.current;
-    const paragraph = synopsis?.querySelector('p');
-    if (!root || !text || !synopsis || !paragraph) return;
-    const style = getComputedStyle(paragraph);
-    const available =
-      root.clientHeight -
-      (text.offsetHeight - synopsis.offsetHeight) -
-      SYNOPSIS_TOP_CLEARANCE_PX -
-      parseFloat(style.paddingTop);
-    const lines = Math.floor(available / parseFloat(style.lineHeight));
-    setSynopsisLines(Math.max(MIN_SYNOPSIS_LINES, lines || 0));
-  };
   const description = isSpoiler
     ? 'Description hidden to prevent spoilers.'
     : episode.overview?.trim() || null;
@@ -99,13 +76,7 @@ function EpisodeCardInner({
   const watchButtonLabel = `${emphasis === 'resume' ? 'Resume' : 'Play'} ${coordinates}: ${title}${releaseLabel ? `, ${releaseLabel}` : ''}${remainingText && !isWatched ? ` (${remainingText})` : ''}`;
 
   return (
-    <div
-      ref={rootRef}
-      className='relative'
-      {...menu.rootProps}
-      onPointerEnter={fitSynopsis}
-      onFocus={fitSynopsis}
-    >
+    <div ref={rootRef} className='group/card relative min-w-0' {...menu.rootProps}>
       <button
         type='button'
         ref={resumeRef}
@@ -114,91 +85,81 @@ function EpisodeCardInner({
         onClick={() => onPlay(episode)}
         aria-label={watchButtonLabel}
         aria-describedby={description ? descriptionId : undefined}
+        tabIndex={menu.presence.mounted ? -1 : undefined}
         className={cn(
-          'group/episode relative block aspect-video w-full overflow-hidden rounded-lg border bg-zinc-900 text-left transition-colors duration-200',
+          'block w-full rounded-lg text-left',
           'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60',
-          emphasis
-            ? 'border-[rgb(var(--accent-act-rgb)/0.3)] hover:border-[rgb(var(--accent-act-rgb)/0.5)]'
-            : 'border-white/[0.08] hover:border-white/20',
+          menu.presence.mounted && 'pointer-events-none',
         )}
       >
-        {thumbnail ? (
-          <RemoteImage
-            src={thumbnail}
-            alt=''
-            className={cn(
-              'absolute inset-0 h-full w-full object-cover',
-              isSpoiler && 'scale-110 blur-md',
-              isWatched &&
-                'opacity-60! transition-opacity duration-200 group-hover/episode:opacity-100! group-focus-visible/episode:opacity-100! motion-reduce:transition-none',
-            )}
-            loading='lazy'
-            fadeIn
-            onError={onThumbnailError}
-          />
-        ) : (
-          <div className='absolute inset-0 flex items-center justify-center bg-zinc-900 text-2xl font-semibold text-white/20'>
-            {episode.episode}
-          </div>
-        )}
-
-        <div className='pointer-events-none absolute inset-x-0 bottom-0 h-3/4 bg-linear-to-t from-black/90 via-black/45 to-transparent' />
-        <div className='pointer-events-none absolute inset-0 bg-linear-to-t from-black/95 via-black/75 to-black/30 opacity-0 transition-opacity duration-300 group-hover/episode:opacity-100 group-focus-visible/episode:opacity-100 motion-reduce:transition-none' />
-
-        {emphasis && (
-          <>
-            <div className='pointer-events-none absolute inset-x-0 top-0 z-10 h-px bg-linear-to-r from-transparent via-[rgb(var(--accent-act-rgb)/0.7)] to-transparent' />
-            <span className='absolute left-2.5 top-2.5 flex h-[22px] items-center gap-1.5 rounded-[4px] border border-white/[0.1] bg-black/60 pl-1.5 pr-2 text-[10.5px] font-semibold uppercase leading-none tracking-[0.08em] text-white/90 shadow-[0_4px_14px_-4px_rgba(0,0,0,0.6)] backdrop-blur-md'>
-              <Play aria-hidden='true' className='h-2.5 w-2.5 fill-current text-(--accent-act)' />
-              {EMPHASIS_LABELS[emphasis]}
+        <span className='relative block aspect-video w-full overflow-hidden rounded-lg bg-zinc-900'>
+          {thumbnail ? (
+            <RemoteImage
+              src={thumbnail}
+              alt=''
+              className={cn(
+                'absolute inset-0 h-full w-full object-cover',
+                isSpoiler && 'scale-110 blur-md',
+                isWatched && 'opacity-70!',
+              )}
+              loading='lazy'
+              fadeIn
+              onError={onThumbnailError}
+            />
+          ) : (
+            <span className='absolute inset-0 flex items-center justify-center bg-zinc-900 text-2xl font-semibold text-white/20'>
+              {episode.episode}
             </span>
-          </>
-        )}
-
-        <div
-          ref={textRef}
-          className={cn(
-            'pointer-events-none absolute inset-x-0 bottom-0 z-10 p-3.5 transition-opacity duration-150 ease-out motion-reduce:transition-none',
-            menu.presence.mounted && 'opacity-0 duration-0',
           )}
-        >
-          <p className='flex min-w-0 items-center gap-1.5 text-[13px] font-medium leading-4 tabular-nums text-zinc-300'>
-            <span className='shrink-0 font-semibold text-white/90'>E{episode.episode}</span>
+
+          <span
+            aria-hidden='true'
+            className='absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-black/0 ring-1 ring-inset ring-white/[0.07] transition-[background-color,box-shadow] duration-200 ease-out group-hover/card:bg-black/45 group-hover/card:ring-white/15 motion-reduce:transition-none'
+          >
+            <span className='flex h-11 w-11 scale-90 items-center justify-center rounded-full bg-white/15 opacity-0 ring-1 ring-inset ring-white/20 backdrop-blur-md transition-[opacity,transform] duration-200 ease-out group-hover/card:scale-100 group-hover/card:opacity-100 motion-reduce:transition-none'>
+              <Play className='ml-0.5 h-4 w-4 fill-white text-white' />
+            </span>
+          </span>
+          {remainingText && !isWatched && (
+            <span className='absolute bottom-2.5 right-2 z-20 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-white/90'>
+              {remainingText}
+            </span>
+          )}
+          <WatchProgressStrip percent={progressPercent} className='z-20' />
+        </span>
+        <span className={cn('block px-0.5 pb-1 pt-2.5', menu.presence.mounted && 'opacity-0')}>
+          <span
+            title={title}
+            className='line-clamp-2 text-[15px] font-medium leading-5 text-zinc-100'
+          >
+            {title}
+          </span>
+          <span className='mt-1 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 tabular-nums text-zinc-400'>
+            {emphasis && (
+              <>
+                <span className='shrink-0 font-semibold text-(--accent-act)'>
+                  {EMPHASIS_LABELS[emphasis]}
+                </span>
+                <span aria-hidden='true'>·</span>
+              </>
+            )}
+            <span className='shrink-0 font-medium text-zinc-400'>Episode {episode.episode}</span>
             {releaseLabel && (
               <>
                 <span aria-hidden='true'>·</span>
                 <span className='truncate'>{releaseLabel}</span>
               </>
             )}
-            {remainingText && !isWatched && (
-              <>
-                <span aria-hidden='true'>·</span>
-                <span className='shrink-0'>{remainingText}</span>
-              </>
-            )}
-          </p>
-          <h4 className='mt-0.5 line-clamp-2 text-[15px] font-semibold leading-snug text-white drop-shadow-md'>
-            {title}
-          </h4>
+          </span>
           {description && (
-            <div
-              ref={synopsisRef}
-              className='grid grid-rows-[0fr] opacity-0 transition-[grid-template-rows,opacity] duration-300 ease-out group-hover/episode:grid-rows-[1fr] group-hover/episode:opacity-100 group-focus-visible/episode:grid-rows-[1fr] group-focus-visible/episode:opacity-100 motion-reduce:transition-none'
+            <span
+              id={descriptionId}
+              className='mt-2 line-clamp-2 text-[13px] leading-5 text-zinc-400'
             >
-              <div className='min-h-0 overflow-hidden'>
-                <p
-                  id={descriptionId}
-                  className='line-clamp-2 pt-1.5 text-[13px] leading-snug text-zinc-200'
-                  style={{ WebkitLineClamp: synopsisLines }}
-                >
-                  {description}
-                </p>
-              </div>
-            </div>
+              {description}
+            </span>
           )}
-        </div>
-
-        <WatchProgressStrip percent={progressPercent} className='z-20' />
+        </span>
       </button>
       {onToggleWatched && (
         <button
@@ -270,5 +231,3 @@ function EpisodeCardInner({
     </div>
   );
 }
-
-export const EpisodeCard = memo(EpisodeCardInner);

@@ -118,7 +118,7 @@ fn is_non_routable_ip(ip: &IpAddr) -> bool {
         }
         IpAddr::V6(value) => {
             let segments = value.segments();
-            // Unspecified, loopback, link-local fe80::/10, ULA fc00::/7,
+            // Unspecified, loopback, link-local fe80::/10, site-local fec0::/10, ULA fc00::/7,
             // doc 2001:db8::/32, benchmark 2001:2::/48, multicast, discard
             // 100::/64, and the IPv4-embedding transition leftovers
             // (6to4 2002::/16, Teredo 2001::/32).
@@ -126,6 +126,7 @@ fn is_non_routable_ip(ip: &IpAddr) -> bool {
                 || value.is_loopback()
                 || value.is_multicast()
                 || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xffc0) == 0xfec0
                 || (segments[0] & 0xfe00) == 0xfc00
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
                 || (segments[0] == 0x2001 && segments[1] == 0x0002)
@@ -145,6 +146,14 @@ fn redirect_target_has_userinfo(next: &reqwest::Url) -> bool {
 /// http(s) scheme with no embedded credentials — the shared gate for privileged fetch/redirect targets.
 pub(crate) fn is_plain_http_url(parsed: &reqwest::Url) -> bool {
     matches!(parsed.scheme(), "http" | "https") && !redirect_target_has_userinfo(parsed)
+}
+
+/// HTTPS to an IP literal: the bundled FFmpeg skips TLS identity checks for it. `Url` normalizes numeric IPv4 forms.
+pub(crate) fn is_ip_literal_https(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.starts_with('[') || host.parse::<std::net::Ipv4Addr>().is_ok())
 }
 
 /// True when the redirect may be followed: http(s), no credentials; a hop onto

@@ -28,9 +28,7 @@ export function useWindowScrollMargin(
       return;
     }
 
-    window.addEventListener('resize', updateScrollMargin, { passive: true });
-
-    // Burst body resizes (image decode, infinite-scroll appends) coalesce to one measure per frame.
+    // Window and body resizes share one layout read per frame.
     let measureFrame: number | null = null;
     const scheduleMeasure = () => {
       if (measureFrame !== null) return;
@@ -40,6 +38,7 @@ export function useWindowScrollMargin(
       });
     };
 
+    window.addEventListener('resize', scheduleMeasure, { passive: true });
     const resizeObserver = new ResizeObserver(scheduleMeasure);
     if (containerRef.current) {
       resizeObserver.observe(containerRef.current);
@@ -48,7 +47,7 @@ export function useWindowScrollMargin(
     }
 
     return () => {
-      window.removeEventListener('resize', updateScrollMargin);
+      window.removeEventListener('resize', scheduleMeasure);
       if (measureFrame !== null) window.cancelAnimationFrame(measureFrame);
       resizeObserver.disconnect();
     };

@@ -60,7 +60,7 @@ export function reinsertSnapshotRows<T>(
   for (let index = 0; index <= current.length; index++) {
     const bucket = buckets.get(index);
     if (bucket) rows.push(...bucket);
-    if (index < current.length) rows.push(current[index]);
+    if (index < current.length) rows.push(current[index]!);
   }
   return rows;
 }

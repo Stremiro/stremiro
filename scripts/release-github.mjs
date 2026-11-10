@@ -49,6 +49,9 @@ const draft = args.includes('--draft');
 if (!['manifest', 'publish'].includes(mode)) {
   fail('Usage: bun ./scripts/release-github.mjs <manifest|publish> [--notes <file>] [--draft]');
 }
+if (notesFlag >= 0 && (!notesPath || notesPath.startsWith('--') || !fs.existsSync(notesPath))) {
+  fail('Provide an existing notes file after --notes.');
+}
 
 function findInstallerAssets() {
   if (!fs.existsSync(bundleDir)) {
@@ -92,10 +95,7 @@ function writeManifest() {
     fail(`Updater signature must include version:${version}. Rebuild the signed installer.`);
   }
 
-  const notes =
-    notesPath && fs.existsSync(notesPath)
-      ? fs.readFileSync(notesPath, 'utf8').trim()
-      : `Stremiro ${tag}`;
+  const notes = notesPath ? fs.readFileSync(notesPath, 'utf8').trim() : `Stremiro ${tag}`;
 
   const manifest = {
     version: tag,
@@ -128,31 +128,39 @@ function publishRelease() {
   );
   const notesArgs = notesPath ? ['--notes-file', notesPath] : ['--notes', `Stremiro ${tag}`];
 
-  let exists = false;
+  let isDraft;
   try {
-    execFileSync('gh', ['release', 'view', tag, '--repo', repo], { stdio: 'ignore' });
-    exists = true;
-  } catch {
-    exists = false;
-  }
-
-  if (exists) {
-    const isDraft =
+    isDraft =
       execFileSync(
         'gh',
         ['release', 'view', tag, '--repo', repo, '--json', 'isDraft', '--jq', '.isDraft'],
-        {
-          encoding: 'utf8',
-        },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
       ).trim() === 'true';
+  } catch {
+    isDraft = undefined;
+  }
+
+  if (isDraft !== undefined) {
     if (draft && !isDraft) fail(`Cannot update published release ${tag} with --draft.`);
     execFileSync('gh', ['release', 'upload', tag, ...assets, '--clobber', '--repo', repo], {
       stdio: 'inherit',
     });
-    if (!draft) {
-      execFileSync('gh', ['release', 'edit', tag, '--draft=false', '--latest', '--repo', repo], {
-        stdio: 'inherit',
-      });
+    if (!draft || notesPath) {
+      execFileSync(
+        'gh',
+        [
+          'release',
+          'edit',
+          tag,
+          ...(!draft ? ['--draft=false', '--latest'] : []),
+          ...(notesPath ? notesArgs : []),
+          '--repo',
+          repo,
+        ],
+        {
+          stdio: 'inherit',
+        },
+      );
     }
     console.log(`Updated existing release ${tag}.`);
   } else {

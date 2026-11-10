@@ -372,7 +372,10 @@ async fn video_id_queries_preserve_primary_fallbacks_and_source_episode_eligibil
     for duplicate in ["tt123:1:2", "tt123:1:13"] {
         assert_eq!(query.query_ids(Some(duplicate)), query.query_ids(None));
     }
-    for invalid in [" \u{feff} ".to_string(), "x".repeat(257)] {
+    for invalid in [
+        " \u{feff} ".to_string(),
+        "x".repeat(crate::commands::MEDIA_ID_MAX_CHARS + 1),
+    ] {
         assert_eq!(query.query_ids(Some(&invalid)), query.query_ids(None));
     }
     assert_eq!(query.query_ids(Some("kitsu:42:12"))[1], "kitsu:42:12");

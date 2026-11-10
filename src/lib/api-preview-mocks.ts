@@ -26,7 +26,7 @@ import {
   SUBTITLE_FONT_OPTIONS,
 } from '@/lib/player-track-utils';
 import { DEFAULT_FILTERS } from '@/lib/stream-selector-utils';
-import { clamp } from '@/lib/utils';
+import { clamp, isSeriesLikeMediaType, orderByIds } from '@/lib/utils';
 
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
@@ -167,6 +167,7 @@ const PREVIEW_BROWSE_GENRES = {
   movie: PREVIEW_MOVIE_GENRES,
   series: PREVIEW_SERIES_GENRES,
   anime: PREVIEW_SERIES_GENRES.filter((genre) => genre.toLowerCase() !== 'animation'),
+  addon: [],
 };
 
 // Mirrors the backend's closed language set.
@@ -197,7 +198,8 @@ function readPreviewMediaItem(value: unknown): MediaItem {
     !('title' in value) ||
     typeof value.title !== 'string' ||
     !('type' in value) ||
-    (value.type !== 'movie' && value.type !== 'series')
+    typeof value.type !== 'string' ||
+    !value.type.trim()
   ) {
     throw new Error('Invalid media item');
   }
@@ -254,15 +256,10 @@ function addPreviewListItems(listId: string, items: MediaItem[]): number {
   return additions.length;
 }
 
-function readMediaType(args: PreviewInvokeArgs): 'movie' | 'series' {
+function readMediaType(args: PreviewInvokeArgs): string {
   // Exact camelCase only — snake_case fallbacks would hide the IPC naming drift this mock surfaces.
-  const value = args?.mediaType;
-  if (typeof value !== 'string') {
-    return 'movie';
-  }
-
-  const normalized = value.trim().toLowerCase();
-  return normalized === 'movie' ? 'movie' : 'series';
+  const normalized = typeof args?.mediaType === 'string' ? args.mediaType.trim().toLowerCase() : '';
+  return normalized || 'movie';
 }
 
 function readFiniteNumber(source: Record<string, unknown>, key: string): number | undefined {
@@ -406,17 +403,9 @@ function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
         config.id === op.id ? { ...config, enabled: op.enabled } : config,
       );
       return;
-    case 'reorder': {
-      // reorder_known_ids merge: requested ids first, omitted ids keep relative order at the tail.
-      const byId = new Map(previewAddonConfigs.map((config) => [config.id, config]));
-      const ordered = op.ids.flatMap((id) => {
-        const config = byId.get(id);
-        byId.delete(id);
-        return config ? [config] : [];
-      });
-      previewAddonConfigs = [...ordered, ...byId.values()];
+    case 'reorder':
+      previewAddonConfigs = orderByIds(previewAddonConfigs, op.ids);
       return;
-    }
   }
 }
 
@@ -814,17 +803,13 @@ export async function handlePreviewInvoke<T>(
     case 'build_history_playback_plan': {
       const item = args?.item as WatchProgress | undefined;
       const mediaId = item?.id.trim() ? item.id : 'mock-id';
-      const itemType = item?.type_.trim().toLowerCase() ?? 'movie';
-      const mediaType = mediaId.startsWith('kitsu:')
-        ? 'anime'
-        : itemType === 'movie'
-          ? 'movie'
-          : 'series';
+      const itemType = item?.type_.trim().toLowerCase() || 'series';
+      const mediaType = mediaId.toLowerCase().startsWith('kitsu:') ? 'anime' : itemType;
       const absoluteSeason = item?.absolute_season ?? item?.season;
       const absoluteEpisode = item?.absolute_episode ?? item?.episode;
       const from = readStringArg(args, 'from', '/');
 
-      if (mediaType !== 'movie' && (absoluteSeason == null || absoluteEpisode == null)) {
+      if (isSeriesLikeMediaType(mediaType) && (absoluteSeason == null || absoluteEpisode == null)) {
         return {
           kind: 'details',
           reason: 'missing-episode-context',

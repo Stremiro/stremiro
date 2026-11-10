@@ -77,7 +77,7 @@ pub struct HistoryPlaybackPlan {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryWarmResolveRequest {
-    media_type: &'static str,
+    media_type: String,
     media_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_lookup_id: Option<String>,
@@ -131,12 +131,16 @@ fn normalize_saved_value(value: Option<&str>) -> Option<String> {
     value.and_then(super::normalize_opaque_field)
 }
 
-fn normalize_history_media_type(item: &WatchProgress) -> &'static str {
+fn normalize_history_media_type(item: &WatchProgress) -> String {
     super::media_type::normalize_history_row_media_type(&item.type_, &item.id)
 }
 
+// Arbitrary addon catalog types are title-scoped (movie-like), not episodic.
 fn is_series_like(item: &WatchProgress) -> bool {
-    normalize_history_media_type(item) != "movie"
+    matches!(
+        normalize_history_media_type(item).as_str(),
+        "series" | "anime"
+    )
 }
 
 /// WatchProgress-side twin of `episode_navigation::build_source_episode_coordinates`:
@@ -162,12 +166,11 @@ fn get_episode_context(item: &WatchProgress) -> HistoryEpisodeContext {
 }
 
 fn has_episode_context(item: &WatchProgress) -> bool {
-    if !is_series_like(item) {
-        return true;
-    }
-
-    let context = get_episode_context(item);
-    context.absolute_season.is_some() && context.absolute_episode.is_some()
+    // Only the absolute fields decide context — skip get_episode_context's
+    // stream-coordinate/defer computation (used by route-state builders).
+    !is_series_like(item)
+        || (watch_progress_absolute_season(item).is_some()
+            && watch_progress_absolute_episode(item).is_some())
 }
 
 /// Resume never depends on a persisted stream URL — the opaque lookup id re-resolves
@@ -237,12 +240,13 @@ fn build_player_plan(
         ..HistoryPlaybackRouteState::default()
     };
     // A coordinate-less series warm cannot join the player's mapped replay request.
-    let warm_resolve_request = (!(media_type != "movie"
+    // Episode coordinates only exist for series|anime — every other gate agrees.
+    let warm_resolve_request = (!(matches!(media_type.as_str(), "series" | "anime")
         && (state.absolute_season.is_some() || state.absolute_episode.is_some())
         && state.stream_season.is_none()
         && state.stream_episode.is_none()))
     .then(|| HistoryWarmResolveRequest {
-        media_type,
+        media_type: media_type.clone(),
         media_id: item.id.trim().to_string(),
         stream_lookup_id: state.stream_lookup_id.clone(),
         stream_season: state.stream_season,
@@ -261,7 +265,7 @@ fn build_player_plan(
         kind: HistoryPlaybackPlanKind::Player,
         reason: None,
         target: build_player_route(
-            media_type,
+            &media_type,
             &item.id,
             context.absolute_season,
             context.absolute_episode,
@@ -346,7 +350,7 @@ async fn resolve_history_episode_context(
                 app,
                 playback_state,
                 client,
-                normalize_history_media_type(item),
+                &normalize_history_media_type(item),
                 &item.id,
                 absolute_season,
                 absolute_episode,

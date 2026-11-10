@@ -4,6 +4,9 @@ import { episodeProgressKey } from '@/lib/history-playback';
 
 export type SeasonEpisodeState = 'watched' | 'started' | 'next' | 'unwatched' | 'unaired';
 
+// Most renders have no pending mutation — share one empty set instead of allocating per call.
+const EMPTY_PENDING_EPISODE_KEYS: ReadonlySet<string> = new Set();
+
 interface DetailsEpisodeStateArgs {
   mediaId: string;
   episodes?: readonly Episode[];
@@ -24,11 +27,13 @@ export function getDetailsEpisodeState({
   unairedEpisodeKeys,
   nextUpEpisode,
 }: DetailsEpisodeStateArgs) {
-  const pendingEpisodeKeys = new Set(
-    pendingWatchedMutation?.episodes.map((ep) =>
-      episodeProgressKey(mediaId, ep.season, ep.episode),
-    ),
-  );
+  const pendingEpisodeKeys = pendingWatchedMutation
+    ? new Set(
+        pendingWatchedMutation.episodes.map((ep) =>
+          episodeProgressKey(mediaId, ep.season, ep.episode),
+        ),
+      )
+    : EMPTY_PENDING_EPISODE_KEYS;
   const seasonWatchedCounts = new Map<number, number>();
   const seasonWatchTargets: Episode[] = [];
   const seasonUnwatchTargets: Episode[] = [];

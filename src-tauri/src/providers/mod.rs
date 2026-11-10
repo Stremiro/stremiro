@@ -36,10 +36,14 @@ pub(crate) fn usize_to_u64_saturating(value: usize) -> u64 {
 /// Trim + char-bound + empty-reject for untrusted provider fields.
 pub(crate) fn trim_to_max(value: &str, max_chars: usize) -> Option<String> {
     let trimmed = value.trim();
-    let end = trimmed
-        .char_indices()
-        .nth(max_chars)
-        .map_or(trimmed.len(), |(index, _)| index);
+    let end = if trimmed.len() <= max_chars {
+        trimmed.len()
+    } else {
+        trimmed
+            .char_indices()
+            .nth(max_chars)
+            .map_or(trimmed.len(), |(index, _)| index)
+    };
     // Truncation can expose trailing whitespace; trimming it keeps normalization idempotent.
     let trimmed = trimmed[..end].trim_end();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -305,18 +309,12 @@ pub(crate) mod addon_manifest;
 pub(crate) mod addon_resource;
 pub(crate) mod addons;
 pub(crate) mod anime_ids;
+pub(crate) mod anime_recommendations;
 pub(crate) mod enrichment;
 pub(crate) mod fetch_policy;
 pub(crate) mod skip_times;
 pub(crate) mod title_credits;
 pub(crate) mod ttl_cache;
-
-pub(crate) fn normalize_media_year(
-    year: Option<String>,
-    release_info: Option<String>,
-) -> Option<String> {
-    bound_optional(year, usize::MAX).or_else(|| bound_optional(release_info, usize::MAX))
-}
 
 /// First 4-ASCII-digit run at or after `start`, with the run's start index so
 /// a caller can resume one byte later ("1232019" skips 1232, finds 2019).

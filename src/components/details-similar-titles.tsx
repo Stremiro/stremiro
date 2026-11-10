@@ -56,7 +56,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
         <HorizontalMediaRail<MediaItem>
           title='More like this'
           contentInsetsClassName={contentInsetsClassName}
-          sectionClassName='pt-10 animate-in fade-in duration-500 motion-reduce:animate-none'
+          sectionClassName='pt-6 animate-in fade-in duration-500 motion-reduce:animate-none'
           railId={`similar:${item.type}:${item.id}`}
           items={titles ?? EMPTY_TITLES}
           isLoading={showSkeleton}
@@ -65,7 +65,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
           renderItem={renderMediaCardRailItem}
         />
       ) : showRetry ? (
-        <div className={`${contentInsetsClassName} pt-10`}>
+        <div className={`${contentInsetsClassName} pt-6`}>
           <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>
             More like this
           </h2>

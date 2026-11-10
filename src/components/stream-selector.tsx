@@ -44,6 +44,7 @@ import {
 } from '@/components/stream-selector-panel';
 import { InlineMenu } from '@/components/inline-menu';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { IndeterminateBar } from '@/components/ui/skeleton';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useInlineMenu } from '@/hooks/use-inline-menu';
 import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
@@ -122,6 +123,7 @@ interface StreamItemProps {
   tabIndex: number;
 }
 
+// The virtualizer bypasses compiler caching; keep unchanged rows out of scroll renders.
 const StreamItem = memo(function StreamItem({
   canBrowsePack,
   stream,
@@ -142,7 +144,7 @@ const StreamItem = memo(function StreamItem({
   const menu = useInlineMenu({ rootRef, returnFocus: () => rowRef.current });
   const { presentation } = stream;
   const isPlayable = presentation.isInstantlyPlayable;
-  const matchBadges = stream.matchBadgeKinds.map((kind) => ({ kind, ...MATCH_BADGES[kind] }));
+  const matchBadges = stream.matchBadgeKinds;
   const deliveryTile = DELIVERY_TILES[presentation.deliveryKind];
 
   const metaParts: { key: string; className?: string; text: string }[] = [];
@@ -164,7 +166,9 @@ const StreamItem = memo(function StreamItem({
   const matchTier = stream.matchTier;
   const recommendationReasons = buildStreamReasonChips(stream);
   const matchAria =
-    matchBadges.length > 0 ? `, ${matchBadges.map((badge) => badge.label).join(', ')}` : '';
+    matchBadges.length > 0
+      ? `, ${matchBadges.map((kind) => MATCH_BADGES[kind].label).join(', ')}`
+      : '';
   const playableAria = isPlayable ? '' : ', P2P source, not playable in this build';
   const DeliveryIcon = deliveryTile.Icon;
   const opensPack = canBrowsePack && isPlayable && stream.presentation.isBatch;
@@ -248,7 +252,7 @@ const StreamItem = memo(function StreamItem({
             aria-hidden='true'
             className='pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'
           >
-            <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+            <IndeterminateBar className='bg-(--accent-prog)' />
           </div>
         </>
       )}
@@ -361,11 +365,12 @@ const StreamItem = memo(function StreamItem({
 
           {(opensPack || matchBadges.length > 0 || recommendationReasons.length > 0) && (
             <div className='mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1'>
-              {matchBadges.map((badge) => {
-                const BadgeIcon = MATCH_BADGE_ICONS[badge.kind];
+              {matchBadges.map((kind) => {
+                const badge = MATCH_BADGES[kind];
+                const BadgeIcon = MATCH_BADGE_ICONS[kind];
                 return (
                   <span
-                    key={badge.kind}
+                    key={kind}
                     className={cn(
                       'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
                       badge.cls,
@@ -405,21 +410,20 @@ const StreamItem = memo(function StreamItem({
             </div>
           )}
         </div>
-        {isPlayable && stream.presentation.deliveryKind !== 'p2p' && (
-          <button
-            type='button'
-            aria-label='Copy stream URL'
-            aria-disabled={disabled || undefined}
-            tabIndex={menu.presence.mounted ? -1 : tabIndex}
-            onClick={(event) => {
-              event.stopPropagation();
-              if (!disabled) void onCopyLink(stream);
-            }}
-            className='pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 opacity-0 transition-[color,background-color,opacity] duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 group-hover:opacity-100 group-focus-within:opacity-100'
-          >
-            <Copy aria-hidden='true' className='h-3.5 w-3.5' />
-          </button>
-        )}
+        <button
+          type='button'
+          aria-label={copyLabel}
+          title={copyLabel}
+          aria-disabled={disabled || undefined}
+          tabIndex={menu.presence.mounted ? -1 : tabIndex}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!disabled) void onCopyLink(stream);
+          }}
+          className='pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 opacity-0 transition-[color,background-color,opacity] duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none'
+        >
+          <Copy aria-hidden='true' className='h-3.5 w-3.5' />
+        </button>
       </div>
       <InlineMenu
         presence={menu.presence}
@@ -476,7 +480,6 @@ interface StreamVirtualListProps {
 }
 
 // Container-virtualized rows: a 500-row payload costs ~15 mounted rows.
-// Plain function — useVirtualizer helpers are unmemoizable by design.
 function StreamVirtualList({
   canBrowsePack,
   streams,
@@ -492,13 +495,15 @@ function StreamVirtualList({
   sortMode,
   resetKey,
 }: StreamVirtualListProps) {
+  // The compiler caches getVirtualItems() on the stable virtualizer instance, freezing rows on scroll.
+  'use no memo';
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const streamIndexByKey = useMemo(() => {
     const indices = new Map<string, number>();
     streams.forEach((stream, index) => indices.set(stream.streamKey, index));
     return indices;
   }, [streams]);
-  const getItemKey = useCallback((index: number) => streams[index].streamKey, [streams]);
+  const getItemKey = useCallback((index: number) => streams[index]!.streamKey, [streams]);
 
   // Roving tabindex: one tab stop for the list; lands on the playing row, else last-used, else the top row (Rust ranks playable first).
   const [focusedStreamKey, setFocusedStreamKey] = useState(() => {
@@ -718,8 +723,6 @@ export function StreamSelector({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchFocusPendingRef = useRef(false);
   const resultsFocusPendingRef = useRef(false);
-  const resultsMotionRef = useRef<HTMLDivElement | null>(null);
-  const previousViewRef = useRef({ sessionKey: '', resetKey: '' });
   const {
     absoluteEpisode,
     absoluteSeason,
@@ -739,6 +742,7 @@ export function StreamSelector({
     activeResolveFeedback,
     activeResolveKey,
     addonHealthMetrics,
+    batchCounts,
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
@@ -782,27 +786,6 @@ export function StreamSelector({
     getStartTime,
     target,
   });
-
-  useLayoutEffect(() => {
-    const previous = previousViewRef.current;
-    previousViewRef.current = { sessionKey: selectorSessionKey, resetKey: listResetKey };
-    if (
-      previous.sessionKey !== selectorSessionKey ||
-      !previous.resetKey ||
-      previous.resetKey === listResetKey ||
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    )
-      return;
-    // Animate the viewport, not row mounts: progressive snapshots and scrolling never replay it or disturb focus.
-    const animation = resultsMotionRef.current?.animate(
-      [
-        { opacity: 0, transform: 'translateY(4px)' },
-        { opacity: 1, transform: 'translateY(0)' },
-      ],
-      { duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
-    );
-    return () => animation?.cancel();
-  }, [listResetKey, selectorSessionKey]);
 
   const focusResults = () =>
     dialogContentRef.current
@@ -908,7 +891,7 @@ export function StreamSelector({
     packError ?? (packRetry?.selection === packSelection ? packRetry?.error : null);
   const packRows =
     packRowModel?.map((row): PackListRow =>
-      row.type === 'header' ? row : { type: 'episode', episode: allPackEpisodes[row.index] },
+      row.type === 'header' ? row : { type: 'episode', episode: allPackEpisodes[row.index]! },
     ) ?? EMPTY_PACK_ROWS;
 
   const handleStreamPress = (stream: AddonStream) => {
@@ -1022,7 +1005,8 @@ export function StreamSelector({
             <StreamListOfflineState />
           ) : streams.length === 0 && (!hasEnabledAddons || streamSourceCount === 0) ? (
             <StreamListNoAddonsState
-              metadataOnly={hasEnabledAddons}
+              addonsEnabled={hasEnabledAddons}
+              mediaLabel={mediaTypeLabel(type)}
               onManageAddons={handleManageAddons}
             />
           ) : streams.length > 0 ? (
@@ -1035,10 +1019,12 @@ export function StreamSelector({
               {healthStrip}
 
               <StreamFilterToolbar
+                batchCounts={batchCounts}
                 filteredCount={sortedStreams.length}
                 filters={filters}
                 hasActiveFilter={hasActiveFilter}
                 isResolving={isAnyResolving}
+                isSearchPending={isSearchPending}
                 onFiltersChange={setFilters}
                 onResetFilters={resetFilters}
                 onSearchQueryChange={setSearchQuery}
@@ -1054,15 +1040,14 @@ export function StreamSelector({
               />
 
               {streamStats.playableCount === 0 && (
-                <StreamP2pNotice p2pCount={streamStats.p2pCount} />
+                <StreamP2pNotice
+                  p2pCount={streamStats.p2pCount}
+                  onManageAddons={handleManageAddons}
+                />
               )}
 
-              {sortedStreams.length > 0 ? (
-                <div
-                  ref={resultsMotionRef}
-                  className='min-h-0 flex-1'
-                  aria-busy={isSearchPending || undefined}
-                >
+              <div className='min-h-0 flex-1' aria-busy={isSearchPending || undefined}>
+                {sortedStreams.length > 0 ? (
                   <StreamVirtualList
                     key={selectorSessionKey}
                     resetKey={listResetKey}
@@ -1079,20 +1064,19 @@ export function StreamSelector({
                     onInitialFocusDone={handleInitialFocusDone}
                     sortMode={filters.sort}
                   />
-                </div>
-              ) : (
-                <StreamListFilteredEmptyState
-                  isSearchPending={isSearchPending}
-                  isResolving={isAnyResolving}
-                  searchQuery={searchQuery}
-                  // A true clear, not resetFilters — the session default (`batch: 'episodes'` for series) can itself be the emptying filter.
-                  onClearFilters={() => {
-                    searchFocusPendingRef.current = true;
-                    setSearchQuery('');
-                    setFilters({ ...DEFAULT_FILTERS });
-                  }}
-                />
-              )}
+                ) : (
+                  <StreamListFilteredEmptyState
+                    isSearchPending={isSearchPending}
+                    isResolving={isAnyResolving}
+                    searchQuery={searchQuery}
+                    onClearFilters={() => {
+                      searchFocusPendingRef.current = true;
+                      setSearchQuery('');
+                      setFilters({ ...DEFAULT_FILTERS });
+                    }}
+                  />
+                )}
+              </div>
             </div>
           ) : (
             <StreamListEmptyState

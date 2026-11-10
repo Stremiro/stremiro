@@ -88,7 +88,7 @@ impl PlaybackStreamFamilySnapshot {
 pub(crate) struct StreamOutcomeReport {
     pub media_id: String,
     /// Canonical history-namespace type (`movie`/`series`) — `anime` folds to `series` upstream.
-    pub media_type: &'static str,
+    pub media_type: String,
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub source_id: Option<String>,
@@ -644,9 +644,10 @@ impl PlaybackStateService {
             );
         }
 
-        if let Some(scope_key) =
-            playback_title_scope_key(Some(report.media_type), Some(report.media_id.as_str()))
-        {
+        if let Some(scope_key) = playback_title_scope_key(
+            Some(report.media_type.as_str()),
+            Some(report.media_id.as_str()),
+        ) {
             if let Some(stream_family) = report
                 .stream_family
                 .as_deref()

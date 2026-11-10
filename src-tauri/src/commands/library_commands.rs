@@ -56,7 +56,8 @@ pub(super) fn resolve_library_items(
         return Ok(Vec::new());
     }
     let selected: HashSet<&str> = ids.iter().map(String::as_str).collect();
-    let mut library = read_library_selection(store, load_library_index(store)?, &selected);
+    let mut library =
+        read_library_selection(store, load_index(store, LIBRARY_INDEX_KEY)?, &selected);
     // Titles removed elsewhere since selection are skipped; only an all-stale
     // selection fails, so callers never report success for zero matches.
     let items: Vec<MediaItem> = ids.iter().filter_map(|id| library.remove(id)).collect();
@@ -270,9 +271,16 @@ pub fn search_titles(titles: Vec<String>, query: String) -> Result<Vec<u32>, Str
         return Ok((0..titles.len() as u32).collect());
     }
     Ok(titles
-        .iter()
+        .into_iter()
         .enumerate()
-        .filter_map(|(index, title)| matching_title_key(title, &query).map(|_| index as u32))
+        .filter_map(|(index, mut title)| {
+            if title.is_ascii() {
+                title.make_ascii_lowercase();
+            } else {
+                title = title.to_lowercase();
+            }
+            title.contains(&query).then_some(index as u32)
+        })
         .collect())
 }
 
@@ -418,7 +426,7 @@ mod tests {
     use super::super::store_helpers::watch_status_item_key;
     use super::super::WATCH_STATUS_INDEX_KEY;
     use super::*;
-    use crate::test_helpers::{test_media_item, test_store};
+    use crate::test_helpers::{test_media_item, test_store, test_store_pair};
 
     #[test]
     fn selected_library_reads_preserve_snapshot_merging_without_repairing_the_store() {
@@ -470,6 +478,8 @@ mod tests {
         assert_eq!(actual["selected"].title, "Alpha");
         assert_eq!(actual["selected"].description, donor.description);
         assert_eq!(actual["selected"].primary_year, Some(2024));
+        let resolved = resolve_library_items(&fixture.store, vec!["selected".into()]).unwrap();
+        assert_eq!(json!(resolved[0]), json!(actual["selected"]));
         assert!(read_library_selection(
             &fixture.store,
             load_index(&fixture.store, LIBRARY_INDEX_KEY).unwrap(),
@@ -483,16 +493,25 @@ mod tests {
 
     #[test]
     fn title_search_preserves_order_unicode_and_javascript_trim() {
-        let titles: Vec<_> = ["ÄPFEL", "東京: Dawn", "äpfel again", "İSTANBUL", "ΟΣ", ""]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        let titles: Vec<_> = [
+            "ÄPFEL",
+            "東京: Dawn",
+            "äpfel again",
+            "İSTANBUL",
+            "ΟΣ",
+            "",
+            "THE Example",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         for (query, expected) in [
             ("\u{feff} ÄP \u{3000}", vec![0, 2]),
             ("東京:", vec![1]),
             ("i\u{307}", vec![3]),
             ("ος", vec![4]),
-            ("\u{feff}\t\u{2028}", vec![0, 1, 2, 3, 4, 5]),
+            ("example", vec![6]),
+            ("\u{feff}\t\u{2028}", vec![0, 1, 2, 3, 4, 5, 6]),
             ("\u{85}äp\u{85}", vec![]),
             ("missing", vec![]),
         ] {
@@ -698,8 +717,7 @@ mod tests {
             serde_json::from_value(json!({"status": "invalid"})).unwrap(),
         )
         .is_err());
-        let library = test_store();
-        let statuses = test_store();
+        let (library, statuses) = test_store_pair();
         library.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
         library
             .store
@@ -721,8 +739,7 @@ mod tests {
 
     #[test]
     fn bulk_removal_counts_unique_existing_items_and_saves_each_domain_once() {
-        let library = test_store();
-        let statuses = test_store();
+        let (library, statuses) = test_store_pair();
         for id in ["a", "b", "c"] {
             library
                 .store
@@ -774,16 +791,71 @@ mod tests {
     }
 
     #[test]
+    fn bulk_removal_follows_normalized_row_identity_without_rewriting_survivors() {
+        let (library, statuses) = test_store_pair();
+        // Swapped keys and an additional alias still represent two titles.
+        for (key, id) in [("a", "b"), ("b", "a"), (" a ", " a ")] {
+            library
+                .store
+                .set(library_item_key(key), json!(test_media_item(id, "movie")));
+        }
+        library
+            .store
+            .set(LIBRARY_INDEX_KEY, json!(["a", "b", " a "]));
+        library
+            .store
+            .set(super::super::LIBRARY_STATUS_ADDED_KEY, json!(["a", "b"]));
+        statuses
+            .store
+            .set(WATCH_STATUS_INDEX_KEY, json!([" a ", "a", "b"]));
+        for id in [" a ", "a", "b"] {
+            statuses
+                .store
+                .set(watch_status_item_key(id), json!("watching"));
+        }
+        library.store.save().unwrap();
+        statuses.store.save().unwrap();
+        let survivor = library.store.get(library_item_key("a"));
+        assert_eq!(
+            remove_library_items(&library.store, &statuses.store, &["a".into()]).unwrap(),
+            1
+        );
+        assert_eq!(library.store.get(library_item_key("a")), survivor);
+        assert!(library.store.get(library_item_key("b")).is_none());
+        assert!(library.store.get(library_item_key(" a ")).is_none());
+        assert_eq!(
+            super::super::store_helpers::load_status_added_ids(&library.store),
+            ["b"]
+        );
+        let remaining = read_library_snapshot(&library.store).unwrap().items;
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains_key("b"));
+        assert_eq!(
+            read_watch_status_snapshot(&statuses.store).unwrap().items,
+            HashMap::from([("b".into(), "watching".into())])
+        );
+        assert_eq!(library.store.save_count(), 2);
+        assert_eq!(statuses.store.save_count(), 2);
+        assert_eq!(
+            remove_library_items(&library.store, &statuses.store, &["a".into()]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn bulk_removal_rejects_invalid_ids_without_partial_mutations() {
-        let library = test_store();
-        let statuses = test_store();
+        let (library, statuses) = test_store_pair();
         library.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
         library
             .store
             .set(library_item_key("a"), json!(test_media_item("a", "movie")));
         library.store.save().unwrap();
         let before = std::fs::read(&library.path).unwrap();
-        for invalid in ["".to_string(), "undefined".to_string(), "x".repeat(257)] {
+        for invalid in [
+            "".to_string(),
+            "undefined".to_string(),
+            "x".repeat(crate::commands::MEDIA_ID_MAX_CHARS + 1),
+        ] {
             let result = normalize_bulk_ids(vec!["a".into(), invalid])
                 .and_then(|ids| remove_library_items(&library.store, &statuses.store, &ids));
             assert!(result.is_err());
@@ -796,8 +868,7 @@ mod tests {
 
     #[test]
     fn bulk_removal_validates_both_indexes_before_read_repair_or_deletes() {
-        let library = test_store();
-        let statuses = test_store();
+        let (library, statuses) = test_store_pair();
         library
             .store
             .set(LIBRARY_INDEX_KEY, json!(["a", "missing"]));

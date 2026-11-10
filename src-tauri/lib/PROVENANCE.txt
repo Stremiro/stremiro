@@ -1,4 +1,4 @@
-Native runtime pair provenance — status 2026-11-06
+Native runtime pair provenance — status 2026-11-10
 =====================================================
 
 The two DLLs in this directory are the packaged libmpv pair
@@ -8,7 +8,7 @@ locked, or diverges from a dev-time copy at src-tauri/.
 That packaging consistency check does not authenticate either binary.
 Known TLS/origin-isolation defects remain in this native runtime.
 mpv provenance and distribution obligations are still unresolved; the
-v0.9.3-beta release uses these unchanged binaries, not a hardened rebuild.
+v0.9.4-beta release uses these unchanged binaries, not a hardened rebuild.
 
 libmpv-2.dll
   Product      : mpv (libmpv client API)

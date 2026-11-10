@@ -32,43 +32,32 @@ fn title_cleanup_preserves_names_and_bounds_visible_characters() {
 
 #[test]
 fn extract_primary_year_reads_first_valid_year() {
-    assert_eq!(extract_primary_year(Some("2019-04-06")), Some(2019));
-    assert_eq!(extract_primary_year(Some("Premiered in 2021")), Some(2021));
-    assert_eq!(extract_primary_year(Some("Unknown")), None);
-    assert_eq!(extract_primary_year(Some("Café 2019")), Some(2019));
-    assert_eq!(extract_primary_year(Some("日本 2021-04-06")), Some(2021));
-    assert_eq!(extract_primary_year(Some("Été 1999")), Some(1999));
-    assert_eq!(extract_primary_year(Some("🙂 2018")), Some(2018));
-    assert_eq!(extract_primary_year(Some("1232019")), Some(2019));
-    assert_eq!(extract_primary_year(Some("１２３４")), None);
-    assert_eq!(extract_primary_year(Some("12")), None);
-    assert_eq!(extract_primary_year(Some("1888")), None);
-    assert_eq!(extract_primary_year(Some("2101")), None);
-}
-
-#[test]
-fn build_display_year_uses_first_valid_numeric_year() {
-    assert_eq!(
-        build_display_year(Some("2019-04-06")).as_deref(),
-        Some("2019")
-    );
-    assert_eq!(
-        build_display_year(Some("2019-2020")).as_deref(),
-        Some("2019")
-    );
-    assert_eq!(build_display_year(Some("Unknown")), None);
-}
-
-#[test]
-fn normalize_media_item_sets_display_year() {
-    let item = normalize_media_item(MediaItem {
-        title: "Demo".to_string(),
-        year: Some("2024-10-01".to_string()),
-        ..test_media_item("tt1", "movie")
-    });
-
-    assert_eq!(item.primary_year, Some(2024));
-    assert_eq!(item.display_year.as_deref(), Some("2024"));
+    for (input, expected) in [
+        ("2019-04-06", Some(2019)),
+        ("2019-2020", Some(2019)),
+        ("2024-10-01", Some(2024)),
+        ("Premiered in 2021", Some(2021)),
+        ("Unknown", None),
+        ("Café 2019", Some(2019)),
+        ("日本 2021-04-06", Some(2021)),
+        ("Été 1999", Some(1999)),
+        ("🙂 2018", Some(2018)),
+        ("1232019", Some(2019)),
+        ("１２３４", None),
+        ("12", None),
+        ("1888", None),
+        ("2101", None),
+    ] {
+        assert_eq!(extract_primary_year(Some(input)), expected, "{input}");
+        let display = expected.map(|year| year.to_string());
+        assert_eq!(build_display_year(Some(input)), display, "{input}");
+        let item = normalize_media_item(MediaItem {
+            year: Some(input.to_string()),
+            ..test_media_item("tt1", "movie")
+        });
+        assert_eq!(item.primary_year, expected, "{input}");
+        assert_eq!(item.display_year, display, "{input}");
+    }
 }
 
 #[test]
@@ -144,6 +133,21 @@ fn normalize_media_details_normalizes_years_and_episodes() {
             .and_then(|episode| episode.release_date.as_deref()),
         Some("2013-04-07")
     );
+}
+
+#[test]
+fn metadata_types_are_canonical_for_details_playback_consumers() {
+    for (raw, expected) in [
+        (" Movie ", "movie"),
+        (" SERIES ", "series"),
+        ("AnImE", "anime"),
+    ] {
+        let details = normalize_media_details(test_details("custom-id", raw));
+        assert_eq!(details.type_, expected);
+        let card = crate::providers::addon_resource::meta_for_shape(&details, false);
+        assert_eq!(card.type_, expected);
+        assert_eq!(details.is_anime, expected == "anime");
+    }
 }
 
 #[test]
@@ -350,7 +354,7 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
         ..test_episode(&"e".repeat(600), 1, number)
     };
     let details = MediaDetails {
-        imdb_id: Some("i".repeat(900)),
+        imdb_id: Some("i".repeat(crate::commands::MEDIA_ID_MAX_CHARS + 100)),
         title: "Series".to_string(),
         year: Some("2024".to_string()),
         rating: Some("r".repeat(500)),
@@ -370,7 +374,10 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
 
     let normalized = normalize_media_details(details);
 
-    assert_eq!(normalized.imdb_id.as_deref().map(str::len), Some(256));
+    assert_eq!(
+        normalized.imdb_id.as_deref().map(str::len),
+        Some(crate::commands::MEDIA_ID_MAX_CHARS)
+    );
     assert_eq!(normalized.rating, None);
     assert_eq!(normalized.cast.as_ref().map(Vec::len), Some(64));
     let directors = normalized.directors.unwrap();

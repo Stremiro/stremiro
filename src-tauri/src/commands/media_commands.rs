@@ -2,7 +2,7 @@ use super::{
     addon_registry::SourcedAddonSubtitle,
     episode_navigation::build_source_episode_coordinates,
     js_trim,
-    media_normalization::with_requested_media_id,
+    media_normalization::{normalize_media_details, with_requested_media_id},
     normalize_media_id, normalize_stream_media_type, normalize_watch_progress_type,
     playback_state::{PlaybackEpisodeMappingSnapshot, PlaybackStateService},
     streaming_helpers::{build_stream_query_ids, push_bounded_error},
@@ -83,13 +83,23 @@ fn episode_search_indices(query: &str, episodes: &[EpisodeSearchFields]) -> Vec<
             Some((Some(season), episode))
         });
     let numeric_query = query.bytes().all(|byte| byte.is_ascii_digit());
+    let mut digits = String::new();
+    let mut digits_match = |episode: u32| {
+        if !numeric_query {
+            return false;
+        }
+        use std::fmt::Write as _;
+        digits.clear();
+        let _ = write!(digits, "{episode}");
+        digits.contains(&query)
+    };
     episodes
         .iter()
         .enumerate()
         .filter_map(|(index, episode)| {
             (coordinates.is_some_and(|(season, number)| {
                 episode.episode == number && season.is_none_or(|season| episode.season == season)
-            }) || (numeric_query && episode.episode.to_string().contains(&query))
+            }) || digits_match(episode.episode)
                 || episode
                     .title
                     .as_ref()
@@ -189,7 +199,7 @@ async fn fetch_media_schedule_inner(
     media_type: &str,
     id: &str,
 ) -> Result<MediaSchedule, String> {
-    let include_episodes = media_type != "movie";
+    let include_episodes = matches!(media_type, "series" | "anime");
 
     let details = fetch_media_details_shared_inner(app, client, media_type, id).await?;
     Ok(build_media_schedule(&details, id, include_episodes))
@@ -239,7 +249,7 @@ async fn fetch_media_details_shared_inner(
     // `series`, so one mapping owns both.
     let media_type = normalize_watch_progress_type(media_type)
         .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?;
-    super::addon_registry::fetch_meta_details(app, client, media_type, id).await
+    super::addon_registry::fetch_meta_details(app, client, &media_type, id).await
 }
 
 pub(crate) async fn fetch_media_details_inner(
@@ -262,7 +272,7 @@ fn normalize_lookup_id_type(
     media_type: &str,
     id: &str,
     context: &str,
-) -> Result<(&'static str, String), String> {
+) -> Result<(String, String), String> {
     let id = normalize_media_id(id).ok_or_else(|| "Media ID is required.".to_string())?;
     let media_type = normalize_stream_media_type(media_type, Some(&id))
         .ok_or_else(|| format!("Invalid media type for {context}."))?;
@@ -282,28 +292,38 @@ pub async fn get_media_details(
     let include_episodes = include_episodes.unwrap_or(true);
 
     let mut details =
-        fetch_media_details_inner(&app, &client, media_type, &id, include_episodes).await?;
+        fetch_media_details_inner(&app, &client, &media_type, &id, include_episodes).await?;
+    client
+        .repair_episode_artwork(&mut details, normalize_media_details)
+        .await;
 
     if let Some(episodes) = details.episodes.take() {
         let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
-        let cache_id = id.clone();
-        let fallback_owned = fallback_lookup_id.to_string();
-        // Retain the payload across a failed hop without deep-cloning it on success.
-        let episodes = Arc::new(episodes);
-        let cache_episodes = Arc::clone(&episodes);
-        let snapshots = playback_state
-            .run_store_op(&app, move |service, app| {
-                service.cache_episode_mappings(
-                    app,
-                    media_type,
-                    &cache_id,
-                    Some(fallback_owned.as_str()),
-                    &cache_episodes,
-                )
-            })
-            .await;
+        // Mapping reads are gated to series|anime — writes for other types are
+        // dead rows competing with live entries, so enrich off the fallback only.
+        let (episodes, snapshots) = if matches!(media_type.as_str(), "series" | "anime") {
+            let cache_id = id.clone();
+            let fallback_owned = fallback_lookup_id.to_string();
+            // Retain the payload across a failed hop without deep-cloning it on success.
+            let episodes = Arc::new(episodes);
+            let cache_episodes = Arc::clone(&episodes);
+            let snapshots = playback_state
+                .run_store_op(&app, move |service, app| {
+                    service.cache_episode_mappings(
+                        app,
+                        &media_type,
+                        &cache_id,
+                        Some(fallback_owned.as_str()),
+                        &cache_episodes,
+                    )
+                })
+                .await;
+            (Arc::unwrap_or_clone(episodes), snapshots)
+        } else {
+            (episodes, Ok(None))
+        };
         details.episodes = Some(enrich_episode_targets(
-            Arc::unwrap_or_clone(episodes),
+            episodes,
             fallback_lookup_id,
             snapshots,
         ));
@@ -378,7 +398,7 @@ pub async fn get_details_prefetch_bundle(
     // `get_title_watch_progress` performs so donor merge scores identically.
     let progress_id = id.clone();
     let (details, loaded) = tokio::join!(
-        fetch_media_details_inner(&app, &client, media_type, &id, false),
+        fetch_media_details_inner(&app, &client, &media_type, &id, false),
         load_entries_with_source_health(&app, playback_state.inner(), move |service, app| {
             service.load_resume_entries_for_media_ids(app, &[&progress_id])
         })
@@ -405,7 +425,7 @@ pub async fn get_addon_subtitles(
 ) -> Result<Vec<SourcedAddonSubtitle>, String> {
     let (effective_type, query_ids) = subtitle_lookup_ids(&media_type, &id, season, episode)?;
 
-    super::addon_registry::fetch_addon_subtitles(&app, &client, effective_type, &query_ids).await
+    super::addon_registry::fetch_addon_subtitles(&app, &client, &effective_type, &query_ids).await
 }
 
 fn subtitle_lookup_ids(
@@ -413,11 +433,11 @@ fn subtitle_lookup_ids(
     id: &str,
     season: Option<u32>,
     episode: Option<u32>,
-) -> Result<(&'static str, Vec<String>), String> {
+) -> Result<(String, Vec<String>), String> {
     let (media_type, id) =
         normalize_lookup_id_type(js_trim(media_type), js_trim(id), "subtitle lookup")?;
     // Subtitle IDs follow stream IDs; anime resolves through series episodes.
-    let effective_type = super::media_type::addon_episode_lookup_type(media_type);
+    let effective_type = super::media_type::addon_episode_lookup_type(&media_type).to_string();
     // A single colon can be a namespace (kitsu:48316); only two numeric
     // trailing fields identify an already-scoped episode lookup.
     let episode_scoped = id.rsplit_once(':').is_some_and(|(prefix, episode)| {
@@ -430,7 +450,7 @@ fn subtitle_lookup_ids(
     let query_ids = if effective_type == "movie" || episode_scoped {
         vec![id]
     } else {
-        build_stream_query_ids(media_type, &id, season, episode, None)
+        build_stream_query_ids(&media_type, &id, season, episode, None)
     };
     Ok((effective_type, query_ids))
 }
@@ -510,7 +530,7 @@ async fn fetch_media_schedules_inner(
         }
 
         fetch_index_by_key.insert(request_key, normalized_requests.len());
-        normalized_requests.push((vec![request_type], media_type.to_string(), id));
+        normalized_requests.push((vec![request_type], media_type, id));
     }
 
     if normalized_requests.is_empty() {
@@ -631,18 +651,19 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
 ) -> Result<Option<PlaybackEpisodeMappingSnapshot>, String> {
     let (media_type, id) = normalize_lookup_id_type(media_type, id, "episode mapping lookup")?;
 
-    if media_type == "movie" {
+    if !matches!(media_type.as_str(), "series" | "anime") {
         return Ok(None);
     }
 
     // Single point read off the async worker.
     let cached = {
+        let media_type_owned = media_type.clone();
         let id_owned = id.clone();
         playback_state
             .run_store_op(&app, move |service, app| {
                 service.get_episode_mapping(
                     app,
-                    media_type,
+                    &media_type_owned,
                     &id_owned,
                     canonical_season,
                     canonical_episode,
@@ -654,7 +675,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
         return Ok(Some(mapping));
     }
 
-    let details = fetch_media_details_shared_inner(&app, client, media_type, &id).await?;
+    let details = fetch_media_details_shared_inner(&app, client, &media_type, &id).await?;
 
     if details.episodes.is_some() {
         let id_owned = id.clone();
@@ -662,7 +683,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
             .run_store_op(&app, move |service, app| {
                 service.cache_episode_mappings(
                     app,
-                    media_type,
+                    &media_type,
                     &id_owned,
                     Some(details.imdb_id.as_deref().unwrap_or(id_owned.as_str())),
                     details.episodes.as_deref().unwrap_or_default(),

@@ -31,6 +31,13 @@ let flushPendingPreferences: (() => Promise<void>) | null = null;
 let recentSearchTail: Promise<void> = Promise.resolve();
 const recentSearchGeneration = createGeneration();
 
+// Keep the snapshot distinct from the cleared module variable in React Compiler output.
+function takePendingPatch() {
+  const patch = pendingPatch;
+  pendingPatch = null;
+  return patch;
+}
+
 export function registerAppUiPreferenceFlusher(flush: () => void): () => void {
   preferenceFlushers.add(flush);
   return () => {
@@ -121,8 +128,7 @@ export function useAppUiPreferences<T = AppUiPreferences>(
       clearTimeout(flushTimer);
       flushTimer = null;
     }
-    const mergedPatch = pendingPatch;
-    pendingPatch = null;
+    const mergedPatch = takePendingPatch();
     flushPendingPreferences = null;
     if (!mergedPatch) return;
     const latest =

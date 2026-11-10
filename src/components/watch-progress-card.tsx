@@ -1,4 +1,3 @@
-import { memo } from 'react';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import { useToggleEpisodeWatched } from '@/hooks/use-media-library';
 import type { WatchProgress } from '@/lib/api';
@@ -7,7 +6,7 @@ import {
   getWatchProgressPercent,
   watchProgressMediaItem,
 } from '@/lib/history-playback';
-import { formatSeasonEpisode } from '@/lib/utils';
+import { formatSeasonEpisode, isSeriesLikeMediaType } from '@/lib/utils';
 import { MediaCard, type PlaybackIntent } from './media-card';
 
 interface WatchProgressCardProps {
@@ -26,7 +25,7 @@ interface WatchProgressCardProps {
 }
 
 // WatchProgress → MediaCard adapter for the resume rail and history grid.
-export const WatchProgressCard = memo(function WatchProgressCard({
+export function WatchProgressCard({
   item,
   playbackIntent,
   isNewEpisode,
@@ -53,7 +52,10 @@ export const WatchProgressCard = memo(function WatchProgressCard({
   const episode = item.absolute_episode ?? undefined;
   const subtitle = formatSeasonEpisode(season, episode) || undefined;
   const isEpisodeRow =
-    episodeActions && item.type_ !== 'movie' && season !== undefined && episode !== undefined;
+    episodeActions &&
+    isSeriesLikeMediaType(item.type_) &&
+    season !== undefined &&
+    episode !== undefined;
   const resolvedIntent = playbackIntent ?? (item.is_watched ? 'replay' : 'resume');
 
   return (
@@ -76,4 +78,4 @@ export const WatchProgressCard = memo(function WatchProgressCard({
       subtitle={subtitle}
     />
   );
-});
+}

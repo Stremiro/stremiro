@@ -19,7 +19,7 @@ use crate::providers::addon_manifest::{
 use crate::providers::addon_resource::AddonResourceClient;
 use crate::providers::addons::AddonTransport;
 use crate::providers::{build_provider_http_client, trim_to_max, ADDON_URL_INVALID_MESSAGE};
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream::{self, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -353,45 +353,31 @@ pub(super) async fn classify_missing_addon_capabilities(
 ) -> Result<Vec<AddonConfig>, String> {
     let mut classified = configs;
 
-    let pending: Vec<_> = classified
-        .iter()
-        .enumerate()
-        .filter(|(_, config)| {
-            (require_valid_manifest || config.enabled) && config.needs_classification()
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let snapshots: Vec<_> = stream::iter(pending)
-        .map(|index| {
-            let url = &classified[index].url;
-            async move {
-                let snapshot =
-                    fetch_addon_manifest_snapshot(&CLASSIFY_CLIENT, url, require_valid_manifest)
-                        .await;
-                (index, snapshot)
-            }
-        })
-        .buffer_unordered(ADDON_CLASSIFY_CONCURRENCY)
-        .collect()
-        .await;
-
-    for (index, snapshot) in snapshots {
-        match snapshot {
-            Ok(snapshot)
-                if require_valid_manifest && snapshot_resource_kinds(&snapshot).is_empty() =>
+    let pending = classified.iter_mut().filter(|config| {
+        (require_valid_manifest || config.enabled) && config.needs_classification()
+    });
+    stream::iter(pending.map(Ok::<_, String>))
+        .try_for_each_concurrent(ADDON_CLASSIFY_CONCURRENCY, |config| async move {
+            match fetch_addon_manifest_snapshot(&CLASSIFY_CLIENT, &config.url, require_valid_manifest)
+                .await
             {
-                return Err(
-                    "This addon provides no supported catalogs, metadata, streams, or subtitles."
-                        .to_string(),
-                )
+                Ok(snapshot)
+                    if require_valid_manifest && snapshot_resource_kinds(&snapshot).is_empty() =>
+                {
+                    return Err(
+                        "This addon provides no supported catalogs, metadata, streams, or subtitles."
+                            .to_string(),
+                    );
+                }
+                Ok(snapshot) if snapshot_is_classified(&snapshot) => {
+                    config.capabilities = Some(snapshot);
+                }
+                Err(error) if require_valid_manifest => return Err(error),
+                Ok(_) | Err(_) => {}
             }
-            Ok(snapshot) if snapshot_is_classified(&snapshot) => {
-                classified[index].capabilities = Some(snapshot);
-            }
-            Err(error) if require_valid_manifest => return Err(error),
-            Ok(_) | Err(_) => {}
-        }
-    }
+            Ok(())
+        })
+        .await?;
 
     Ok(classified)
 }

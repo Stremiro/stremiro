@@ -119,28 +119,28 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
             alt=''
             loading='lazy'
             onError={onAddonLogoError}
-            className='h-9 w-9 shrink-0 object-contain drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)]'
+            className='h-8 w-8 shrink-0 object-contain drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)]'
           />
         ) : (
           <span
             aria-hidden='true'
-            className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.07] bg-linear-to-b from-white/[0.08] to-white/[0.02] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
+            className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-linear-to-b from-white/[0.08] to-white/[0.02] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
           >
             {addonMonogram(addon.name)}
           </span>
         )}
         <div className='min-w-0 flex-1'>
           <div className='flex min-w-0 items-center gap-2'>
-            <span title={addon.name} className='truncate text-[13.5px] font-medium text-zinc-100'>
+            <span title={addon.name} className='truncate text-[14px] font-medium text-zinc-100'>
               {addon.name}
             </span>
             {addon.version ? (
-              <span className='shrink-0 text-[11.5px] tabular-nums text-zinc-500'>
+              <span className='shrink-0 text-[12px] tabular-nums text-zinc-500'>
                 v{addon.version}
               </span>
             ) : null}
             {addon.pinned ? (
-              <span className='inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-white/[0.08] px-1.5 text-[10.5px] font-semibold leading-none text-zinc-400'>
+              <span className='inline-flex h-[18px] shrink-0 items-center rounded-[5px] border border-white/[0.08] px-1.5 text-[11px] font-semibold leading-none text-zinc-400'>
                 Default
               </span>
             ) : null}
@@ -148,7 +148,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
           {addon.description ? (
             <p
               title={addon.description}
-              className='mt-0.5 truncate text-[12px] leading-tight text-zinc-400'
+              className='mt-0.5 truncate text-[13px] leading-tight text-zinc-400'
             >
               {addon.description}
             </p>
@@ -159,7 +159,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
                 {addon.resources.map((resource) => (
                   <li
                     key={resource}
-                    className='inline-flex h-[18px] items-center rounded-[5px] border border-white/[0.08] bg-transparent px-1.5 text-[10.5px] font-semibold leading-none text-zinc-400'
+                    className='inline-flex h-[18px] items-center rounded-[5px] border border-white/[0.08] bg-transparent px-1.5 text-[11px] font-semibold leading-none text-zinc-400'
                   >
                     {ADDON_RESOURCE_LABELS[resource]}
                   </li>
@@ -169,7 +169,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
             <p
               data-selectable='true'
               title={addon.displayUrl}
-              className='min-w-0 flex-1 truncate font-mono text-[11px] leading-tight text-zinc-500'
+              className='min-w-0 flex-1 truncate font-mono text-[12px] leading-tight text-zinc-500'
             >
               {addon.displayUrl}
             </p>
@@ -266,7 +266,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
 }
 
 const ADDON_ROW_CLASS =
-  'group/row grid grid-cols-[24px_minmax(0,1fr)] items-center gap-x-3 gap-y-2 px-4 py-3.5 transition-colors hover:bg-white/[0.02] sm:flex sm:gap-3 sm:px-5';
+  'group/row grid grid-cols-[24px_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 px-4 py-3 transition-colors hover:bg-white/[0.02] sm:flex sm:gap-3 sm:px-6';
 
 function SortableAddonRow(props: Omit<AddonRowProps, 'handle'>) {
   const {
@@ -480,6 +480,7 @@ export function AddonSettings() {
     queryFn: () => api.inspectAddonUrl(debouncedNewUrl),
     enabled: debouncedNewUrl !== '',
     staleTime: Infinity,
+    gcTime: 0,
     retry: false,
   });
   // A verdict only describes the text on screen; mid-debounce there is none.
@@ -616,14 +617,14 @@ export function AddonSettings() {
                   if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleAddUrl();
                 }}
                 disabled={isWorking}
-                className='h-10 rounded-lg border-white/[0.08] bg-white/[0.04] pl-10 pr-3.5 font-mono text-[13px] transition-colors placeholder:text-zinc-600 focus-visible:border-(--accent-nav)/35 focus-visible:ring-1 focus-visible:ring-(--accent-nav)/25 focus-visible:ring-offset-0'
+                className='h-10 rounded-lg border-white/[0.08] bg-white/[0.04] pl-10 pr-3.5 font-mono text-[14px] transition-colors placeholder:text-zinc-600 focus-visible:border-(--accent-nav)/35 focus-visible:ring-1 focus-visible:ring-(--accent-nav)/25 focus-visible:ring-offset-0'
               />
             </div>
             <Button
               size='sm'
               onClick={handleAddUrl}
               disabled={!canSubmitNewAddon}
-              className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[13px] font-medium text-black hover:bg-zinc-200'
+              className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[14px] font-medium text-black hover:bg-zinc-200'
             >
               {saveMutation.isPending && saveMutation.variables?.kind === 'add' ? (
                 <Loader2 className='h-4 w-4 animate-spin motion-reduce:animate-none' />

@@ -30,7 +30,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { InlineMenu } from '@/components/inline-menu';
 import { useSearchParams } from 'react-router';
 import {
@@ -46,6 +46,7 @@ import {
 import { ViewToggle } from '@/components/ui/segmented-control';
 import { CollectionRowActions } from '@/components/collection-row-actions';
 import { RetryBanner } from '@/components/retry-banner';
+import { StatePanel } from '@/components/state-panel';
 import { SelectionCheck } from '@/components/watch-status-icon';
 import { useBulkRemoveFromList, useLists } from '@/hooks/use-media-library';
 import { useTitleSearch } from '@/hooks/use-item-search';
@@ -288,8 +289,8 @@ interface SortableItemRowProps {
   onToggleSelect: (id: string, shiftKey?: boolean) => void;
 }
 
-// memo: keystrokes re-render the view with the same item objects (structural sharing) — unaffected rows skip rendering.
-const SortableItemRow = memo(function SortableItemRow({
+// The compiler memoizes rows on stable item props (structural sharing) — keystrokes re-render the view but skip unchanged rows.
+function SortableItemRow({
   item,
   listId,
   viewMode,
@@ -506,7 +507,7 @@ const SortableItemRow = memo(function SortableItemRow({
       </Button>
     </div>
   );
-});
+}
 
 function ListItemsView({ list }: { list: UserList }) {
   const queryClient = useQueryClient();
@@ -813,28 +814,28 @@ function ListItemsView({ list }: { list: UserList }) {
           </div>
         )}
 
-        {effectiveSearch && filtered.length === 0 && (
-          <div className='flex flex-col items-center justify-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.015] px-6 py-12 text-center'>
-            <div className='flex h-10 w-10 items-center justify-center'>
-              <Search aria-hidden='true' className='h-6 w-6 text-zinc-600' />
-            </div>
-            <p className='text-[15px] font-semibold text-zinc-200'>No results</p>
-            <p className='w-full max-w-xs text-[13px] leading-relaxed text-zinc-500 [overflow-wrap:anywhere]'>
-              Nothing in this list matches &ldquo;{effectiveSearch}&rdquo;.
-            </p>
-            <Button
-              size='sm'
-              variant='ghost'
-              className='h-8 text-xs text-zinc-400'
-              onClick={() => {
-                setSearch('');
-                setVisibleLimit(LIST_ITEMS_PAGE_SIZE);
-                searchInputRef.current?.focus({ preventScroll: true });
-              }}
-            >
-              Clear search
-            </Button>
-          </div>
+        {orderedItems.length > 0 && effectiveSearch && filtered.length === 0 && (
+          <StatePanel
+            icon={<Search aria-hidden='true' className='h-6 w-6 text-zinc-600' />}
+            title='No results'
+            description={<>Nothing in this list matches &ldquo;{effectiveSearch}&rdquo;.</>}
+            descriptionClassName='text-[13px] text-zinc-500'
+            className='rounded-lg border border-white/[0.06] bg-white/[0.015] px-6 py-12'
+            action={
+              <Button
+                size='sm'
+                variant='ghost'
+                className='h-8 text-xs text-zinc-400'
+                onClick={() => {
+                  setSearch('');
+                  setVisibleLimit(LIST_ITEMS_PAGE_SIZE);
+                  searchInputRef.current?.focus({ preventScroll: true });
+                }}
+              >
+                Clear search
+              </Button>
+            }
+          />
         )}
       </div>
       {addTitlesOpen && (

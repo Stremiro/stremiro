@@ -13,11 +13,12 @@ use super::language::build_mpv_language_selection_options;
 use super::player_track_commands::{mpv_property, property_flag};
 use super::streaming_helpers::parse_playback_url;
 use crate::providers::fetch_policy::same_origin_for_proxy_headers;
+use crate::providers::lock_or_recover;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{command, AppHandle, Manager, Window};
 use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
 
@@ -67,9 +68,7 @@ fn is_unmute_value(value: &Value) -> bool {
 static MPV_STREAM_HEADER_FIELDS: Mutex<String> = Mutex::new(String::new());
 
 fn stream_header_fields() -> std::sync::MutexGuard<'static, String> {
-    MPV_STREAM_HEADER_FIELDS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    lock_or_recover(&MPV_STREAM_HEADER_FIELDS)
 }
 
 fn remember_stream_header_fields(name: &str, value: &Value) {

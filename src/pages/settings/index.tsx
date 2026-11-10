@@ -29,12 +29,13 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { ariaKeyShortcuts, formatBindingKey, PLAYER_ACTIONS } from '@/lib/player-keybindings';
+import { isKeyCaptureTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import {
   SUBTITLE_COLOR_OPTIONS,
   SUBTITLE_EDGE_OPTIONS,
   SUBTITLE_FONT_OPTIONS,
 } from '@/lib/player-track-utils';
-import { cn, pluralize, scrollBehavior } from '@/lib/utils';
+import { cn, ICON_CHIP_CLASS, pluralize, scrollBehavior } from '@/lib/utils';
 import { AppearanceSettings, TINT_TARGETS } from './appearance';
 import { settingsControlId, SettingsBody, SettingsCard } from './chrome';
 import { DataSection } from './data';
@@ -62,223 +63,261 @@ interface NavItem {
   component: ComponentType;
 }
 
+const NAV_GROUPS = [
+  {
+    id: 'app',
+    caption: 'App',
+    items: [
+      {
+        id: 'general',
+        component: GeneralSettings,
+        label: 'General',
+        icon: SlidersHorizontal,
+        description: 'Start page, launch at login and tray behavior.',
+        controls: [
+          {
+            label: 'Start page',
+            keywords: `Where Stremiro opens. ${START_PAGES.map((page) => page.label).join(' ')}`,
+          },
+          {
+            label: 'Launch at login',
+            keywords: 'Open Stremiro when you sign in. Startup autostart',
+          },
+          {
+            label: 'Start minimized',
+            keywords: 'Login launches start in the system tray. Manual launches stay visible.',
+          },
+          {
+            label: 'Close to tray',
+            keywords: 'Keep running in the tray when the window closes.',
+          },
+          {
+            label: 'Minimize to tray',
+            keywords: 'Hide to the tray instead of the taskbar. Hide to tray now',
+          },
+        ],
+      },
+      {
+        id: 'appearance',
+        component: AppearanceSettings,
+        label: 'Appearance',
+        icon: Palette,
+        description: 'Accent color, glow and tint targets.',
+        controls: [
+          {
+            label: 'Accent',
+            keywords: `Reset Soft Vivid Custom accent color hex Pick a custom color ${ACCENT_PRESET_LABELS.join(' ')}`,
+            target: 'setting-appearance-accent',
+          },
+          {
+            label: 'Glow',
+            keywords: 'Background glow intensity',
+            target: 'setting-appearance-glow',
+          },
+          ...TINT_TARGETS.map((target) => ({
+            label: target.label,
+            keywords: `Tint targets Off areas stay neutral ${target.description}`,
+          })),
+        ],
+      },
+    ],
+  },
+  {
+    id: 'watching',
+    caption: 'Watching',
+    items: [
+      {
+        id: 'playback',
+        component: PlaybackSettings,
+        label: 'Playback',
+        icon: Settings2,
+        description: 'Languages, audio, spoilers, auto-play and auto-skip.',
+        controls: [
+          {
+            label: 'Audio',
+            keywords:
+              "Languages preferred language Auto reuses this title's remembered choice, or lets the player choose.",
+          },
+          {
+            label: 'Subtitles',
+            keywords:
+              "Languages Off preferred language captions Auto reuses this title's remembered choice, or lets the player choose.",
+          },
+          {
+            label: 'Audio sync',
+            keywords:
+              'Delay offset seconds saved for all videos. Positive plays audio later; negative plays it earlier. Set to 0 to reset.',
+          },
+          {
+            label: 'Night mode',
+            keywords:
+              'Boost quiet audio and smooth volume changes for late-night watching. Saved for all videos; off keeps the original sound. volume normalization loud jumps listening',
+          },
+          {
+            label: 'Subtitle appearance',
+            keywords: `Plain-text subtitles saved for all videos. Styled ASS subtitles keep their own look. Reset font color edge bold italic captions ${[
+              ...SUBTITLE_FONT_OPTIONS,
+              ...SUBTITLE_COLOR_OPTIONS,
+              ...SUBTITLE_EDGE_OPTIONS,
+            ]
+              .map((option) => option.label)
+              .join(' ')}`,
+          },
+          {
+            label: 'Load addon subtitles automatically',
+            keywords:
+              'When a stream has no subtitles in your preferred language, load a matching one from your addons. auto captions language',
+          },
+          {
+            label: 'Spoiler protection',
+            keywords: 'Blur unwatched episode thumbnails and descriptions.',
+          },
+          {
+            label: 'Trailer previews',
+            keywords: 'Play a muted trailer when hovering a title card.',
+          },
+          {
+            label: 'Auto-play next episode',
+            keywords: 'Count down and start the next episode automatically.',
+          },
+          { label: 'Next episode countdown', keywords: 'Seconds 5 8 10 15 30 auto-play timer' },
+          {
+            label: 'Hide controls after keyboard input',
+            keywords: 'Player controls overlay timeout Seconds 2 3 5 8 delay mouse inactivity',
+          },
+          {
+            label: 'Auto-skip intros & recaps',
+            keywords: 'Skip detected intros and recaps. Outros stay manual.',
+          },
+        ],
+      },
+      {
+        id: 'shortcuts',
+        component: ShortcutsSection,
+        label: 'Shortcuts',
+        icon: Keyboard,
+        description: 'Player, browse and Calendar keys.',
+        controls: [
+          {
+            label: 'Player shortcuts',
+            keywords:
+              'Customize keybindings Rebind key Reset all Click a key to rebind it, up to 2 per action. Esc cancels, Backspace removes.',
+            target: 'setting-player-shortcuts',
+          },
+          ...PLAYER_ACTIONS.map((action) => ({
+            label: action.label,
+            keywords: `Player shortcuts ${action.group}`,
+            target: `setting-shortcut-${action.id}`,
+          })),
+          ...FIXED_SHORTCUT_SECTIONS.flatMap(([group, rows]) =>
+            rows.map((row, index) => ({
+              label: row.label,
+              keywords: `${group} fixed shortcuts ${row.keys.join(' ')}`,
+              target: `setting-fixed-${group}-${index}`,
+            })),
+          ),
+        ],
+      },
+      {
+        id: 'addons',
+        component: AddonSettings,
+        label: 'Addons',
+        icon: Puzzle,
+        description: 'Install, enable and reorder addons.',
+        controls: [
+          {
+            label: 'Addon manifest URL',
+            keywords: 'Add addon Paste an addon manifest.json or stremiro:// URL to add an addon.',
+          },
+          {
+            label: 'Manage addons',
+            keywords:
+              'Enable disable reorder remove copy addon link Configure configuration options account Cinemeta OpenSubtitles pinned defaults drag stream priority',
+            target: 'setting-addon-list',
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'system',
+    caption: 'System',
+    items: [
+      {
+        id: 'updates',
+        component: UpdatesSection,
+        label: 'Updates',
+        icon: RefreshCw,
+        description: 'Check for and install app updates.',
+        controls: [
+          {
+            label: 'Check for updates automatically',
+            keywords: 'After launch and every six hours. You choose when to install.',
+          },
+          {
+            label: 'Check for updates',
+            keywords: 'Check again Update & restart install Last checked',
+            target: 'setting-update-actions',
+          },
+          {
+            label: 'Changelog',
+            keywords: "Release notes What's new Installed New View on GitHub",
+            target: 'setting-changelog',
+          },
+        ],
+      },
+      {
+        id: 'data',
+        component: DataSection,
+        label: 'Data',
+        icon: Database,
+        description: 'Backups, storage and clearing local records.',
+        controls: [
+          {
+            label: 'Export',
+            keywords:
+              'Backup & restore Export your data to a JSON file. Backups can contain addon keys, so keep them private.',
+          },
+          {
+            label: 'Import',
+            keywords:
+              'Backup & restore merge Records addons and per-title language picks merge with your existing data. Preferences, profile and appearance are replaced by the backup.',
+          },
+          {
+            label: 'Watch history',
+            keywords:
+              'Clear local records permanently Cancel Watched titles, resume progress and per-title track and source picks.',
+          },
+          {
+            label: 'Library',
+            keywords:
+              'Clear local records permanently Cancel Saved movies and shows, with their watch statuses.',
+          },
+          {
+            label: 'Custom lists',
+            keywords: 'Clear local records permanently Cancel Every custom list and its contents.',
+          },
+          {
+            label: 'Watch statuses',
+            keywords:
+              'Clear local records permanently Cancel Watching, Watched, Plan to Watch and Dropped labels.',
+          },
+          {
+            label: 'Recent searches',
+            keywords:
+              'Clear local records permanently Cancel search history Queries offered when the search field is empty.',
+          },
+        ],
+      },
+    ],
+  },
+] as const satisfies readonly { id: string; caption: string; items: readonly NavItem[] }[];
+
+// shortcut: flatMap widens the literal tuple types SectionId/DEFAULT_SECTION need — keep spreads in sync with NAV_GROUPS.
 const NAV_ITEMS = [
-  {
-    id: 'general',
-    component: GeneralSettings,
-    label: 'General',
-    icon: SlidersHorizontal,
-    description: 'Start page, launch at login and tray behavior.',
-    controls: [
-      {
-        label: 'Start page',
-        keywords: `Where Stremiro opens. ${START_PAGES.map((page) => page.label).join(' ')}`,
-      },
-      { label: 'Launch at login', keywords: 'Open Stremiro when you sign in. Startup autostart' },
-      {
-        label: 'Start minimized',
-        keywords: 'Login launches start in the system tray. Manual launches stay visible.',
-      },
-      { label: 'Close to tray', keywords: 'Keep running in the tray when the window closes.' },
-      {
-        label: 'Minimize to tray',
-        keywords: 'Hide to the tray instead of the taskbar. Hide to tray now',
-      },
-    ],
-  },
-  {
-    id: 'addons',
-    component: AddonSettings,
-    label: 'Addons',
-    icon: Puzzle,
-    description: 'Install, enable and reorder addons.',
-    controls: [
-      {
-        label: 'Addon manifest URL',
-        keywords: 'Add addon Paste an addon manifest.json or stremiro:// URL to add an addon.',
-      },
-      {
-        label: 'Manage addons',
-        keywords:
-          'Enable disable reorder remove copy addon link Configure configuration options account Cinemeta OpenSubtitles pinned defaults drag stream priority',
-        target: 'setting-addon-list',
-      },
-    ],
-  },
-  {
-    id: 'playback',
-    component: PlaybackSettings,
-    label: 'Playback',
-    icon: Settings2,
-    description: 'Languages, audio, spoilers, auto-play and auto-skip.',
-    controls: [
-      {
-        label: 'Audio',
-        keywords:
-          "Languages preferred language Auto reuses this title's remembered choice, or lets the player choose.",
-      },
-      {
-        label: 'Subtitles',
-        keywords:
-          "Languages Off preferred language captions Auto reuses this title's remembered choice, or lets the player choose.",
-      },
-      {
-        label: 'Audio sync',
-        keywords:
-          'Delay offset seconds saved for all videos. Positive plays audio later; negative plays it earlier. Set to 0 to reset.',
-      },
-      {
-        label: 'Night mode',
-        keywords:
-          'Boost quiet audio and smooth volume changes for late-night watching. Saved for all videos; off keeps the original sound. volume normalization loud jumps listening',
-      },
-      {
-        label: 'Subtitle appearance',
-        keywords: `Plain-text subtitles saved for all videos. Styled ASS subtitles keep their own look. Reset font color edge bold italic captions ${[
-          ...SUBTITLE_FONT_OPTIONS,
-          ...SUBTITLE_COLOR_OPTIONS,
-          ...SUBTITLE_EDGE_OPTIONS,
-        ]
-          .map((option) => option.label)
-          .join(' ')}`,
-      },
-      {
-        label: 'Load addon subtitles automatically',
-        keywords:
-          'When a stream has no subtitles in your preferred language, load a matching one from your addons. auto captions language',
-      },
-      {
-        label: 'Spoiler protection',
-        keywords: 'Blur unwatched episode thumbnails and descriptions.',
-      },
-      { label: 'Trailer previews', keywords: 'Play a muted trailer when hovering a title card.' },
-      {
-        label: 'Auto-play next episode',
-        keywords: 'Count down and start the next episode automatically.',
-      },
-      { label: 'Next episode countdown', keywords: 'Seconds 5 8 10 15 30 auto-play timer' },
-      {
-        label: 'Hide controls after keyboard input',
-        keywords: 'Player controls overlay timeout Seconds 2 3 5 8 delay mouse inactivity',
-      },
-      {
-        label: 'Auto-skip intros & recaps',
-        keywords: 'Skip detected intros and recaps. Outros stay manual.',
-      },
-    ],
-  },
-  {
-    id: 'appearance',
-    component: AppearanceSettings,
-    label: 'Appearance',
-    icon: Palette,
-    description: 'Accent color, glow and tint targets.',
-    controls: [
-      {
-        label: 'Accent',
-        keywords: `Reset Soft Vivid Custom accent color hex Pick a custom color ${ACCENT_PRESET_LABELS.join(' ')}`,
-        target: 'setting-appearance-accent',
-      },
-      { label: 'Glow', keywords: 'Background glow intensity', target: 'setting-appearance-glow' },
-      ...TINT_TARGETS.map((target) => ({
-        label: target.label,
-        keywords: `Tint targets Off areas stay neutral ${target.description}`,
-      })),
-    ],
-  },
-  {
-    id: 'shortcuts',
-    component: ShortcutsSection,
-    label: 'Shortcuts',
-    icon: Keyboard,
-    description: 'Player, browse and Calendar keys.',
-    controls: [
-      {
-        label: 'Player shortcuts',
-        keywords:
-          'Customize keybindings Rebind key Reset all Click a key to rebind it, up to 2 per action. Esc cancels, Backspace removes.',
-        target: 'setting-player-shortcuts',
-      },
-      ...PLAYER_ACTIONS.map((action) => ({
-        label: action.label,
-        keywords: `Player shortcuts ${action.group}`,
-        target: `setting-shortcut-${action.id}`,
-      })),
-      ...FIXED_SHORTCUT_SECTIONS.flatMap(([group, rows]) =>
-        rows.map((row, index) => ({
-          label: row.label,
-          keywords: `${group} fixed shortcuts ${row.keys.join(' ')}`,
-          target: `setting-fixed-${group}-${index}`,
-        })),
-      ),
-    ],
-  },
-  {
-    id: 'updates',
-    component: UpdatesSection,
-    label: 'Updates',
-    icon: RefreshCw,
-    description: 'Check for and install app updates.',
-    controls: [
-      {
-        label: 'Check for updates automatically',
-        keywords: 'After launch and every six hours. You choose when to install.',
-      },
-      {
-        label: 'Check for updates',
-        keywords: 'Check again Update & restart install Last checked',
-        target: 'setting-update-actions',
-      },
-      {
-        label: 'Changelog',
-        keywords: "Release notes What's new Installed New View on GitHub",
-        target: 'setting-changelog',
-      },
-    ],
-  },
-  {
-    id: 'data',
-    component: DataSection,
-    label: 'Data',
-    icon: Database,
-    description: 'Backups, storage and clearing local records.',
-    controls: [
-      {
-        label: 'Export',
-        keywords:
-          'Backup & restore Export your data to a JSON file. Backups can contain addon keys, so keep them private.',
-      },
-      {
-        label: 'Import',
-        keywords:
-          'Backup & restore merge Records addons and per-title language picks merge with your existing data. Preferences, profile and appearance are replaced by the backup.',
-      },
-      {
-        label: 'Watch history',
-        keywords:
-          'Clear local records permanently Cancel Watched titles, resume progress and per-title track and source picks.',
-      },
-      {
-        label: 'Library',
-        keywords:
-          'Clear local records permanently Cancel Saved movies and shows, with their watch statuses.',
-      },
-      {
-        label: 'Custom lists',
-        keywords: 'Clear local records permanently Cancel Every custom list and its contents.',
-      },
-      {
-        label: 'Watch statuses',
-        keywords:
-          'Clear local records permanently Cancel Watching, Watched, Plan to Watch and Dropped labels.',
-      },
-      {
-        label: 'Recent searches',
-        keywords:
-          'Clear local records permanently Cancel search history Queries offered when the search field is empty.',
-      },
-    ],
-  },
+  ...NAV_GROUPS[0].items,
+  ...NAV_GROUPS[1].items,
+  ...NAV_GROUPS[2].items,
 ] as const satisfies readonly NavItem[];
 
 function searchItem(
@@ -425,7 +464,10 @@ export function Settings() {
         !(event.ctrlKey || event.metaKey) ||
         event.altKey ||
         event.shiftKey ||
-        event.defaultPrevented
+        event.defaultPrevented ||
+        event.isComposing ||
+        isKeyCaptureTarget(event.target, event.key) ||
+        document.querySelector(OPEN_DIALOG_SELECTOR)
       ) {
         return;
       }
@@ -484,7 +526,7 @@ export function Settings() {
     // section swaps, and only the section column scrolls.
     <div className='pl-[60px] lg:h-[calc(100dvh-2rem)] lg:overflow-hidden'>
       <div className='mx-auto w-full max-w-[1480px] px-4 pb-12 pt-5 sm:px-6 lg:h-full lg:pt-7 xl:px-8'>
-        <div className='space-y-5 lg:grid lg:h-full lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-7 lg:space-y-0 xl:gap-9'>
+        <div className='space-y-5 lg:grid lg:h-full lg:grid-cols-[204px_minmax(0,1fr)] lg:gap-7 lg:space-y-0 xl:gap-9'>
           <div className='sticky top-8 z-30 -mx-4 min-w-0 space-y-3 border-b border-white/[0.07] bg-zinc-950/95 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:static lg:mx-0 lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:gap-5 lg:space-y-0 lg:border-0 lg:bg-transparent lg:px-0 lg:py-1 lg:backdrop-blur-none'>
             <header className='flex shrink-0 items-baseline justify-between gap-3'>
               <h1 className='text-[22px] font-semibold leading-none tracking-[-0.03em] text-white'>
@@ -514,13 +556,13 @@ export function Settings() {
               aria-label='Search settings'
               clearLabel='Clear settings search'
               wrapperClassName='w-full shrink-0'
-              className='h-9 rounded-lg border-white/[0.08] bg-white/[0.03] text-[13px] text-white shadow-none placeholder:text-zinc-500 focus-visible:border-(--accent-nav)/35 focus-visible:ring-(--accent-nav)/25'
+              className='h-10 rounded-lg border-white/[0.08] bg-white/[0.03] text-[14px] text-white shadow-none placeholder:text-zinc-500 focus-visible:border-(--accent-nav)/35 focus-visible:ring-(--accent-nav)/25'
             />
 
             <nav
               ref={navRef}
               aria-label='Settings sections'
-              className='relative isolate scrollbar-hide -mx-1 flex gap-1 overflow-x-auto overscroll-x-contain px-1 py-1 lg:mx-0 lg:min-h-0 lg:flex-1 lg:flex-col lg:overflow-x-clip lg:overflow-y-auto lg:overscroll-contain lg:px-0'
+              className='relative isolate scrollbar-hide -mx-1 flex gap-2 overflow-x-auto overscroll-x-contain px-1 py-1 lg:mx-0 lg:min-h-0 lg:flex-1 lg:flex-col lg:gap-3 lg:overflow-x-clip lg:overflow-y-auto lg:overscroll-contain lg:px-0'
             >
               {indicator && (
                 <>
@@ -543,53 +585,77 @@ export function Settings() {
                   />
                 </>
               )}
-              {NAV_ITEMS.map((item) => {
-                const isActive = active === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    ref={(node) => {
-                      if (node) navButtons.current.set(item.id, node);
-                      else navButtons.current.delete(item.id);
-                    }}
-                    type='button'
-                    onClick={() => handleSectionChange(item.id)}
-                    onPointerEnter={
-                      item.id === 'addons' ? () => void loadAddonSettings() : undefined
-                    }
-                    onFocus={item.id === 'addons' ? () => void loadAddonSettings() : undefined}
-                    onKeyDown={handleNavKeyDown}
-                    aria-current={isActive ? 'page' : undefined}
-                    aria-label={
-                      item.id === 'updates' && isUpdateAvailable
-                        ? 'Updates, update available'
-                        : undefined
-                    }
-                    className={cn(
-                      'nav-switch-item group relative flex h-9 shrink-0 items-center gap-2.5 rounded-lg px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/35 lg:w-full',
-                      isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-100',
-                    )}
-                  >
-                    <item.icon
-                      aria-hidden='true'
-                      className={cn(
-                        'h-[17px] w-[17px] shrink-0 transition-colors duration-150 motion-reduce:transition-none',
-                        isActive
-                          ? 'text-(--accent-nav)'
-                          : 'text-zinc-500 group-hover:text-zinc-300',
-                      )}
-                      strokeWidth={1.75}
-                    />
-                    <span className='text-[13.5px] font-medium leading-none'>{item.label}</span>
-                    {item.id === 'updates' && isUpdateAvailable ? (
-                      <span
-                        aria-hidden='true'
-                        className='ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400'
-                      />
-                    ) : null}
-                  </button>
-                );
-              })}
+              {/* Group wrappers stay unpositioned so item offsets keep resolving
+                  against the nav for the sliding indicator. */}
+              {NAV_GROUPS.map((group) => (
+                <div key={group.id} className='flex shrink-0 gap-1 lg:block'>
+                  <p className='hidden px-2.5 pb-1 pt-0.5 text-[13px] font-medium text-zinc-500 lg:block'>
+                    {group.caption}
+                  </p>
+                  <div className='flex gap-1 lg:flex-col lg:gap-0.5'>
+                    {group.items.map((item) => {
+                      const isActive = active === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          ref={(node) => {
+                            if (node) navButtons.current.set(item.id, node);
+                            else navButtons.current.delete(item.id);
+                          }}
+                          type='button'
+                          onClick={() => handleSectionChange(item.id)}
+                          onPointerEnter={
+                            item.id === 'addons' ? () => void loadAddonSettings() : undefined
+                          }
+                          onFocus={
+                            item.id === 'addons' ? () => void loadAddonSettings() : undefined
+                          }
+                          onKeyDown={handleNavKeyDown}
+                          aria-current={isActive ? 'page' : undefined}
+                          aria-label={
+                            item.id === 'updates' && isUpdateAvailable
+                              ? 'Updates, update available'
+                              : undefined
+                          }
+                          className={cn(
+                            'nav-switch-item group relative flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/35 lg:w-full',
+                            isActive
+                              ? 'text-white'
+                              : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100 active:bg-white/[0.07]',
+                          )}
+                        >
+                          <span
+                            aria-hidden='true'
+                            className={cn(
+                              'flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors duration-150 motion-reduce:transition-none',
+                              isActive
+                                ? 'bg-(--accent-nav)/10 border-(--accent-nav)/30'
+                                : 'border-transparent bg-white/[0.04] group-hover:border-white/[0.28] group-hover:bg-white/[0.07]',
+                            )}
+                          >
+                            <item.icon
+                              className={cn(
+                                'size-[14px] transition-colors duration-150 motion-reduce:transition-none',
+                                isActive
+                                  ? 'text-(--accent-nav)'
+                                  : 'text-zinc-400 group-hover:text-zinc-100',
+                              )}
+                              strokeWidth={1.75}
+                            />
+                          </span>
+                          <span className='text-[15px] font-medium leading-none'>{item.label}</span>
+                          {item.id === 'updates' && isUpdateAvailable ? (
+                            <span
+                              aria-hidden='true'
+                              className='ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400'
+                            />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </nav>
             {currentVersion ? (
               <span
@@ -610,16 +676,27 @@ export function Settings() {
               searchWords.length ? 'Settings search results' : `${shownSection.label} settings`
             }
             role='region'
-            className='w-full min-w-0 scroll-mt-48 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25 lg:scroll-mt-16 lg:min-h-0 lg:h-full lg:overflow-y-auto lg:overscroll-contain'
+            className='w-full min-w-0 scroll-mt-48 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25 lg:scroll-mt-16 lg:min-h-0 lg:h-full lg:overflow-y-auto lg:overscroll-contain scrollbar-hide'
           >
             {!searchWords.length && (
-              <header className='mb-5 px-0.5'>
-                <h2 className='text-[20px] font-semibold leading-tight tracking-tight text-white'>
-                  {shownSection.label}
-                </h2>
-                <p className='mt-1.5 text-[13px] leading-relaxed text-zinc-400'>
-                  {shownSection.description}
-                </p>
+              <header className='mb-6 flex items-center gap-4 px-0.5'>
+                <span
+                  aria-hidden='true'
+                  className='flex size-12 shrink-0 items-center justify-center rounded-xl bg-(--accent-nav)/10 ring-1 ring-inset ring-(--accent-nav)/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+                >
+                  <shownSection.icon
+                    className='size-[22px] text-(--accent-nav)'
+                    strokeWidth={1.75}
+                  />
+                </span>
+                <div className='min-w-0'>
+                  <h2 className='text-[22px] font-semibold leading-tight tracking-tight text-white'>
+                    {shownSection.label}
+                  </h2>
+                  <p className='mt-1 text-[14px] leading-relaxed text-zinc-400'>
+                    {shownSection.description}
+                  </p>
+                </div>
               </header>
             )}
             {searchWords.length ? (
@@ -636,20 +713,20 @@ export function Settings() {
                     <button
                       type='button'
                       onClick={() => openSearchResult(item)}
-                      className='group flex w-full items-center gap-3.5 rounded-2xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
+                      className='group flex w-full items-center gap-3.5 rounded-xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
                     >
-                      <span className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]'>
+                      <span className={cn(ICON_CHIP_CLASS, 'size-9 shrink-0 rounded-lg')}>
                         <item.section.icon
                           aria-hidden='true'
-                          className='h-4 w-4 text-(--accent-nav)'
+                          className='size-[17px] text-(--accent-nav)'
                           strokeWidth={1.75}
                         />
                       </span>
                       <span className='min-w-0 flex-1'>
-                        <span className='block text-[14px] font-medium text-zinc-100'>
+                        <span className='block text-[15px] font-medium text-zinc-100'>
                           {item.label}
                         </span>
-                        <span className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
+                        <span className='mt-1 block text-[14px] leading-relaxed text-zinc-400'>
                           {item.section.label} · {item.section.description}
                         </span>
                       </span>
@@ -663,8 +740,8 @@ export function Settings() {
                 {matches.length === 0 && (
                   <SettingsCard>
                     <SettingsBody className='py-8 text-center'>
-                      <p className='text-[14px] font-medium text-zinc-200'>No matching settings</p>
-                      <p className='mt-2 text-[13px] leading-relaxed text-zinc-400'>
+                      <p className='text-[15px] font-medium text-zinc-200'>No matching settings</p>
+                      <p className='mt-2 text-[14px] leading-relaxed text-zinc-400'>
                         Try a section name or a term like subtitles, accent or backup.
                       </p>
                       <button
@@ -687,7 +764,7 @@ export function Settings() {
                   <Skeleton
                     role='status'
                     aria-label='Loading settings'
-                    className='h-72 rounded-2xl'
+                    className='h-72 rounded-xl'
                   />
                 }
               >

@@ -1,6 +1,5 @@
 import {
   useCallback,
-  memo,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -20,14 +19,23 @@ import { SKIP_SEGMENT_LABELS } from '@/lib/player-skip';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
 const SKIP_SEGMENT_STYLES: Record<string, { color: string; badge: string }> = {
-  intro: { color: 'bg-amber-300/75', badge: 'bg-amber-500 text-black' },
-  outro: { color: 'bg-sky-300/75', badge: 'bg-sky-500 text-black' },
-  preview: { color: 'bg-violet-300/75', badge: 'bg-violet-500 text-black' },
+  intro: {
+    color: 'bg-[#f5e37b]',
+    badge: 'bg-zinc-950/95 text-[#f5e37b] ring-1 ring-inset ring-[#f5e37b]/30',
+  },
+  outro: {
+    color: 'bg-[#7fa6d9]/85',
+    badge: 'bg-[#1e2b3d]/95 text-[#bbd6f3] ring-1 ring-inset ring-[#7fa6d9]/30',
+  },
+  preview: {
+    color: 'bg-violet-300/55',
+    badge: 'bg-violet-950/95 text-violet-100 ring-1 ring-inset ring-violet-300/20',
+  },
 };
 
 const FALLBACK_SKIP_SEGMENT_STYLE = {
-  color: 'bg-orange-300/75',
-  badge: 'bg-orange-500 text-black',
+  color: 'bg-stone-300/55',
+  badge: 'bg-stone-900/95 text-stone-100 ring-1 ring-inset ring-stone-300/20',
 };
 
 const ENDS_AT_FORMATTER = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' });
@@ -44,7 +52,7 @@ interface PlayerTimeDisplayProps {
   className?: string;
 }
 
-export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
+export function PlayerTimeDisplay({
   clock,
   duration,
   playbackSpeed,
@@ -99,7 +107,7 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
       <span className='font-medium text-white/60'>{totalTime}</span>
     </button>
   );
-});
+}
 
 interface PlayerEdgeProgressProps {
   clock: PlaybackClock;
@@ -107,11 +115,7 @@ interface PlayerEdgeProgressProps {
   visible: boolean;
 }
 
-export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
-  clock,
-  duration,
-  visible,
-}: PlayerEdgeProgressProps) {
+export function PlayerEdgeProgress({ clock, duration, visible }: PlayerEdgeProgressProps) {
   const currentTime = useSyncExternalStore(
     visible ? clock.subscribe : subscribeWhileHidden,
     clock.getSnapshot,
@@ -135,7 +139,7 @@ export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
       />
     </div>
   );
-});
+}
 
 interface SkipNotchesProps {
   duration: number;
@@ -144,11 +148,7 @@ interface SkipNotchesProps {
 }
 
 // Memoized — the bar re-renders per clock tick, but segment geometry only changes with list/duration/hover.
-const SkipNotches = memo(function SkipNotches({
-  duration,
-  skipSegments,
-  hoverSegment,
-}: SkipNotchesProps) {
+function SkipNotches({ duration, skipSegments, hoverSegment }: SkipNotchesProps) {
   if (duration <= 0) return null;
 
   return skipSegments.map((seg) => {
@@ -167,7 +167,7 @@ const SkipNotches = memo(function SkipNotches({
       />
     );
   });
-});
+}
 
 interface PlayerProgressBarProps {
   /** Hidden chrome keeps local state without receiving playback ticks. */

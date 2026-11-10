@@ -247,6 +247,17 @@ fn save_fails_cleanly_on_locked_destination() {
     assert_eq!(partial_leftover_count(&path_b), 0);
 }
 
+#[test]
+fn write_atomic_file_replaces_bytes_without_trailing_data_or_partials() {
+    let path = TempPath::file("atomic-bytes");
+    let large: Vec<u8> = (0..=u8::MAX).cycle().take(16 * 1024).collect();
+    for bytes in [large.as_slice(), b"short", b"", b"\0\xff"] {
+        write_atomic_file(&path, bytes, false).expect("commit exact bytes");
+        assert_eq!(std::fs::read(&path).expect("read committed bytes"), bytes);
+        assert_eq!(partial_leftover_count(&path), 0);
+    }
+}
+
 /// `clear_readonly_on_denied` splits user-owned from app-owned destinations:
 /// a user backup keeps its read-only flag (write fails, bytes untouched),
 /// an app store clears the stale flag and commits.

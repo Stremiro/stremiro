@@ -184,17 +184,11 @@ export function useStreamRecovery({
       sourceUrl: string,
       outcome: Exclude<PlaybackStreamOutcome, 'verified'> = 'startup-timeout',
     ) => {
-      // Fast-fail only; Rust validates media types.
+      // Fast-fail only; Rust validates media types, addon-declared ones included.
       const effectiveMediaType = mediaType?.trim();
       if (manualSelectionOwnsStreamRef.current) return true;
       if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
-      if (
-        !mediaId ||
-        !sourceUrl ||
-        (effectiveMediaType !== 'movie' &&
-          effectiveMediaType !== 'series' &&
-          effectiveMediaType !== 'anime')
-      ) {
+      if (!mediaId || !sourceUrl || !effectiveMediaType) {
         return false;
       }
       if (recoveryInFlightRef.current) return true;

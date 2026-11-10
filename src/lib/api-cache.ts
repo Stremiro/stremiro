@@ -234,7 +234,6 @@ export const bumpWatchProgressEpoch = watchProgressEpoch.bump;
 // Save revisions fence stale snapshots without discarding queued progress writes.
 const watchProgressSnapshotRevision = createGeneration();
 export const getWatchProgressSnapshotRevision = watchProgressSnapshotRevision.get;
-export const bumpWatchProgressSnapshotRevision = watchProgressSnapshotRevision.bump;
 
 /** Bump the delete epoch before the IPC lands — a queued save must not resurrect the row. */
 export function trackWatchProgressEpochWrite<T>(write: Promise<T>): Promise<T> {

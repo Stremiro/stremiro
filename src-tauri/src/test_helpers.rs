@@ -83,6 +83,11 @@ impl Drop for TestStore {
     }
 }
 
+/// Two isolated stores for status-vs-library tests — each gets its own temp file.
+pub(crate) fn test_store_pair() -> (TestStore, TestStore) {
+    (test_store(), test_store())
+}
+
 /// Temp path removed on drop so a panicking test can't leak state into a
 /// later run. `Deref`s to `Path`, so `&path` call sites keep working and
 /// `path.clone()` still yields a plain `PathBuf`.

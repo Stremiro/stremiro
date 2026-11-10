@@ -86,11 +86,10 @@ fn fit_position(
 
 fn place_pip(
     window: &Window,
-    monitor: &Monitor,
+    area: &tauri::PhysicalRect<i32, u32>,
+    scale: f64,
     requested: PhysicalSize<u32>,
 ) -> tauri::Result<()> {
-    let area = monitor.work_area();
-    let scale = monitor.scale_factor();
     let (min, max) = pip_limits(area.size, scale);
     window.set_size_constraints(WindowSizeConstraints {
         min_width: Some(tauri::PhysicalUnit::new(min.width).into()),
@@ -225,11 +224,9 @@ pub(crate) async fn set_player_pip(
                 saved.position = window.outer_position()?;
                 saved.size = window.inner_size()?;
             }
-            place_pip(
-                &window,
-                &monitor,
-                pip_size(monitor.work_area().size, monitor.scale_factor()),
-            )?;
+            let area = monitor.work_area();
+            let scale = monitor.scale_factor();
+            place_pip(&window, area, scale, pip_size(area.size, scale))?;
             window.set_resizable(true)?;
             window.set_maximizable(false)?;
             window.set_always_on_top(true)
@@ -261,7 +258,8 @@ pub(crate) async fn snap_player_pip(
         .map_err(|error| error.to_string())?
         .ok_or("No monitor is available for picture in picture.")?;
     let size = window.inner_size().map_err(|error| error.to_string())?;
-    place_pip(&window, &monitor, size).map_err(|error| error.to_string())
+    place_pip(&window, monitor.work_area(), monitor.scale_factor(), size)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

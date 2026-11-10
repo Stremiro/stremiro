@@ -59,8 +59,7 @@ impl StreamPoolQuery {
         let id = normalize_media_id(js_trim(id))
             .ok_or_else(|| format!("Media ID is required for {context}."))?;
         let media_type = normalize_stream_media_type(js_trim(media_type), Some(&id))
-            .ok_or_else(|| format!("Invalid media type for {context}."))?
-            .to_string();
+            .ok_or_else(|| format!("Invalid media type for {context}."))?;
         let ranking = resolve_stream_ranking_scope(&media_type, &id, season, episode, overrides)?;
         Ok(Self {
             media_type,
@@ -367,36 +366,33 @@ fn find_preferred_position(
         return None;
     }
 
-    let probeable: Vec<bool> = streams.iter().map(is_probeable_stream).collect();
     let best_priority = streams
         .iter()
-        .enumerate()
-        .find(|(index, _)| probeable[*index])
-        .and_then(|(_, stream)| stream.selection_priority);
-    let soft_eligible = |index: usize, stream: &AddonStream| {
-        probeable[index]
-            && best_priority.is_none_or(|best| {
-                stream
-                    .selection_priority
-                    .is_some_and(|candidate| candidate.covers(&best))
-            })
+        .find(|stream| is_probeable_stream(stream))
+        .and_then(|stream| stream.selection_priority);
+    let soft_eligible = |stream: &AddonStream| {
+        best_priority.is_none_or(|best| {
+            stream
+                .selection_priority
+                .is_some_and(|candidate| candidate.covers(&best))
+        }) && is_probeable_stream(stream)
     };
 
     // Stored fields compare against already-normalized hints — a trim +
     // case-insensitive compare stands in for re-normalizing each row.
     if let Some(family) = stream_family {
-        if let Some(position) = streams.iter().enumerate().position(|(index, stream)| {
-            soft_eligible(index, stream)
-                && stream
-                    .stream_family
-                    .as_deref()
-                    .is_some_and(|value| value.trim().eq_ignore_ascii_case(&family))
+        if let Some(position) = streams.iter().position(|stream| {
+            stream
+                .stream_family
+                .as_deref()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(&family))
                 && source_id.is_none_or(|id| {
                     stream
                         .source_id
                         .as_deref()
                         .is_some_and(|value| value.trim() == id)
                 })
+                && soft_eligible(stream)
         }) {
             return Some(position);
         }
@@ -404,22 +400,22 @@ fn find_preferred_position(
 
     // Instance id before display name — two addons sharing a name make the name tier ambiguous.
     if let Some(source_id) = source_id {
-        return streams.iter().enumerate().position(|(index, stream)| {
-            soft_eligible(index, stream)
-                && stream
-                    .source_id
-                    .as_deref()
-                    .is_some_and(|value| value.trim() == source_id)
+        return streams.iter().position(|stream| {
+            stream
+                .source_id
+                .as_deref()
+                .is_some_and(|value| value.trim() == source_id)
+                && soft_eligible(stream)
         });
     }
 
     source_name.and_then(|source| {
-        streams.iter().enumerate().position(|(index, stream)| {
-            soft_eligible(index, stream)
-                && stream
-                    .source_name
-                    .as_deref()
-                    .is_some_and(|value| value.trim().eq_ignore_ascii_case(&source))
+        streams.iter().position(|stream| {
+            stream
+                .source_name
+                .as_deref()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(&source))
+                && soft_eligible(stream)
         })
     })
 }
@@ -556,7 +552,10 @@ fn build_probe_candidates(
             .direct_url
             .host_str()
             .expect("HTTP candidate has a host");
-        let count = host_counts.entry(host.to_string()).or_default();
+        let count = match host_counts.get_mut(host) {
+            Some(count) => count,
+            None => host_counts.entry(host.to_string()).or_default(),
+        };
         let delay = SAME_HOST_PROBE_SPACING * *count;
         *count += 1;
         candidates.push((candidate, delay, identity));

@@ -18,7 +18,7 @@ import {
   type PlayerRouteMediaType,
   resolvePlayerRouteMediaType,
 } from '@/lib/player-navigation';
-import { formatSeasonEpisode } from '@/lib/utils';
+import { formatSeasonEpisode, isSeriesLikeMediaType } from '@/lib/utils';
 
 type PrimaryPlaybackSurface = 'card' | 'details';
 
@@ -49,7 +49,7 @@ function getPrimaryPlaybackLabel(
   }
 
   if (surface === 'details') {
-    if (mediaType === 'movie') {
+    if (!isSeriesLikeMediaType(mediaType)) {
       return hasResumePath ? 'Continue' : 'Start Watching';
     }
 
@@ -61,7 +61,7 @@ function getPrimaryPlaybackLabel(
     return 'Resume';
   }
 
-  return mediaType === 'movie' ? 'Play' : 'View & Play';
+  return isSeriesLikeMediaType(mediaType) ? 'View & Play' : 'Play';
 }
 
 function getHistoryPlaybackErrorTitle(
@@ -72,7 +72,9 @@ function getHistoryPlaybackErrorTitle(
     return 'Failed to resume playback';
   }
 
-  return mediaType === 'movie' ? 'Failed to continue movie' : 'Failed to continue series';
+  return isSeriesLikeMediaType(mediaType)
+    ? 'Failed to continue series'
+    : 'Failed to continue movie';
 }
 
 export function useMediaPrimaryPlayback({
@@ -165,7 +167,7 @@ export function useMediaPrimaryPlayback({
 
       warmPlayerChunk();
 
-      if (playbackType !== 'movie') {
+      if (isSeriesLikeMediaType(playbackType)) {
         if (onSelectEpisode) {
           await onSelectEpisode();
           return;

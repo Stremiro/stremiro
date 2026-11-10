@@ -3,14 +3,14 @@ use super::ttl_cache::{
 };
 use super::{
     addon_manifest::{AddonCatalogCapability, AddonManifest},
-    bound_optional, build_provider_http_client, encode_uri_component, normalize_media_year,
-    strip_manifest_suffix, trim_to_max, DiskEnvelope, Episode, MediaDetails, MediaItem,
-    MediaSeason, Trailer, ADDON_URL_INVALID_MESSAGE, MAGNET_PREFIX,
+    bound_optional, build_provider_http_client, encode_uri_component, strip_manifest_suffix,
+    trim_to_max, DiskEnvelope, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
+    ADDON_URL_INVALID_MESSAGE, MAGNET_PREFIX,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,7 @@ const SUBTITLE_MAX_BYTES: usize = 512 * 1024;
 /// Catalog pages run ~0.5-0.7MiB decompressed — a tighter timeout misreads
 /// slow international routes as dead hosts.
 const RESOURCE_TIMEOUT_SECS: u64 = 20;
+const CINEMETA_ARTWORK_TIMEOUT: Duration = Duration::from_millis(1_500);
 const MAX_CATALOG_ITEMS: usize = 500;
 const MAX_EPISODES: usize = 2_000;
 const MAX_TRAILERS: usize = 32;
@@ -34,7 +35,7 @@ const MAX_GENRES: usize = 32;
 const MAX_STRING_CHARS: usize = 2_048;
 const MAX_SERIALIZED_IMAGE_URL_CHARS: usize = MAX_STRING_CHARS * 4 * 3;
 const MAX_ID_CHARS: usize = 256;
-const MAX_LOOKUP_ID_CHARS: usize = MAX_ID_CHARS + 2 * (1 + 10);
+const MAX_LOOKUP_ID_CHARS: usize = crate::commands::MEDIA_ID_MAX_CHARS + 2 * (1 + 10);
 const MAX_EXTRA_NAME_CHARS: usize = 64;
 const MAX_EXTRA_VALUE_CHARS: usize = 256;
 const MAX_EXTRAS: usize = 16;
@@ -478,6 +479,32 @@ impl AddonResourceClient {
             .await
     }
 
+    pub(crate) async fn repair_episode_artwork(
+        &self,
+        details: &mut MediaDetails,
+        normalize: fn(MediaDetails) -> MediaDetails,
+    ) {
+        if !needs_cinemeta_artwork(details) {
+            return;
+        }
+        let Ok(Ok(artwork)) = tokio::time::timeout(
+            CINEMETA_ARTWORK_TIMEOUT,
+            self.fetch_meta(
+                "https://cinemeta-live.strem.io",
+                "series",
+                &details.id,
+                normalize,
+            ),
+        )
+        .await
+        else {
+            return;
+        };
+        if artwork.id == details.id && artwork.type_ == details.type_ {
+            merge_cinemeta_artwork(details, &artwork);
+        }
+    }
+
     pub(crate) async fn fetch_subtitles(
         &self,
         base_url: &str,
@@ -753,9 +780,10 @@ fn parse_object_fields(raw: &RawValue, keep: fn(&str) -> bool) -> Option<Value> 
             mut fields: A,
         ) -> Result<Self::Value, A::Error> {
             let mut object = serde_json::Map::new();
-            while let Some(key) = fields.next_key::<String>()? {
+            // `Cow` keys stay borrowed until an escape needs unescaping.
+            while let Some(key) = fields.next_key::<std::borrow::Cow<'_, str>>()? {
                 if self.0(&key) {
-                    object.insert(key, fields.next_value()?);
+                    object.insert(key.into_owned(), fields.next_value()?);
                 } else {
                     fields.next_value::<serde::de::IgnoredAny>()?;
                 }
@@ -780,10 +808,11 @@ fn parse_catalog_item(value: CatalogItemJson<'_>) -> Option<MediaItem> {
         backdrop: sanitize_image_url(value.background.as_ref()),
         logo: sanitize_image_url(value.logo.as_ref()),
         description: value.description.as_ref().and_then(json_string),
-        year: normalize_media_year(
-            value.year.as_ref().and_then(json_string),
-            value.release_info.as_ref().and_then(json_string),
-        ),
+        year: value
+            .year
+            .as_ref()
+            .and_then(json_string)
+            .or_else(|| value.release_info.as_ref().and_then(json_string)),
         primary_year: None,
         display_year: None,
         genres: json_string_list(value.genre.as_ref(), MAX_GENRES)
@@ -796,14 +825,16 @@ fn parse_catalog_item(value: CatalogItemJson<'_>) -> Option<MediaItem> {
 
 fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
     // Decode consumed fields only; episodes have a separate bounded decoder.
-    let mut fields: BTreeMap<String, &RawValue> = serde_json::from_str(raw.get()).ok()?;
+    // `Cow` keys stay borrowed until an escape needs unescaping.
+    let mut fields: BTreeMap<std::borrow::Cow<'_, str>, &RawValue> =
+        serde_json::from_str(raw.get()).ok()?;
     let videos = fields.remove("videos");
     let value = Value::Object(
         fields
             .into_iter()
             .filter(|(key, _)| {
                 matches!(
-                    key.as_str(),
+                    key.as_ref(),
                     "id" | "name"
                         | "type"
                         | "imdb_id"
@@ -830,7 +861,9 @@ fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
                         | "trailerStreams"
                 )
             })
-            .filter_map(|(key, raw)| Some((key, serde_json::from_str(raw.get()).ok()?)))
+            .filter_map(|(key, raw)| {
+                Some((key.into_owned(), serde_json::from_str(raw.get()).ok()?))
+            })
             .collect(),
     );
     let id = json_media_id(value.get("id")?)?;
@@ -857,10 +890,8 @@ fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
         poster: sanitize_image_url(value.get("poster")),
         backdrop: sanitize_image_url(value.get("background")),
         logo: sanitize_image_url(value.get("logo")),
-        year: normalize_media_year(
-            json_string_field(&value, "year"),
-            json_string_field(&value, "releaseInfo"),
-        ),
+        year: json_string_field(&value, "year")
+            .or_else(|| json_string_field(&value, "releaseInfo")),
         display_year: None,
         // Raw `released` ISO date is the schedule source of truth; the
         // year-only fallback keeps unstamped metas working.
@@ -1208,6 +1239,72 @@ pub(crate) fn build_resource_url(
 
     parsed.set_path(&path);
     Ok(parsed.into())
+}
+
+fn is_metahub_episode_thumbnail(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https" && url.host_str() == Some("episodes.metahub.space")
+    })
+}
+
+fn needs_cinemeta_artwork(details: &MediaDetails) -> bool {
+    details.is_anime
+        && details.type_ == "series"
+        && super::skip_times::normalize_imdb_id(&details.id).as_deref() == Some(details.id.as_str())
+        && details.episodes.iter().flatten().any(|episode| {
+            episode.season > 1
+                && episode
+                    .thumbnail
+                    .as_deref()
+                    .is_some_and(is_metahub_episode_thumbnail)
+        })
+}
+
+fn episode_artwork_identity(episode: &Episode) -> Option<(&str, &str)> {
+    let title = episode.title.as_deref()?.trim();
+    let day = episode.release_date.as_deref()?;
+    (!title.is_empty() && !day.is_empty()).then_some((title, day))
+}
+
+fn merge_cinemeta_artwork(details: &mut MediaDetails, artwork: &MediaDetails) {
+    let Some(episodes) = details.episodes.as_mut() else {
+        return;
+    };
+
+    let mut source = HashMap::new();
+    for (index, episode) in episodes.iter().enumerate() {
+        if let Some(key) = episode_artwork_identity(episode) {
+            source
+                .entry(key)
+                .and_modify(|index| *index = None)
+                .or_insert(Some(index));
+        }
+    }
+    let mut target = HashMap::new();
+    for episode in artwork.episodes.iter().flatten() {
+        if let Some(key) = episode_artwork_identity(episode) {
+            target
+                .entry(key)
+                .and_modify(|thumbnail| *thumbnail = None)
+                .or_insert(episode.thumbnail.as_deref());
+        }
+    }
+    // Cinemeta's TVDB coordinates differ from its TMDB artwork; never guess an offset.
+    let replacements: Vec<_> = source
+        .into_iter()
+        .filter_map(|(key, index)| {
+            let index = index?;
+            let thumbnail = (*target.get(&key)?)?;
+            let original = episodes[index].thumbnail.as_deref()?;
+            (is_metahub_episode_thumbnail(original)
+                && is_metahub_episode_thumbnail(thumbnail)
+                && original != thumbnail)
+                .then(|| (index, thumbnail.to_string()))
+        })
+        .collect();
+    for (index, thumbnail) in replacements {
+        episodes[index].thumbnail = Some(thumbnail);
+    }
 }
 
 async fn fetch_bounded_json(

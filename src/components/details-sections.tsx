@@ -10,7 +10,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { CreditLink } from '@/components/details-credits';
 import { RemoteImage } from '@/components/remote-image';
-import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
+import { scrollEdgeMask, useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import {
   api,
   getErrorMessage,
@@ -19,97 +19,11 @@ import {
   type TitleCredits,
 } from '@/lib/api';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
-import { cn, formatRuntime, scrollBehavior } from '@/lib/utils';
-
-export type DetailsSection = 'episodes' | 'cast' | 'about';
+import { cn, scrollBehavior } from '@/lib/utils';
 
 // Link validation re-reads the cached credits, so it must use the query's media type.
 export const creditsMediaType = ({ type, isAnime }: Pick<MediaDetails, 'type' | 'isAnime'>) =>
   type !== 'movie' && isAnime ? 'anime' : type;
-
-interface SectionTab {
-  value: DetailsSection;
-  label: string;
-}
-
-const tabId = (value: DetailsSection) =>
-  value === 'episodes' ? 'details-episodes-heading' : `details-section-tab-${value}`;
-const panelId = (value: DetailsSection) => `details-section-panel-${value}`;
-
-export function DetailsSectionTabs({
-  tabs,
-  value,
-  onValueChange,
-}: {
-  tabs: readonly SectionTab[];
-  value: DetailsSection;
-  onValueChange: (value: DetailsSection) => void;
-}) {
-  if (tabs.length === 1 && tabs[0].value === 'episodes') {
-    return (
-      <h2
-        id='details-episodes-heading'
-        tabIndex={-1}
-        className='flex h-9 items-center text-[15px] font-semibold tracking-[-0.02em] text-white focus:outline-hidden'
-      >
-        Episodes
-      </h2>
-    );
-  }
-  return (
-    // eslint-disable-next-line jsx-a11y/interactive-supports-focus -- APG tablists receive arrows from their focused tab.
-    <div
-      role='tablist'
-      aria-label='Title sections'
-      className='inline-flex h-9 max-w-full items-center gap-6'
-      onKeyDown={(event) => {
-        if (
-          event.defaultPrevented ||
-          event.altKey ||
-          event.ctrlKey ||
-          event.metaKey ||
-          event.shiftKey ||
-          event.nativeEvent.isComposing
-        )
-          return;
-        const index = tabs.findIndex((tab) => tab.value === value);
-        let nextIndex: number;
-        if (event.key === 'Home') nextIndex = 0;
-        else if (event.key === 'End') nextIndex = tabs.length - 1;
-        else if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
-        else if (event.key === 'ArrowLeft') nextIndex = (index + tabs.length - 1) % tabs.length;
-        else return;
-        event.preventDefault();
-        const next = tabs[nextIndex].value;
-        onValueChange(next);
-        event.currentTarget
-          .querySelector<HTMLButtonElement>(`#${tabId(next)}`)
-          ?.focus({ preventScroll: true });
-      }}
-    >
-      {tabs.map((tab) => (
-        <button
-          key={tab.value}
-          id={tabId(tab.value)}
-          type='button'
-          role='tab'
-          aria-selected={value === tab.value}
-          aria-controls={panelId(tab.value)}
-          tabIndex={value === tab.value ? 0 : -1}
-          onClick={() => onValueChange(tab.value)}
-          className={cn(
-            'h-full shrink-0 rounded-xs border-b-2 px-0.5 text-[14px] font-medium tracking-[-0.01em] transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none',
-            value === tab.value
-              ? 'border-(--accent-nav) text-white'
-              : 'border-transparent text-white/45 hover:text-white/80',
-          )}
-        >
-          {tab.label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 function ExternalLink({
   item,
@@ -138,6 +52,9 @@ function ExternalLink({
   );
 }
 
+const SOURCE_LINK_CLASS =
+  'rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
+
 const PEOPLE_SCROLL_BUTTON_CLASS =
   'pointer-events-none absolute top-[38%] z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-zinc-950/60 text-white/70 opacity-0 backdrop-blur-xs transition-opacity hover:bg-zinc-950/85 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/people:pointer-events-auto group-hover/people:opacity-100 group-focus-within/people:pointer-events-auto group-focus-within/people:opacity-100 aria-disabled:pointer-events-none aria-disabled:opacity-0 motion-reduce:transition-none';
 
@@ -146,9 +63,7 @@ function People({ people, characters }: Pick<TitleCredits, 'people'> & { charact
   const dragRef = useRef<{ x: number; left: number; moved: boolean } | null>(null);
   const suppressClickRef = useRef(false);
   const { bind: bindScroller, ...scrollState } = useScrollEdgeIndicators(scrollRef);
-  const edgeMask = scrollState.hasOverflow
-    ? `linear-gradient(to right, ${scrollState.canScrollLeft ? 'transparent 0px, black 28px' : 'black 0px'}, ${scrollState.canScrollRight ? 'black calc(100% - 28px), transparent 100%' : 'black 100%'})`
-    : undefined;
+  const edgeMask = scrollEdgeMask(scrollState);
 
   const onPointerDown = (event: PointerEvent<HTMLUListElement>) => {
     if (event.pointerType !== 'mouse' || event.button !== 0) return;
@@ -272,66 +187,17 @@ function People({ people, characters }: Pick<TitleCredits, 'people'> & { charact
   );
 }
 
-function About({ item, credits }: { item: MediaDetails; credits?: TitleCredits }) {
-  const facts = credits?.facts;
-  const rows = [
-    ['Network', facts?.network],
-    ['Studio', facts?.studio],
-    ['Status', facts?.status],
-    ['Schedule', facts?.schedule],
-    ['Format', facts?.format],
-    ['Runtime', formatRuntime(facts?.runtimeMinutes ? String(facts.runtimeMinutes) : item.runtime)],
-  ].filter((row) => row[1]);
-  return (
-    <div className='max-w-3xl space-y-5'>
-      {rows.length > 0 && (
-        <dl className='grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3'>
-          {rows.map(([label, value]) => (
-            <div key={label} className='min-w-0'>
-              <dt className='text-[11px] font-medium uppercase tracking-[0.08em] text-white/40'>
-                {label}
-              </dt>
-              <dd className='mt-1 break-words text-[13px] leading-5 text-white/80'>{value}</dd>
-            </div>
-          ))}
-        </dl>
-      )}
-      {!!credits?.streamingLinks.length && (
-        <div className='space-y-2'>
-          <p className='text-[11px] font-medium uppercase tracking-[0.08em] text-white/40'>
-            Watch elsewhere
-          </p>
-          <div className='flex flex-wrap gap-2'>
-            {credits.streamingLinks.map((link) => (
-              <ExternalLink
-                item={item}
-                key={link.site}
-                href={link.url}
-                className='rounded-md border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-[12px] text-white/70 transition-colors hover:border-white/20 hover:bg-white/[0.05] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none'
-              >
-                {link.site}
-              </ExternalLink>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+const SECTION_HEADING_CLASS = 'mb-3 text-[17px] font-semibold tracking-[-0.02em] text-white';
 
 export function DetailsSections({
   item,
   credits,
-  value,
-  onValueChange,
   hasEpisodes,
   allowExtras,
   children,
 }: {
   item: MediaDetails;
   credits?: TitleCredits;
-  value: DetailsSection;
-  onValueChange: (value: DetailsSection) => void;
   hasEpisodes: boolean;
   allowExtras: boolean;
   children?: ReactNode;
@@ -340,73 +206,48 @@ export function DetailsSections({
   const data = allowExtras ? credits : undefined;
   const people = data?.people ?? [];
   const characters = data?.source === 'anilist';
-  const hasAbout =
-    allowExtras &&
-    Boolean(
-      item.runtime || data?.streamingLinks.length || Object.values(data?.facts ?? {}).some(Boolean),
-    );
-  const tabs: SectionTab[] = [];
-  if (hasEpisodes) tabs.push({ value: 'episodes', label: 'Episodes' });
-  if (people.length) tabs.push({ value: 'cast', label: characters ? 'Characters' : 'Cast' });
-  if (hasAbout) tabs.push({ value: 'about', label: 'About' });
-  if (!tabs.length) return null;
-  const active = tabs.some((tab) => tab.value === value)
-    ? value
-    : hasEpisodes
-      ? 'episodes'
-      : hasAbout
-        ? 'about'
-        : 'cast';
-  const hasTabList = tabs.length > 1 || tabs[0].value !== 'episodes';
-  const panelProps = (section: DetailsSection) => ({
-    id: panelId(section),
-    hidden: active !== section,
-    role: hasTabList ? 'tabpanel' : undefined,
-    tabIndex: hasTabList ? 0 : undefined,
-    'aria-labelledby': hasTabList ? tabId(section) : undefined,
-    className: 'min-w-0',
-  });
+  if (!hasEpisodes && !people.length) return null;
   return (
-    <div className='min-w-0 space-y-4'>
-      <DetailsSectionTabs tabs={tabs} value={active} onValueChange={onValueChange} />
-      {hasEpisodes && <div {...panelProps('episodes')}>{children}</div>}
-      {people.length > 0 && (
-        <div {...panelProps('cast')}>
-          <People people={people} characters={characters} />
-        </div>
+    <div className='min-w-0 space-y-6'>
+      {hasEpisodes && (
+        <section aria-labelledby='details-episodes-heading' className='min-w-0'>
+          <h2
+            id='details-episodes-heading'
+            tabIndex={-1}
+            className={cn(SECTION_HEADING_CLASS, 'focus:outline-hidden')}
+          >
+            Episodes
+          </h2>
+          {children}
+        </section>
       )}
-      {hasAbout && (
-        <div {...panelProps('about')}>
-          <About item={item} credits={data} />
-        </div>
+      {people.length > 0 && (
+        <section aria-labelledby='details-cast-heading' className='min-w-0'>
+          <h2 id='details-cast-heading' className={SECTION_HEADING_CLASS}>
+            {characters ? 'Characters' : 'Cast'}
+          </h2>
+          <People people={people} characters={characters} />
+        </section>
       )}
       {data?.source && (
         <p className='flex flex-wrap gap-x-1 text-[11px] leading-5 text-white/35'>
           Data:
           {data.source === 'tvmaze' ? (
             <>
-              <ExternalLink
-                item={item}
-                href='https://www.tvmaze.com'
-                className='rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-              >
+              <ExternalLink item={item} href='https://www.tvmaze.com' className={SOURCE_LINK_CLASS}>
                 TVmaze
               </ExternalLink>
               <span aria-hidden='true'>&middot;</span>
               <ExternalLink
                 item={item}
                 href='https://creativecommons.org/licenses/by-sa/4.0/'
-                className='rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+                className={SOURCE_LINK_CLASS}
               >
                 CC BY-SA
               </ExternalLink>
             </>
           ) : (
-            <ExternalLink
-              item={item}
-              href='https://anilist.co'
-              className='rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-            >
+            <ExternalLink item={item} href='https://anilist.co' className={SOURCE_LINK_CLASS}>
               AniList
             </ExternalLink>
           )}

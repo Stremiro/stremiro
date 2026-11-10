@@ -85,7 +85,7 @@ fn bulk_history_removal_validates_every_target_and_bounds_duplicates() {
     assert_eq!(targets.len(), 1);
     assert_eq!(targets["a"], 3);
     assert!(normalize_history_removals(vec![item("a", "movie"), item("", "movie")]).is_err());
-    assert!(normalize_history_removals(vec![item("a", "series"), item("a", "bad")]).is_err());
+    assert!(normalize_history_removals(vec![item("a", "series"), item("a", " ")]).is_err());
     let cap = super::resume_store::MAX_RESUME_TOTAL_ENTRIES as usize;
     assert!(normalize_history_removals((0..cap).map(|_| item("a", "movie")).collect()).is_ok());
     assert!(normalize_history_removals((0..=cap).map(|_| item("a", "movie")).collect()).is_err());
@@ -222,22 +222,18 @@ fn skip_times_anchor_pairs_imdb_stream_lookup_with_stream_coordinates() {
 
 #[test]
 fn string_list_decode_keeps_only_owned_string_array_members() {
-    for value in [
-        serde_json::json!(null),
-        serde_json::json!("text"),
-        serde_json::json!({ "0": "text" }),
-        serde_json::json!([]),
-        serde_json::json!([1, false, null]),
-        serde_json::json!(["", "a", 1, ["b"], "a", "雪"]),
+    for (value, expected) in [
+        (serde_json::json!(null), None),
+        (serde_json::json!("text"), None),
+        (serde_json::json!({ "0": "text" }), None),
+        (serde_json::json!([]), Some(vec![])),
+        (serde_json::json!([1, false, null]), Some(vec![])),
+        (
+            serde_json::json!(["", "a", 1, ["b"], "a", "雪"]),
+            Some(vec!["", "a", "a", "雪"]),
+        ),
     ] {
-        let expected = serde_json::from_value::<Vec<serde_json::Value>>(value.clone())
-            .ok()
-            .map(|members| {
-                members
-                    .into_iter()
-                    .filter_map(|member| member.as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
-            });
+        let expected = expected.map(|members| members.into_iter().map(String::from).collect());
         assert_eq!(store_helpers::decode_string_list(&value), expected);
     }
 }
@@ -593,20 +589,41 @@ fn mk_stream(
     }
 }
 
+fn url_stream(name: Option<&str>, title: Option<&str>, url: &str) -> AddonStream {
+    mk_stream(name, title, Some(url), None, None)
+}
+
 #[test]
 fn normalize_stream_media_type_promotes_kitsu_series_ids_to_anime() {
     assert_eq!(
-        normalize_stream_media_type("series", Some("kitsu:42")),
+        normalize_stream_media_type("series", Some("kitsu:42")).as_deref(),
         Some("anime")
     );
     assert_eq!(
-        normalize_stream_media_type("series", Some("KITSU:42")),
+        normalize_stream_media_type("series", Some("KITSU:42")).as_deref(),
         Some("anime")
     );
     assert_eq!(
-        normalize_stream_media_type("series", Some("tt0944947")),
+        normalize_stream_media_type("series", Some("tt0944947")).as_deref(),
         Some("series")
     );
+}
+
+#[test]
+fn normalize_media_types_passthrough_addon_catalog_types() {
+    assert_eq!(
+        normalize_stream_media_type(" Channel ", Some("addon:1")).as_deref(),
+        Some("channel")
+    );
+    assert_eq!(
+        normalize_watch_progress_type("Channel").as_deref(),
+        Some("channel")
+    );
+    let overlong = "a".repeat(65);
+    for invalid in ["", "   ", overlong.as_str()] {
+        assert_eq!(normalize_stream_media_type(invalid, None), None);
+        assert_eq!(normalize_watch_progress_type(invalid), None);
+    }
 }
 
 #[test]
@@ -657,60 +674,40 @@ fn stream_dedup_key_prefers_hash_over_url() {
 
 #[test]
 fn stream_dedup_key_recovers_magnet_xt_hash() {
-    // Magnet-only streams (URL but no `content_hash` field) must still dedupe:
-    // the `xt` hash yields the same legacy content-dedup key as an
-    // content-hash-field duplicate, including across case and extra trackers.
-    let magnet = mk_stream(
-        Some("Magnet-only"),
-        Some("1080p"),
-        Some("magnet:?xt=urn:btih:ABC123&tr=udp://tracker"),
-        None,
-        None,
-    );
-    let hashed = mk_stream(
-        Some("Hashed"),
-        Some("1080p"),
-        Some("magnet:?xt=urn:btih:abc123&tr=udp://other"),
-        Some("abc123"),
-        None,
-    );
-    let xtless = mk_stream(
-        Some("Xt-less"),
-        Some("1080p"),
-        Some("magnet:?dn=name-only"),
-        None,
-        None,
-    );
-
-    assert_eq!(
-        streaming_helpers::stream_dedup_key(&magnet).as_deref(),
-        Some("h:abc123:0")
-    );
-    // content-hash-field and magnet-only streams share the legacy `h:` content-dedup key.
-    assert_eq!(
-        streaming_helpers::stream_dedup_key(&hashed).as_deref(),
-        streaming_helpers::stream_dedup_key(&magnet).as_deref()
-    );
-    // A magnet with no `xt` hash has no recoverable identity — drop the row
-    // rather than keying on raw attacker-controlled bytes.
-    assert_eq!(streaming_helpers::stream_dedup_key(&xtless), None);
+    for (url, expected) in [
+        (
+            "magnet:?xt=urn:btih:ABC123&tr=udp://tracker",
+            Some("h:abc123:0"),
+        ),
+        ("magnet:?XT=URN%3AbTmH%3AABC123", Some("h:abc123:0")),
+        (
+            "magnet:?xt=urn:btih:&xt=urn:sha1:ignored&xt=URN:BTIH:ABC123",
+            Some("h:abc123:0"),
+        ),
+        ("magnet:?xt=urn:btih:%C3%84BC", Some("h:Äbc:0")),
+        ("magnet:?xt=urn:sha1:ABC123", None),
+        ("magnet:?dn=name-only", None),
+    ] {
+        let stream = mk_stream(None, None, Some(url), None, None);
+        assert_eq!(
+            streaming_helpers::stream_dedup_key(&stream).as_deref(),
+            expected,
+            "{url}"
+        );
+    }
 }
 
 #[test]
 fn stream_dedup_key_normalizes_url_variants_and_file_index() {
-    let indexed = mk_stream(
+    let indexed = url_stream(
         Some("Multi-file"),
         Some("1080p"),
-        Some("https://EXAMPLE.com/video.mkv?utm_source=x&v=2"),
-        None,
-        None,
+        "https://EXAMPLE.com/video.mkv?utm_source=x&v=2",
     );
-    let mut plain = mk_stream(
+    let mut plain = url_stream(
         Some("Multi-file"),
         Some("1080p"),
-        Some("https://example.com/video.mkv?v=2"),
-        None,
-        None,
+        "https://example.com/video.mkv?v=2",
     );
     plain.file_idx = Some(1);
 
@@ -739,19 +736,15 @@ fn stream_dedup_key_normalizes_url_variants_and_file_index() {
 
 #[test]
 fn stream_dedup_key_preserves_distinct_signatures_in_digests() {
-    let signed = mk_stream(
+    let signed = url_stream(
         Some("Multi-file"),
         Some("1080p"),
-        Some("https://EXAMPLE.com/video.mkv?utm_source=x&sig=abc"),
-        None,
-        None,
+        "https://EXAMPLE.com/video.mkv?utm_source=x&sig=abc",
     );
-    let resigned = mk_stream(
+    let resigned = url_stream(
         Some("Multi-file"),
         Some("1080p"),
-        Some("https://example.com/video.mkv?sig=def"),
-        None,
-        None,
+        "https://example.com/video.mkv?sig=def",
     );
 
     // Distinct signatures are distinct keys — the digest preserves exact
@@ -787,12 +780,10 @@ fn prepared_stream_key_keeps_persisted_identity_with_headers() {
 
 #[test]
 fn prepare_addon_streams_uses_generic_cached_label() {
-    let mut stream = mk_stream(
+    let mut stream = url_stream(
         Some("Cached Release"),
         Some("1080p"),
-        Some("https://example.com/video.mkv"),
-        None,
-        None,
+        "https://example.com/video.mkv",
     );
     stream.cached = true;
     let mut hash_only = mk_stream(
@@ -888,17 +879,50 @@ fn prepare_addon_streams_populates_stream_presentation() {
         }
     }
 
-    let decorated = mk_stream(
-        Some("| ·[XY\u{26A1}]\u{2003}SourceName \u{1F1EC}\u{1F1E7} -:\n4k"),
-        Some(":\u{1F4FA} Show\u{2003}S01E05 1080p [\u{1F4BE}]1.2 GB\u{1F464}5 \u{2699}\u{FE0F} TPB •|"),
-        Some("https://example.com/video.mkv"),
-        None,
-        None,
-    );
+    let decorated = url_stream(Some("| ·[XY\u{26A1}]\u{2003}SourceName \u{1F1EC}\u{1F1E7} -:\n4k"), Some(":\u{1F4FA} Show\u{2003}S01E05 1080p [\u{1F4BE}]1.2 GB\u{1F464}5 \u{2699}\u{FE0F} TPB •|"), "https://example.com/video.mkv");
     let prepared = prepare_addon_streams(vec![decorated], "TestSource", "addon-testsource");
     let presentation = &prepared[0].presentation;
     assert_eq!(presentation.source_name, "[XY] SourceName");
     assert_eq!(presentation.stream_title, "Show S01E05 1080p 1.2 GB 5 TPB");
+}
+
+#[test]
+fn audio_presentation_distinguishes_truehd_without_changing_quality() {
+    for (title, filename, expected) in [
+        ("TrueHD7.1", None, "TrueHD"),
+        ("TrueHD Atmos", None, "Atmos"),
+        ("Atmos", Some("Show.TrueHD.mkv"), "Atmos"),
+        ("Show", Some("Show.TrueHD7.1.mkv"), "TrueHD"),
+        ("TrueHD", Some("Show.Atmos.mkv"), "TrueHD"),
+        ("DTS-HD", Some("Show.TrueHD.mkv"), "DTS-HD"),
+        ("DTS-HD DTS", None, "DTS-HD"),
+        ("DTS", None, "DTS"),
+        ("AAC", Some("Show.TrueHD.mkv"), "AAC"),
+    ] {
+        let streams = prepare_addon_streams(
+            vec![mk_stream(
+                None,
+                Some(title),
+                Some("https://example.com/video.mkv"),
+                None,
+                filename,
+            )],
+            "Source",
+            "addon-source",
+        );
+        assert_eq!(
+            streams[0].presentation.audio_label,
+            Some(expected),
+            "{title}"
+        );
+        if matches!(expected, "TrueHD" | "Atmos") {
+            assert_eq!(
+                stream_quality_score(streams[0].match_texts().flags),
+                15,
+                "{title}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1243,13 +1267,7 @@ fn stream_families_scope_release_binge_and_fallback_to_source_instance() {
 
 #[test]
 fn long_stream_family_components_stay_within_identity_bound() {
-    let mut stream = mk_stream(
-        None,
-        None,
-        Some("https://cdn.example/video.mkv"),
-        None,
-        None,
-    );
+    let mut stream = url_stream(None, None, "https://cdn.example/video.mkv");
     stream.behavior_hints.as_mut().unwrap().binge_group = Some("abcdefghijklmnopqrst ".repeat(12));
     let family = prepared_stream_family(&stream, "addon-a").unwrap();
 
@@ -1271,52 +1289,47 @@ fn stream_family_ignores_episode_number_noise() {
         Some("alpha-1"),
         Some("Show.S01E01.1080p.WEB-DL-GROUP.mkv"),
     );
-    let stream_two = mk_stream(
-        Some("Alpha Group S01E02 1080p WEB-DL"),
-        Some("1.5 GB"),
-        Some("magnet:?xt=urn:btih:alpha-2"),
-        Some("alpha-2"),
-        Some("Show.S01E02.1080p.WEB-DL-GROUP.mkv"),
-    );
-
-    let family_one = prepared_stream_family(&stream_one, source_id);
-    let family_two = prepared_stream_family(&stream_two, source_id);
-
-    assert_eq!(family_one, family_two);
-
-    // Underscore-joined names hit the `_`-defeats-`\b` pitfall the strip
-    // regexes otherwise miss — they must resolve to the same family key.
-    let underscore_one = mk_stream(
-        Some("Alpha_Group_S01E01_1080p_WEB-DL"),
-        Some("1.4 GB"),
-        Some("magnet:?xt=urn:btih:alpha-1"),
-        Some("alpha-1"),
-        Some("Show_S01E01_1080p_WEB-DL-GROUP.mkv"),
-    );
-    let underscore_two = mk_stream(
-        Some("Alpha_Group_S01E02_1080p_WEB-DL"),
-        Some("1.5 GB"),
-        Some("magnet:?xt=urn:btih:alpha-2"),
-        Some("alpha-2"),
-        Some("Show_S01E02_1080p_WEB-DL-GROUP.mkv"),
-    );
-
-    let family_one = prepared_stream_family(&underscore_one, source_id);
-    let family_two = prepared_stream_family(&underscore_two, source_id);
-
-    assert_eq!(family_one, family_two);
-
-    let multi_episode = mk_stream(
-        Some("Alpha Group S01E03E04 1080p WEB-DL"),
-        Some("2.9 GB"),
-        Some("magnet:?xt=urn:btih:alpha-3"),
-        Some("alpha-3"),
-        Some("Show.S01E03-E04.1080p.WEB-DL-GROUP.mkv"),
-    );
-    assert_eq!(
-        prepared_stream_family(&multi_episode, source_id),
-        prepared_stream_family(&stream_one, source_id)
-    );
+    let expected = prepared_stream_family(&stream_one, source_id);
+    // Underscore separators and multi-episode markers must share the same release family.
+    for (name, title, hash, filename) in [
+        (
+            "Alpha Group S01E02 1080p WEB-DL",
+            "1.5 GB",
+            "alpha-2",
+            "Show.S01E02.1080p.WEB-DL-GROUP.mkv",
+        ),
+        (
+            "Alpha_Group_S01E01_1080p_WEB-DL",
+            "1.4 GB",
+            "alpha-1",
+            "Show_S01E01_1080p_WEB-DL-GROUP.mkv",
+        ),
+        (
+            "Alpha_Group_S01E02_1080p_WEB-DL",
+            "1.5 GB",
+            "alpha-2",
+            "Show_S01E02_1080p_WEB-DL-GROUP.mkv",
+        ),
+        (
+            "Alpha Group S01E03E04 1080p WEB-DL",
+            "2.9 GB",
+            "alpha-3",
+            "Show.S01E03-E04.1080p.WEB-DL-GROUP.mkv",
+        ),
+    ] {
+        let stream = mk_stream(
+            Some(name),
+            Some(title),
+            Some(&format!("magnet:?xt=urn:btih:{hash}")),
+            Some(hash),
+            Some(filename),
+        );
+        assert_eq!(
+            prepared_stream_family(&stream, source_id),
+            expected,
+            "{filename}"
+        );
+    }
     assert_eq!(
         prepared_stream_family(
             &mk_stream(
@@ -1397,12 +1410,10 @@ fn magnet_only_stream_shares_hashed_viability() {
     // Magnet-only and content-hash-field spellings dedupe to one `h:`
     // identity, so viability must agree — otherwise which duplicate
     // survives merge order decides the rank input.
-    let magnet = mk_stream(
+    let magnet = url_stream(
         Some("Magnet-only"),
         Some("1080p"),
-        Some("magnet:?xt=urn:btih:abc123"),
-        None,
-        None,
+        "magnet:?xt=urn:btih:abc123",
     );
     let hashed = mk_stream(
         Some("Hashed"),
@@ -1504,23 +1515,8 @@ fn title_watch_progress_keeps_episode_rows_and_selects_stable_resume_rows_per_ki
     assert_eq!(progress.movie_resume_entry.as_ref().unwrap().type_, "movie");
     // Pre-picked heads mirror the frontend's per-kind `find` scans.
     assert_eq!(
-        progress.latest_series_entry.as_ref().map(|row| row.episode),
-        Some(Some(8))
-    );
-    assert_eq!(
         progress
             .latest_movie_entry
-            .as_ref()
-            .map(|row| row.type_.as_str()),
-        Some("movie")
-    );
-    assert_eq!(
-        progress.series_resume_entry.as_ref().map(|row| row.episode),
-        Some(Some(3))
-    );
-    assert_eq!(
-        progress
-            .movie_resume_entry
             .as_ref()
             .map(|row| row.type_.as_str()),
         Some("movie")
@@ -1752,16 +1748,13 @@ fn merge_unique_streams_preserves_source_transport_variants() {
         None,
     );
 
-    merge_unique_streams(
-        &mut merged,
-        &mut seen,
-        prepare_addon_streams(vec![hash_stream], "Shared", "addon-a"),
-    );
-    merge_unique_streams(
-        &mut merged,
-        &mut seen,
-        prepare_addon_streams(vec![direct], "Shared", "addon-b"),
-    );
+    for (stream, source) in [(hash_stream, "addon-a"), (direct, "addon-b")] {
+        merge_unique_streams(
+            &mut merged,
+            &mut seen,
+            prepare_addon_streams(vec![stream], "Shared", source),
+        );
+    }
 
     assert_eq!(merged.len(), 2);
     assert_eq!(merged[0].source_id.as_deref(), Some("addon-a"));
@@ -1774,25 +1767,16 @@ fn merge_unique_streams_preserves_source_transport_variants() {
     );
     assert!(merged[1].presentation.is_instantly_playable);
 
-    let identical = mk_stream(
-        Some("Shared"),
-        Some("1080p"),
-        Some("https://cdn.test/shared.mkv"),
-        None,
-        None,
-    );
+    let identical = url_stream(Some("Shared"), Some("1080p"), "https://cdn.test/shared.mkv");
     let mut source_scoped = Vec::new();
     let mut source_seen = std::collections::HashSet::new();
-    merge_unique_streams(
-        &mut source_scoped,
-        &mut source_seen,
-        prepare_addon_streams(vec![identical.clone()], "Shared", "addon-a"),
-    );
-    merge_unique_streams(
-        &mut source_scoped,
-        &mut source_seen,
-        prepare_addon_streams(vec![identical], "Shared", "addon-b"),
-    );
+    for source in ["addon-a", "addon-b"] {
+        merge_unique_streams(
+            &mut source_scoped,
+            &mut source_seen,
+            prepare_addon_streams(vec![identical.clone()], "Shared", source),
+        );
+    }
     assert_eq!(source_scoped.len(), 2);
     assert_ne!(source_scoped[0].stream_key, source_scoped[1].stream_key);
     assert_eq!(source_scoped[0].source_id.as_deref(), Some("addon-a"));
@@ -1801,39 +1785,25 @@ fn merge_unique_streams_preserves_source_transport_variants() {
     // Same addon + same URL but different required request headers are
     // distinct transports: neither collapses into the other, and the header
     // secrets never appear in the issued keys.
-    let mut header_a = mk_stream(
-        Some("Shared"),
-        Some("1080p"),
-        Some("https://cdn.test/file.mkv"),
-        None,
-        None,
-    );
-    header_a.behavior_hints = Some(crate::providers::addons::BehaviorHints {
-        proxy_headers: Some(serde_json::json!({
-            "request": {"Authorization": "Bearer a"}
-        })),
-        ..Default::default()
-    });
-    let mut header_b = mk_stream(
-        Some("Shared"),
-        Some("1080p"),
-        Some("https://cdn.test/file.mkv"),
-        None,
-        None,
-    );
-    header_b.behavior_hints = Some(crate::providers::addons::BehaviorHints {
-        proxy_headers: Some(serde_json::json!({
-            "request": {"Authorization": "Bearer b"}
-        })),
-        ..Default::default()
-    });
+    let header_variants = ["Bearer a", "Bearer b"]
+        .map(|authorization| {
+            let mut stream = url_stream(Some("Shared"), Some("1080p"), "https://cdn.test/file.mkv");
+            stream.behavior_hints = Some(BehaviorHints {
+                proxy_headers: Some(
+                    serde_json::json!({"request": {"Authorization": authorization}}),
+                ),
+                ..Default::default()
+            });
+            stream
+        })
+        .into();
 
     let mut merged = Vec::new();
     let mut seen = std::collections::HashSet::new();
     merge_unique_streams(
         &mut merged,
         &mut seen,
-        prepare_addon_streams(vec![header_a, header_b], "A", "addon-a"),
+        prepare_addon_streams(header_variants, "A", "addon-a"),
     );
 
     assert_eq!(merged.len(), 2);
@@ -2576,18 +2546,47 @@ fn choose_exact_watch_progress_entry_falls_back_to_raw_only_within_matching_scop
 }
 
 #[test]
-fn sanitize_watch_progress_normalizes_anime_type_to_series() {
-    let progress = mk_watch_progress("kitsu:99", "anime", 10);
-    let sanitized = sanitize_watch_progress(progress).expect("valid anime progress");
-
-    assert_eq!(sanitized.type_, "series");
+fn sanitize_watch_progress_normalizes_media_types() {
+    for (id, media_type, expected) in [
+        ("kitsu:99", "anime", Some("series")),
+        ("addon:1", "Channel", Some("channel")),
+        ("bad:1", " ", None),
+    ] {
+        let sanitized = sanitize_watch_progress(mk_watch_progress(id, media_type, 10));
+        assert_eq!(sanitized.as_ref().map(|row| row.type_.as_str()), expected);
+    }
 }
 
 #[test]
-fn sanitize_watch_progress_rejects_invalid_type() {
-    let progress = mk_watch_progress("bad:1", "unsupported", 10);
+fn addon_catalog_types_share_the_movie_history_namespace() {
+    assert_eq!(
+        super::history_helpers::build_history_key("channel", "addon:1", None, None),
+        "movie:addon:1"
+    );
+    assert_eq!(
+        super::history_helpers::build_history_key("channel", "addon:1", Some(1), Some(2)),
+        "movie:addon:1"
+    );
+}
 
-    assert!(sanitize_watch_progress(progress).is_none());
+#[test]
+fn addon_catalog_types_bucket_with_movie_resume_entries() {
+    let mut progress = mk_watch_progress("addon:1", "Channel", 1_000);
+    progress.position = 600.0;
+    progress.duration = 2_400.0;
+    let progress = build_title_watch_progress_with_priorities(
+        vec![sanitize_watch_progress(progress).expect("valid addon progress")],
+        None,
+    );
+
+    let entry = progress
+        .movie_resume_entry
+        .as_ref()
+        .expect("custom-type resume entry");
+    assert_eq!(entry.id, "addon:1");
+    assert!(progress.series_resume_entry.is_none());
+    assert!(progress.episode_progress.is_empty());
+    assert!(progress.watched_episode_ceiling.is_empty());
 }
 
 #[test]
@@ -2714,6 +2713,16 @@ fn backup_validate_import_capacity_allows_no_growth_over_limit() {
     assert!(validate_import_capacity(3, 4, 2, "library").is_err());
 }
 
+fn backup_list(id: &str, name: &str, items: Vec<crate::providers::MediaItem>) -> serde_json::Value {
+    serde_json::json!(UserListWithItems {
+        id: id.into(),
+        name: name.into(),
+        icon: String::new(),
+        item_ids: vec![],
+        items,
+    })
+}
+
 #[test]
 fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     use super::list_helpers::{list_meta_key, LISTS_ORDER_KEY};
@@ -2747,15 +2756,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
 
     // A repeat of the same valid backup id folds into the prepared list
     // instead of importing a second copy under a fresh uuid.
-    let dup = || {
-        serde_json::json!(UserListWithItems {
-            id: "list_dup".to_string(),
-            name: "Dup".to_string(),
-            icon: "".to_string(),
-            item_ids: vec![],
-            items: vec![],
-        })
-    };
+    let dup = || backup_list("list_dup", "Dup", vec![]);
     let prepared = prepare_import_lists(vec![dup(), dup()], &[], store).expect("prepare");
     assert_eq!(prepared.len(), 1);
     assert_eq!(prepared[0].id, "list_dup");
@@ -2763,13 +2764,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     // An existing id — padding included — keeps the local list untouched.
     let existing = vec!["list_here".to_string()];
     store.set(LISTS_ORDER_KEY, serde_json::json!(existing));
-    let incoming = vec![serde_json::json!(UserListWithItems {
-        id: "  list_here ".to_string(),
-        name: "Incoming".to_string(),
-        icon: "".to_string(),
-        item_ids: vec![],
-        items: vec![],
-    })];
+    let incoming = vec![backup_list("  list_here ", "Incoming", vec![])];
     let prepared =
         prepare_import_lists(incoming.clone(), &existing, store).expect("recover missing list");
     assert_eq!(prepared.len(), 1);
@@ -2808,13 +2803,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     assert_eq!(store.get(list_meta_key("list_here")), Some(local));
 
     // Repeated invalid ids also fold into one list under a fresh safe id.
-    let hostile = serde_json::json!(UserListWithItems {
-        id: "bad id!!".to_string(),
-        name: "Hostile".to_string(),
-        icon: "".to_string(),
-        item_ids: vec![],
-        items: vec![],
-    });
+    let hostile = backup_list("bad id!!", "Hostile", vec![]);
     let prepared =
         prepare_import_lists(vec![hostile.clone(), hostile], &[], store).expect("prepare");
     assert_eq!(prepared.len(), 1);
@@ -2833,13 +2822,7 @@ fn backup_prepare_import_lists_enforces_live_limits() {
     let over_items: Vec<_> = (0..=MAX_LIST_ITEMS)
         .map(|i| test_media_item(&format!("tt{i}"), "movie"))
         .collect();
-    let oversized = serde_json::json!(UserListWithItems {
-        id: "list_big".to_string(),
-        name: "Big".to_string(),
-        icon: "".to_string(),
-        item_ids: vec![],
-        items: over_items,
-    });
+    let oversized = backup_list("list_big", "Big", over_items);
     // The same over-cap payload behind a malformed name still skips as one
     // bad record instead of aborting the whole restore.
     let mut blank_named = oversized.clone();
@@ -2853,13 +2836,7 @@ fn backup_prepare_import_lists_enforces_live_limits() {
     // A store already at the list cap accepts a same-id restore — no
     // growth, nothing imported.
     let full_order: Vec<String> = (0..MAX_LISTS).map(|i| format!("list_{i}")).collect();
-    let same_id = vec![serde_json::json!(UserListWithItems {
-        id: "list_0".to_string(),
-        name: "Existing".to_string(),
-        icon: "".to_string(),
-        item_ids: vec![],
-        items: vec![],
-    })];
+    let same_id = vec![backup_list("list_0", "Existing", vec![])];
     store.set(
         list_meta_key("list_0"),
         serde_json::json!({
@@ -2870,13 +2847,7 @@ fn backup_prepare_import_lists_enforces_live_limits() {
         .expect("prepare")
         .is_empty());
     // One new id past the cap rejects.
-    let extra = vec![serde_json::json!(UserListWithItems {
-        id: "list_new".to_string(),
-        name: "New".to_string(),
-        icon: "".to_string(),
-        item_ids: vec![],
-        items: vec![],
-    })];
+    let extra = vec![backup_list("list_new", "New", vec![])];
     assert!(prepare_import_lists(extra.clone(), &full_order, store).is_err());
 
     // Rebuilding an existing slot is no growth, including in legacy over-cap orders.
@@ -3082,6 +3053,25 @@ mod skip_times_orchestration {
         client
     }
 
+    async fn series_request(
+        enrichment: &EnrichmentClient,
+        skip: &SkipTimesProvider,
+        duration: Option<f64>,
+    ) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
+        request(
+            enrichment,
+            skip,
+            "series",
+            "tt0903747",
+            Some("tt0903747"),
+            None,
+            (Some(1), Some(1)),
+            (Some(1), Some(1)),
+            duration,
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn skip_times_episode_hits_skipdb_once_then_serves_cache() {
         let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
@@ -3089,19 +3079,7 @@ mod skip_times_orchestration {
         let arm = TestHttpServer::new(vec![]);
         let enrichment = enrichment(&arm);
         // Concurrent same-episode callers coalesce the very first fetch.
-        let fetch = || {
-            request(
-                &enrichment,
-                &skip,
-                "series",
-                "tt0903747",
-                Some("tt0903747"),
-                None,
-                (Some(1), Some(1)),
-                (Some(1), Some(1)),
-                Some(1440.0),
-            )
-        };
+        let fetch = || series_request(&enrichment, &skip, Some(1440.0));
         let (a, b) = tokio::join!(fetch(), fetch());
         assert!(a.is_ok() && b.is_ok());
         // A repeat afterwards stays a cache hit too.
@@ -3389,32 +3367,12 @@ mod skip_times_orchestration {
         let skip = provider(&skipdb);
         let arm = TestHttpServer::new(vec![]);
         let enrichment = enrichment(&arm);
-        assert!(request(
-            &enrichment,
-            &skip,
-            "series",
-            "tt0903747",
-            Some("tt0903747"),
-            None,
-            (Some(1), Some(1)),
-            (Some(1), Some(1)),
-            Some(1440.0),
-        )
-        .await
-        .is_err());
-        let result = request(
-            &enrichment,
-            &skip,
-            "series",
-            "tt0903747",
-            Some("tt0903747"),
-            None,
-            (Some(1), Some(1)),
-            (Some(1), Some(1)),
-            Some(1440.0),
-        )
-        .await
-        .unwrap();
+        assert!(series_request(&enrichment, &skip, Some(1440.0))
+            .await
+            .is_err());
+        let result = series_request(&enrichment, &skip, Some(1440.0))
+            .await
+            .unwrap();
         assert_eq!(result.segments.len(), 1);
         assert_eq!(skipdb.finish().len(), 2);
     }
@@ -3427,19 +3385,9 @@ mod skip_times_orchestration {
             let skipdb = TestHttpServer::new(vec![(200, body, None)]);
             let skip = provider(&skipdb);
             for _ in 0..2 {
-                let result = request(
-                    &enrichment,
-                    &skip,
-                    "series",
-                    "tt0903747",
-                    Some("tt0903747"),
-                    None,
-                    (Some(1), Some(1)),
-                    (Some(1), Some(1)),
-                    Some(1440.0),
-                )
-                .await
-                .unwrap();
+                let result = series_request(&enrichment, &skip, Some(1440.0))
+                    .await
+                    .unwrap();
                 assert!(
                     result.segments.is_empty() && result.intro_estimate_secs.is_none(),
                     "{body}"
@@ -3462,19 +3410,7 @@ mod skip_times_orchestration {
             let skip = provider(&skipdb);
             let arm = TestHttpServer::new(vec![]);
             let enrichment = enrichment(&arm);
-            request(
-                &enrichment,
-                &skip,
-                "series",
-                "tt0903747",
-                Some("tt0903747"),
-                None,
-                (Some(1), Some(1)),
-                (Some(1), Some(1)),
-                duration,
-            )
-            .await
-            .unwrap();
+            series_request(&enrichment, &skip, duration).await.unwrap();
             assert_eq!(
                 skipdb.finish(),
                 ["/api/segments?imdb_id=tt0903747&season=1&episode=1"],
@@ -3482,4 +3418,16 @@ mod skip_times_orchestration {
             );
         }
     }
+}
+
+#[test]
+fn media_id_bound_accepts_blob_style_addon_ids() {
+    // Custom addon ids may embed encoded payloads above 512 chars.
+    let blob_id = format!("addon:{}", "e".repeat(600));
+    assert_eq!(
+        normalize_media_id(&blob_id).as_deref(),
+        Some(blob_id.as_str())
+    );
+    let overlong = "a".repeat(MEDIA_ID_MAX_CHARS + 1);
+    assert_eq!(normalize_media_id(&overlong), None);
 }

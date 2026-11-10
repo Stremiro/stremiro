@@ -396,7 +396,7 @@ pub(super) fn build_title_watch_progress_with_priorities(
     for row in continue_watching {
         if series_resume_entry.is_none() && is_series_like_watch_progress(&row) {
             series_resume_entry = Some(row);
-        } else if movie_resume_entry.is_none() && row.type_ == "movie" {
+        } else if movie_resume_entry.is_none() && !is_series_like_watch_progress(&row) {
             movie_resume_entry = Some(row);
         }
     }
@@ -404,7 +404,10 @@ pub(super) fn build_title_watch_progress_with_priorities(
         .iter()
         .find(|row| is_series_like_watch_progress(row))
         .cloned();
-    let latest_movie_entry = history.iter().find(|row| row.type_ == "movie").cloned();
+    let latest_movie_entry = history
+        .iter()
+        .find(|row| !is_series_like_watch_progress(row))
+        .cloned();
     let up_next_source = choose_up_next_source(
         history
             .iter()
@@ -704,9 +707,8 @@ pub async fn get_watch_progress(
     season: Option<u32>,
     episode: Option<u32>,
 ) -> Result<Option<WatchProgress>, String> {
-    let normalized_type = normalize_watch_progress_type(&type_)
-        .ok_or_else(|| "Invalid media type.".to_string())?
-        .to_string();
+    let normalized_type =
+        normalize_watch_progress_type(&type_).ok_or_else(|| "Invalid media type.".to_string())?;
     let id = normalize_media_id(&id)
         .ok_or_else(|| "Invalid media id for watch progress.".to_string())?;
     let (season, episode) = require_episode_coordinates(season, episode)?;
@@ -771,7 +773,7 @@ pub(super) fn normalize_history_removals(
             .ok_or_else(|| "Invalid media id for watch history.".to_string())?;
         let media_type = normalize_watch_progress_type(&item.type_)
             .ok_or_else(|| "Invalid media type.".to_string())?;
-        *targets.entry(id).or_default() |= if media_type == "movie" { 1 } else { 2 };
+        *targets.entry(id).or_default() |= if media_type == "series" { 2 } else { 1 };
     }
     Ok(targets)
 }
@@ -858,7 +860,7 @@ pub async fn set_continue_watching_dismissed(
         normalize_watch_progress_type(&type_).ok_or_else(|| "Invalid media type.".to_string())?;
     playback_state
         .run_store_op(&app, move |service, app| {
-            service.set_continue_watching_dismissed(app, media_type, &id, dismissed)
+            service.set_continue_watching_dismissed(app, &media_type, &id, dismissed)
         })
         .await
 }

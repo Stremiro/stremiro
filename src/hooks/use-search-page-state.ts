@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router';
 
+import { ITEM_SEARCH_DEBOUNCE_MS } from '@/hooks/use-item-search';
 import { isAppLinkText } from '@/lib/app-links';
 import {
   readSearchFacets,
@@ -55,7 +56,7 @@ export function useSearchPageState() {
         setSearchParams(nextParams, { replace: true });
       }
     },
-    [isComposing, isLinkDraft, searchParams, setSearchParams, setReflectedQuery, trimmedQuery],
+    [isComposing, isLinkDraft, searchParams, setReflectedQuery, setSearchParams, trimmedQuery],
   );
   const flushQuery = useCallback(() => {
     if (isComposing || isLinkDraft || window.location.pathname !== pathname) return;
@@ -80,7 +81,7 @@ export function useSearchPageState() {
       flushQuery();
       return;
     }
-    const timer = window.setTimeout(flushQuery, 180);
+    const timer = window.setTimeout(flushQuery, ITEM_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [flushQuery, isComposing, isLinkDraft, query, searchParams, trimmedQuery, urlQuery]);
 

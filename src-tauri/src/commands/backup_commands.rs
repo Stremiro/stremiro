@@ -394,18 +394,19 @@ fn import_settings(
     let store = super::open_store(app, SETTINGS_STORE_FILE)?;
     let avatars = super::open_store(app, PROFILE_AVATAR_STORE_FILE)?;
     let mut restored = false;
-    if let Some(preferences) = settings
-        .app_ui_preferences
-        .and_then(parse_app_ui_preferences)
-    {
-        save_app_ui_preferences_to_store(&store, &preferences);
-        restored = true;
-    }
+    // A failed avatar write must not stage preferences that never reach the native shell.
     if let Some(preferences) = settings
         .profile_preferences
         .and_then(parse_profile_preferences)
     {
         save_profile_preferences_to_store(&store, &avatars, &preferences)?;
+        restored = true;
+    }
+    if let Some(preferences) = settings
+        .app_ui_preferences
+        .and_then(parse_app_ui_preferences)
+    {
+        save_app_ui_preferences_to_store(&store, &preferences);
         restored = true;
     }
     if let Some(mut preferences) = settings

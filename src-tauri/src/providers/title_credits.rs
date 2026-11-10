@@ -375,7 +375,7 @@ async fn anilist_credits(
 /// Pick the single AniList identifier: direct family ids need no bridge;
 /// IMDb/kitsu resolve through the cached ARM rows with exactly-one season-1
 /// agreement or exactly-one distinct mapping. Anything else is empty.
-async fn anilist_lookup_ids(
+pub(crate) async fn anilist_lookup_ids(
     client: &EnrichmentClient,
     id: &str,
     imdb_id: Option<&str>,

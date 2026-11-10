@@ -29,7 +29,6 @@ import { bumpWatchProgressEpoch, getWatchProgressEpoch } from '@/lib/api-cache';
 import { pendingDetailsPrefetch } from '@/lib/details-prefetch';
 import { notifyAction } from '@/lib/notify';
 import { reinsertSnapshotRows, restoreQueryArrayEntry } from '@/lib/optimistic-query';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import {
   invalidateLibraryQueries,
   invalidateListQueries,
@@ -281,16 +280,6 @@ function getLibraryIdSet(library: MediaItem[]): Set<string> {
   return cached;
 }
 
-function resolveSharedCollectionQueryOptions(
-  options: SharedCollectionQueryOptions | undefined,
-  defaultStaleTime: number,
-) {
-  return {
-    enabled: options?.enabled,
-    staleTime: options?.staleTime ?? defaultStaleTime,
-  };
-}
-
 export function useProfileLibrary(filters: LibraryFilters, options?: { enabled?: boolean }) {
   const isDefault =
     !filters.query &&
@@ -325,7 +314,8 @@ export function useWatchHistory(options?: SharedCollectionQueryOptions) {
   return useQuery({
     queryKey: WATCH_HISTORY_QUERY_KEY,
     queryFn: api.getWatchHistory,
-    ...resolveSharedCollectionQueryOptions(options, WATCH_HISTORY_STALE_TIME_MS),
+    enabled: options?.enabled,
+    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
   });
 }
 
@@ -468,11 +458,7 @@ export function useMediaResumeEntry(
   return useQuery({
     ...titleWatchProgressQuery(itemId, mediaType, options),
     select: (progress: TitleWatchProgress) =>
-      resolvePlayerRouteMediaType(mediaType) === 'movie'
-        ? progress.movieResumeEntry
-        : isSeriesLikeMediaType(mediaType)
-          ? progress.seriesResumeEntry
-          : null,
+      isSeriesLikeMediaType(mediaType) ? progress.seriesResumeEntry : progress.movieResumeEntry,
   });
 }
 
@@ -829,7 +815,9 @@ export function useBulkAddToList() {
           if (selectedIds.has(item.id)) itemsById.set(item.id, item);
         }
       }
-      const items = [...itemsById.values()];
+      const items = [...selectedIds]
+        .map((id) => itemsById.get(id))
+        .filter((item) => item !== undefined);
       await cancelListQueries(queryClient);
       return setCachedListItems(queryClient, listId, new Set(items.map((item) => item.id)), items);
     },

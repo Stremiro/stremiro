@@ -112,6 +112,8 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
       : 'mini'
     : null;
 
+  // Memoized for jsx-no-constructed-context-values — context identity is the
+  // consumer contract, and the linter can't see React Compiler's memoization.
   const value = useMemo<PlayerSessionContextValue>(
     () => ({
       session,

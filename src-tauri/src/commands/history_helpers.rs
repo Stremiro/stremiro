@@ -50,15 +50,16 @@ pub(crate) fn build_history_key(
     season: Option<u32>,
     episode: Option<u32>,
 ) -> String {
-    if canonical_type == "movie" {
-        format!("movie:{}", id)
-    } else {
+    // Non-episodic addon catalog types share the movie namespace.
+    if matches!(canonical_type, "series" | "anime") {
         format!(
             "series:{}:{}:{}",
             id,
             season.unwrap_or(0),
             episode.unwrap_or(0)
         )
+    } else {
+        format!("movie:{}", id)
     }
 }
 
@@ -68,7 +69,7 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     // The id is a store key: reject rather than truncate so hostile ids can't collide.
     // An empty id collapses every row onto one `movie:`/`series:0:0` key.
     progress.id = normalize_media_id(&progress.id)?;
-    progress.type_ = normalize_watch_progress_type(&progress.type_)?.to_string();
+    progress.type_ = normalize_watch_progress_type(&progress.type_)?;
     progress.resume_start_time = None;
     progress.is_watched = false;
     progress.has_started_watching = false;
@@ -669,7 +670,8 @@ pub(crate) fn choose_entry(
             let mut candidates = items;
             candidates.retain(|item| {
                 item.id == normalized_id
-                    && normalize_watch_progress_type(&item.type_) == Some(normalized_type)
+                    && normalize_watch_progress_type(&item.type_).as_deref()
+                        == Some(normalized_type.as_str())
             });
             let has_canonical_match = candidates
                 .iter()

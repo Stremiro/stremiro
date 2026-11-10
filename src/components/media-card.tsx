@@ -15,7 +15,6 @@ import {
   type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   lazy,
-  memo,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
   Suspense,
@@ -26,12 +25,17 @@ import {
   useRef,
   useState,
 } from 'react';
-import { currentPathWithSearch, navigateOnAnchorClick, navigateToDetails } from '@/lib/navigation';
+import {
+  currentPathWithSearch,
+  navigateOnAnchorClick,
+  navigateToDetailsMorph,
+} from '@/lib/navigation';
 import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { InlineMenu, INLINE_MENU_EXIT_MS } from '@/components/inline-menu';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { RemoteImage } from '@/components/remote-image';
 import { SaveIndicator } from '@/components/ui/button';
+import { IndeterminateBar } from '@/components/ui/skeleton';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { SelectionCheck, WatchStatusIcon } from '@/components/watch-status-icon';
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
@@ -48,6 +52,7 @@ import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePointerIdle } from '@/hooks/use-pointer-idle';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
+import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { api, type MediaItem, WATCH_STATUS_LABELS, type WatchStatus } from '@/lib/api';
 import { buildTitleShareLink } from '@/lib/app-links';
 import { pendingDetailsPrefetch } from '@/lib/details-prefetch';
@@ -66,7 +71,6 @@ import {
   formatRuntime,
   isHttpUrl,
   mediaTypeLabel,
-  prefersReducedMotion,
   primaryGenrePills,
 } from '@/lib/utils';
 
@@ -219,7 +223,7 @@ function PlaybackPendingOverlay() {
         aria-hidden='true'
         className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.08]'
       >
-        <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+        <IndeterminateBar className='bg-(--accent-prog)' />
       </div>
     </div>
   );
@@ -413,7 +417,7 @@ function MediaCardPoster({
         onClick={(event) => {
           if (event.detail === 0) onPrefetchDetails?.();
           void onPlay?.(event);
-          navigateToDetails(
+          navigateToDetailsMorph(
             event,
             detailsPath,
             { state: { from: currentPathWithSearch() } },
@@ -617,7 +621,7 @@ function MediaCardOverlay({
   const artworkRef = useRef<HTMLDivElement>(null);
 
   const openDetails = (event: ReactMouseEvent<HTMLAnchorElement>) =>
-    navigateToDetails(event, detailsPath, { state: { from } }, artworkRef.current);
+    navigateToDetailsMorph(event, detailsPath, { state: { from } }, artworkRef.current);
 
   const { data: lists } = useListSummaries(item.id);
 
@@ -629,12 +633,13 @@ function MediaCardOverlay({
   const lateGenrePills = genrePills.length > 0 && !item.genres?.length;
 
   const [trailerIndex, setTrailerIndex] = useState(0);
-  const skipTrailer = useCallback(() => setTrailerIndex((index) => index + 1), []);
+  const skipTrailer = () => setTrailerIndex((index) => index + 1);
   const trailerVideoId =
     trailerIndex < MAX_TRAILER_ATTEMPTS ? details?.trailers?.[trailerIndex]?.id : undefined;
   // Reduced-motion CSS cannot stop playback inside an iframe.
   const { session } = usePlayerSession();
-  const trailersEnabled = useTrailerPreviews() && !session && !prefersReducedMotion();
+  const reducedMotion = useReducedMotion();
+  const trailersEnabled = useTrailerPreviews() && !session && !reducedMotion;
 
   // A still pointer over a playing trailer fades the remaining artwork chrome.
   const [trailerShowing, setTrailerShowing] = useState(false);
@@ -1041,9 +1046,9 @@ function MediaCardOverlay({
   );
 }
 
-// Memoized — `item` is referentially stable via TanStack structural sharing, so a pure-props bail-out skips
-// most re-renders. Callers must keep `onPlay`/`onRemoveFromContinue` referentially stable.
-export const MediaCard = memo(function MediaCard({
+// React Compiler memoizes — `item` is referentially stable via TanStack structural sharing, so the
+// pure-props bail-out skips most re-renders. Callers must keep `onPlay`/`onRemoveFromContinue` referentially stable.
+export function MediaCard({
   item,
   currentStatusOverride,
   isInLibraryOverride,
@@ -1402,7 +1407,7 @@ export const MediaCard = memo(function MediaCard({
       )}
     </article>
   );
-});
+}
 
 export function MediaCardSkeleton() {
   return (

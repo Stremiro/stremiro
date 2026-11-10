@@ -4,12 +4,13 @@
 use crate::providers::fetch_policy::{
     redirect_target_allowed, same_origin_for_proxy_headers, MAX_REDIRECT_HOPS,
 };
+use crate::providers::lock_or_recover;
 use reqwest::{header::HeaderMap, Client, Url};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -57,35 +58,24 @@ impl SubtitleSession {
     }
 
     pub(super) fn clear_tracks(&self) {
-        self.original_urls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        lock_or_recover(&self.original_urls).clear();
     }
 
     pub(super) fn register(&self, url: String, input: &SubtitleInput) -> String {
         let path = input.path.to_string_lossy().into_owned();
-        self.original_urls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(path.clone(), url);
+        lock_or_recover(&self.original_urls).insert(path.clone(), url);
         path
     }
 
     pub(super) fn original_url(&self, path: String) -> String {
-        self.original_urls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        lock_or_recover(&self.original_urls)
             .get(&path)
             .cloned()
             .unwrap_or(path)
     }
 
     pub(super) fn discard(&self, path: &str) {
-        self.original_urls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(path);
+        lock_or_recover(&self.original_urls).remove(path);
     }
 }
 

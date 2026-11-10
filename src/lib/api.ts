@@ -27,7 +27,7 @@ export interface MediaItem {
   primaryYear?: number;
   displayYear?: string;
   genres?: string[];
-  type: 'movie' | 'series';
+  type: 'movie' | 'series' | (string & {});
 }
 
 export interface Episode {
@@ -99,7 +99,7 @@ export interface CalendarRange {
 export interface CalendarScheduleEvent {
   id: string;
   mediaId: string;
-  mediaType: 'movie' | 'series' | 'anime';
+  mediaType: PlayerRouteMediaType;
   title: string;
   seriesTitle: string;
   season?: number;
@@ -147,9 +147,11 @@ export interface UserListSummary {
 
 export type WatchStatus = 'watching' | 'watched' | 'plan_to_watch' | 'dropped';
 
+export type LibraryTypeFilter = 'all' | 'movie' | 'series';
+
 export interface LibraryFilters {
   query?: string;
-  type?: 'all' | 'movie' | 'series';
+  type?: LibraryTypeFilter;
   status?: WatchStatus | 'all' | 'none';
   sort?: 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
 }
@@ -355,12 +357,14 @@ export interface RecoverPlaybackStreamOptions extends StreamRankingOptions {
   outcome: Exclude<PlaybackStreamOutcomeReport['outcome'], 'verified'>;
 }
 
-/** Backend genre menus per browse tab, manifest order; `all` is the movie+series union folded like `sameSearchGenre`. */
+/** Backend genre menus per browse tab, manifest order; `all` is the movie+series union `foldAsciiCase`-folded. */
 export interface BrowseGenres {
   all: string[];
   movie: string[];
   series: string[];
   anime: string[];
+  /** Genre options declared by non-movie/series addon catalogs; selections route backend-side. */
+  addon: string[];
 }
 
 export type AddonConfigsOp =
@@ -591,9 +595,13 @@ export const SUBTITLE_APPEARANCE_RESET = {
   subtitleItalic: DEFAULT_APP_UI_PREFERENCES.subtitleItalic,
 };
 
+const SUBTITLE_APPEARANCE_KEYS = Object.keys(
+  SUBTITLE_APPEARANCE_RESET,
+) as (keyof typeof SUBTITLE_APPEARANCE_RESET)[];
+
 export function hasSubtitleAppearance(preferences: typeof SUBTITLE_APPEARANCE_RESET) {
-  return Object.entries(SUBTITLE_APPEARANCE_RESET).some(
-    ([key, value]) => preferences[key as keyof typeof SUBTITLE_APPEARANCE_RESET] !== value,
+  return SUBTITLE_APPEARANCE_KEYS.some(
+    (key) => preferences[key] !== SUBTITLE_APPEARANCE_RESET[key],
   );
 }
 
@@ -640,6 +648,7 @@ export interface SearchCatalogContinuation {
   allCursors?: {
     movie?: number;
     series?: number;
+    addon?: number;
   };
   searchCursors?: {
     key: string;
@@ -653,7 +662,7 @@ export interface SearchCatalogContinuation {
 
 export interface SearchCatalogQuery {
   query?: string;
-  mediaType?: 'movie' | 'series' | 'anime';
+  mediaType?: PlayerRouteMediaType;
   feed?: 'popular' | 'featured';
   genres?: string[];
   yearFrom?: number;
@@ -789,6 +798,8 @@ export interface SkipSegment {
   start_time: number;
   /** Segment end in seconds */
   end_time: number;
+  /** Edge-anchored from a mismatched cut: manual skip only. */
+  uncertain?: boolean;
 }
 
 /** SkipDB lookup payload for a title or episode. */
@@ -799,7 +810,7 @@ export interface SkipTimesResult {
 }
 
 /** One credited person (TVmaze cast member or AniList character). */
-export interface TitlePerson {
+interface TitlePerson {
   name: string;
   imageUrl?: string;
   role: string;
@@ -810,7 +821,7 @@ export interface TitlePerson {
 }
 
 /** Optional title facts; absent fields are simply omitted by the backend. */
-export interface TitleFacts {
+interface TitleFacts {
   network?: string;
   studio?: string;
   status?: string;
@@ -826,7 +837,7 @@ export interface NextAiringEpisode {
 }
 
 /** Provider streaming link; first valid URL per site only. */
-export interface StreamingLink {
+interface StreamingLink {
   site: string;
   url: string;
 }

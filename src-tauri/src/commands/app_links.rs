@@ -20,7 +20,7 @@ pub(crate) enum AppLink {
     },
     Title {
         #[serde(rename = "mediaType")]
-        media_type: &'static str,
+        media_type: String,
         #[serde(rename = "mediaId")]
         media_id: String,
         /// Episode links land on this season/episode of a series details page.
@@ -78,7 +78,9 @@ fn parse_title_link(path: &str) -> Option<AppLink> {
     }
     let media_id = super::normalize_media_id(&decoded)?;
     let media_type = super::normalize_stream_media_type(media_type, Some(&media_id))?;
-    if coordinates.is_some() && media_type == "movie" {
+    // Episode coordinates belong to series-like types only — addon-declared
+    // catalog types parse as titles but stay movie-shaped.
+    if coordinates.is_some() && !matches!(media_type.as_str(), "series" | "anime") {
         return None;
     }
     Some(AppLink::Title {
@@ -156,18 +158,18 @@ mod tests {
         })
     }
 
-    fn title(media_type: &'static str, media_id: &str) -> Option<AppLink> {
+    fn title(media_type: &str, media_id: &str) -> Option<AppLink> {
         Some(AppLink::Title {
-            media_type,
+            media_type: media_type.to_string(),
             media_id: media_id.to_string(),
             season: None,
             episode: None,
         })
     }
 
-    fn episode(media_type: &'static str, media_id: &str, season: u32, episode: u32) -> AppLink {
+    fn episode(media_type: &str, media_id: &str, season: u32, episode: u32) -> AppLink {
         AppLink::Title {
-            media_type,
+            media_type: media_type.to_string(),
             media_id: media_id.to_string(),
             season: Some(season),
             episode: Some(episode),
@@ -222,17 +224,24 @@ mod tests {
             parse_app_link("stremiro://details/series/kitsu%3A1"),
             title("anime", "kitsu:1")
         );
-        let long_id = "a".repeat(257);
+        // Addon-declared catalog types route to details pages unchanged.
+        assert_eq!(
+            parse_app_link("stremiro://details/Channel/addon%3A1"),
+            title("channel", "addon:1")
+        );
+        let long_id = "a".repeat(crate::commands::MEDIA_ID_MAX_CHARS + 1);
+        let long_type = "a".repeat(65);
         for rejected in [
             "stremiro://details/movie",
             "stremiro://details/movie/",
-            "stremiro://details/channel/tt1",
             "stremiro://details/movie/tt1/extra",
             "stremiro://details/movie/tt1?x=1",
             "stremiro://details/movie/null",
             "stremiro://details/movie/%0Att1",
             "stremiro://details/movie/%FF",
             &format!("stremiro://details/movie/{long_id}"),
+            &format!("stremiro://details/{long_type}/tt1"),
+            "stremiro://details/ /tt1",
         ] {
             assert_eq!(parse_app_link(rejected), None, "{rejected}");
         }
@@ -260,6 +269,7 @@ mod tests {
         );
         for rejected in [
             "stremiro://details/movie/tt1/1/2",
+            "stremiro://details/channel/addon%3A1/1/2",
             "stremiro://details/series/tt1/1",
             "stremiro://details/series/tt1/1/x",
             "stremiro://details/series/tt1/+1/2",

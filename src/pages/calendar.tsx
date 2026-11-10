@@ -10,11 +10,12 @@ import {
   EyeOff,
   WifiOff,
 } from 'lucide-react';
-import { Fragment, memo, useEffect, useEffectEvent, useRef } from 'react';
+import { Fragment, useEffect, useEffectEvent, useRef } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { PageCard, PageSection, PageSectionHeader } from '@/components/page-section';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
+import { ScrollToTop } from '@/components/scroll-to-top';
 import { Button } from '@/components/ui/button';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -252,7 +253,8 @@ export function Calendar() {
   };
   const handlePrevMonth = () => setCurrentMonth(currentMonth.subtract({ months: 1 }));
   const handleNextMonth = () => setCurrentMonth(currentMonth.add({ months: 1 }));
-  const isCurrentMonthView = currentMonth.toPlainYearMonth().equals(now.toPlainYearMonth());
+  const currentYearMonth = currentMonth.toPlainYearMonth();
+  const isCurrentMonthView = currentYearMonth.equals(now.toPlainYearMonth());
   const handleToday = () => {
     if (isCurrentMonthView) {
       focusCalendarToday(calendarRef.current);
@@ -476,7 +478,7 @@ export function Calendar() {
               <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
                 {upcomingEvents.map((event, index) => (
                   <Fragment key={calendarEventKey(event)}>
-                    {(index === 0 || !event.date.equals(upcomingEvents[index - 1].date)) && (
+                    {(index === 0 || !event.date.equals(upcomingEvents[index - 1]!.date)) && (
                       <h3
                         className={cn(
                           'col-span-full px-2 pb-1 pt-2 text-[11px] font-medium',
@@ -580,9 +582,7 @@ export function Calendar() {
                         day={day}
                         dayEvents={eventsByDay.get(dayKey) ?? EMPTY_DAY_EVENTS}
                         isToday={day.equals(now)}
-                        isCurrentMonth={day
-                          .toPlainYearMonth()
-                          .equals(currentMonth.toPlainYearMonth())}
+                        isCurrentMonth={day.toPlainYearMonth().equals(currentYearMonth)}
                         isLastColumn={dayIdx % 7 === 6}
                         isLoading={isLoadingSchedules}
                         isComplete={
@@ -605,11 +605,12 @@ export function Calendar() {
           {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
         </>
       )}
+      <ScrollToTop />
     </div>
   );
 }
 
-const UpcomingEventCard = memo(function UpcomingEventCard({
+function UpcomingEventCard({
   event,
   from,
   onPrefetch,
@@ -652,9 +653,9 @@ const UpcomingEventCard = memo(function UpcomingEventCard({
       </div>
     </Link>
   );
-});
+}
 
-const CalendarDayCell = memo(function CalendarDayCell({
+function CalendarDayCell({
   day,
   dayEvents,
   isToday,
@@ -677,6 +678,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
   onPrefetch: (event: CalendarEvent) => void;
   hideSpoilers: boolean;
 }) {
+  const dayLabel = FULL_DATE_FORMATTER.format(day);
   const visibleDayEvents = dayEvents.slice(0, MAX_VISIBLE_DAY_EVENTS);
   const hiddenCount = dayEvents.length - visibleDayEvents.length;
   const daySummary = isLoading
@@ -690,7 +692,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
   return (
     <div
       role='group'
-      aria-label={`${FULL_DATE_FORMATTER.format(day)}${daySummary ? ` — ${daySummary}` : ''}`}
+      aria-label={`${dayLabel}${daySummary ? ` — ${daySummary}` : ''}`}
       data-calendar-today={isToday ? '' : undefined}
       tabIndex={isToday ? -1 : undefined}
       className={cn(
@@ -704,7 +706,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
       <div className='mb-2 flex h-7 items-center justify-between gap-1'>
         <time
           dateTime={day.toString()}
-          aria-label={FULL_DATE_FORMATTER.format(day)}
+          aria-label={dayLabel}
           aria-current={isToday ? 'date' : undefined}
           className={cn(
             'text-[12px] font-medium tabular-nums w-7 h-7 flex shrink-0 items-center justify-center rounded-md',
@@ -829,7 +831,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
             <PopoverTrigger asChild>
               <button
                 type='button'
-                aria-label={`${hiddenCount} more releases on ${FULL_DATE_FORMATTER.format(day)}`}
+                aria-label={`${hiddenCount} more releases on ${dayLabel}`}
                 className='min-h-8 w-full text-left text-[11px] font-medium text-zinc-400 hover:text-zinc-200 px-1.5 py-1 rounded-md hover:bg-white/[0.05] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
               >
                 +{hiddenCount} more
@@ -841,7 +843,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
                 'flex max-h-(--radix-popover-content-available-height) flex-col overflow-hidden p-1.5',
               )}
               align='start'
-              aria-label={`Releases on ${FULL_DATE_FORMATTER.format(day)}`}
+              aria-label={`Releases on ${dayLabel}`}
             >
               <p className='shrink-0 px-2 pt-1 pb-1.5 text-[11px] font-semibold text-zinc-400'>
                 {WEEKDAY_DATE_FORMATTER.format(day)}
@@ -882,4 +884,4 @@ const CalendarDayCell = memo(function CalendarDayCell({
       </div>
     </div>
   );
-});
+}

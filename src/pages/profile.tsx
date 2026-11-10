@@ -32,6 +32,7 @@ import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
 import { RetryBanner } from '@/components/retry-banner';
 import { ScrollToTop } from '@/components/scroll-to-top';
+import { StatePanel } from '@/components/state-panel';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
@@ -73,7 +74,14 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { watchProgressItemKey } from '@/lib/history-playback';
-import { cn, pluralize, queryNeedsRetry, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import { notifyAction } from '@/lib/notify';
+import {
+  cn,
+  isSeriesLikeMediaType,
+  pluralize,
+  queryNeedsRetry,
+  SIDEBAR_PAGE_COLUMN_INSETS,
+} from '@/lib/utils';
 
 const loadListsManager = () => import('@/components/list/lists-manager');
 const ListsManager = lazy(() =>
@@ -443,7 +451,7 @@ function ProfileLibraryTab({
     await bulkSetWatchStatus
       .mutateAsync({ ids: [...selectedIds], status })
       .then((count) => {
-        toast.success(
+        notifyAction(
           status === null
             ? `Cleared status for ${pluralize(count, 'title')}`
             : `Set ${pluralize(count, 'title')} to ${WATCH_STATUS_LABELS[status]}`,
@@ -464,7 +472,7 @@ function ProfileLibraryTab({
         itemIds,
       })
       .then((count) => {
-        toast.success(
+        notifyAction(
           count === 0
             ? 'Selected titles are already in this list'
             : `Added ${pluralize(count, 'title')} to "${listName}"`,
@@ -484,7 +492,7 @@ function ProfileLibraryTab({
     await bulkRemoveFromLibrary
       .mutateAsync([...selectedIds])
       .then((count) => {
-        toast.success(`Removed ${pluralize(count, 'title')} from Library`);
+        notifyAction(`Removed ${pluralize(count, 'title')} from Library`);
         if (mountedRef.current) exitSelectionMode();
       })
       .catch(() => {
@@ -702,7 +710,9 @@ function ProfileHistoryTab({
   const typedHistory =
     historyType === 'all'
       ? filteredHistory
-      : filteredHistory.filter((item) => (item.type_ === 'movie') === (historyType === 'movie'));
+      : filteredHistory.filter(
+          (item) => isSeriesLikeMediaType(item.type_) === (historyType === 'series'),
+        );
   const visibleHistory = historyOrder === 'oldest' ? typedHistory.toReversed() : typedHistory;
   const historyFiltered = Boolean(effectiveHistorySearch) || historyType !== 'all';
   const clearHistoryFilters = () => {
@@ -1180,16 +1190,14 @@ function EmptyState({
   action?: React.ReactNode;
 }) {
   return (
-    <div className='flex flex-col items-center justify-center py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015] text-center px-6'>
-      <div className='w-10 h-10 flex items-center justify-center'>{icon}</div>
-      <p className='text-[15px] font-semibold text-zinc-200'>{title}</p>
-      {subtitle && (
-        <p className='w-full max-w-xs text-[13px] leading-relaxed text-zinc-500 [overflow-wrap:anywhere]'>
-          {subtitle}
-        </p>
-      )}
-      {action}
-    </div>
+    <StatePanel
+      icon={icon}
+      title={title}
+      description={subtitle}
+      descriptionClassName='text-[13px] text-zinc-500'
+      action={action}
+      className='border border-white/[0.06] rounded-lg bg-white/[0.015] px-6 py-12'
+    />
   );
 }
 

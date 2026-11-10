@@ -372,7 +372,8 @@ impl StreamQueryRequest<'_> {
             self.episode,
             self.absolute_episode,
         );
-        if self.media_type != "movie" && self.season.zip(self.episode).is_some() {
+        if matches!(self.media_type, "series" | "anime") && self.season.zip(self.episode).is_some()
+        {
             if let Some(id) = normalize_video_id(video_id) {
                 if !ids.contains(&id) {
                     // Keep the working primary, then try the addon's video.id before heuristic fallbacks.
@@ -389,7 +390,7 @@ impl StreamQueryRequest<'_> {
         video_id: Option<&str>,
     ) -> Vec<(u32, u32)> {
         let mut targets = self.episode_targets(ranking);
-        if self.media_type != "movie" {
+        if matches!(self.media_type, "series" | "anime") {
             let target = normalize_video_id(video_id).and_then(|id| {
                 let (base, episode) = id.rsplit_once(':')?;
                 let (base, season) = base.rsplit_once(':')?;
@@ -407,7 +408,7 @@ impl StreamQueryRequest<'_> {
     }
 
     pub(crate) fn episode_targets(&self, ranking: &StreamRankingScope) -> Vec<(u32, u32)> {
-        if self.media_type == "movie" {
+        if !matches!(self.media_type, "series" | "anime") {
             return Vec::new();
         }
         let mut targets = Vec::new();
@@ -445,6 +446,7 @@ pub(crate) struct StreamRankingScope {
 }
 
 /// Ranking overrides: the frontend can rank against a different title/id than the fetch query uses.
+#[derive(Default)]
 pub(crate) struct StreamRankingOverrides {
     pub media_type: Option<String>,
     pub media_id: Option<String>,
@@ -467,8 +469,7 @@ pub(crate) fn resolve_stream_ranking_scope(
     };
     let media_type = match overrides.media_type.as_deref() {
         Some(value) => normalize_stream_media_type(value, Some(media_id.as_str()))
-            .ok_or_else(|| "Invalid media type for stream ranking.".to_string())?
-            .to_string(),
+            .ok_or_else(|| "Invalid media type for stream ranking.".to_string())?,
         None => query_media_type.to_string(),
     };
 
@@ -1479,8 +1480,6 @@ async fn merge_selector_outcomes(
             ctx.recommendation_inputs(&stream_family_priorities),
             &mut signal_cache,
         );
-        // P2P rows cannot play in this build; the selector lists them after every playable row.
-        merged.sort_by_key(|stream| !stream.presentation.is_instantly_playable);
     }
 
     StreamSelectorData {

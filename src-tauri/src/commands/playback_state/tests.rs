@@ -278,7 +278,7 @@ fn stream_family_recovers_from_future_dated_reputation() {
         );
         let report = StreamOutcomeReport {
             media_id: "tt1".to_string(),
-            media_type: "movie",
+            media_type: "movie".to_string(),
             season: None,
             episode: None,
             source_id: Some("current-source".to_string()),
@@ -529,7 +529,7 @@ fn stream_family_source_id_only_moves_on_verified_outcomes() {
         );
         let report = StreamOutcomeReport {
             media_id: "tt1".to_string(),
-            media_type: "movie",
+            media_type: "movie".to_string(),
             season: None,
             episode: None,
             source_id: source.map(str::to_string),

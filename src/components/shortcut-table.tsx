@@ -2,7 +2,7 @@ import type { ShortcutRow } from '@/lib/shortcuts';
 import { cn } from '@/lib/utils';
 
 const SHORTCUT_KEY_CLASS =
-  'inline-flex h-6 min-w-6 items-center justify-center rounded-[5px] border border-white/[0.09] bg-white/[0.04] px-1.5 font-mono text-[11px] font-medium text-zinc-200 shadow-[inset_0_-1px_0_rgba(255,255,255,0.04)]';
+  'inline-flex h-7 min-w-7 items-center justify-center rounded-md border border-white/[0.09] bg-white/[0.04] px-2 font-mono text-[12px] font-medium text-zinc-200 shadow-[inset_0_-1px_0_rgba(255,255,255,0.04)]';
 
 export function ShortcutTable({
   shortcuts,

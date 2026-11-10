@@ -1,6 +1,5 @@
 import { formatRelativeTime } from '@/lib/schedule-dates';
 import { Loader2, Play, X } from 'lucide-react';
-import { memo } from 'react';
 import { PosterThumb } from '@/components/poster-thumb';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
@@ -61,7 +60,7 @@ export function LibraryList({
   );
 }
 
-const LibraryListRow = memo(function LibraryListRow({
+function LibraryListRow({
   item,
   status,
   selectionMode = false,
@@ -144,7 +143,7 @@ const LibraryListRow = memo(function LibraryListRow({
       {!selectionMode && <CollectionRowActions item={item} />}
     </div>
   );
-});
+}
 
 export function HistoryListView({
   items,
@@ -178,7 +177,7 @@ export function HistoryListView({
   );
 }
 
-const HistoryListRow = memo(function HistoryListRow({
+function HistoryListRow({
   item,
   index,
   onRemove,
@@ -307,9 +306,9 @@ const HistoryListRow = memo(function HistoryListRow({
       )}
     </div>
   );
-});
+}
 
-export const HistoryItem = memo(function HistoryItem({
+export function HistoryItem({
   item,
   selectionMode,
   isSelected,
@@ -343,4 +342,4 @@ export const HistoryItem = memo(function HistoryItem({
       playErrorTitle='Failed to resume playback'
     />
   );
-});
+}

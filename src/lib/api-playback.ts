@@ -74,6 +74,54 @@ function bestStreamCacheKey(
   ]);
 }
 
+type StreamSelectorRowPayload = {
+  sourceId: AddonStream['sourceId'];
+  resolution: AddonStream['presentation']['resolution'];
+  deliveryKind: AddonStream['presentation']['deliveryKind'];
+  isBatch: boolean;
+  isPlayable: boolean;
+  seeders: AddonStream['seeders'];
+  sizeBytes: AddonStream['sizeBytes'];
+  searchFields: (string | undefined)[];
+};
+
+// `streams` is structural-shared and identity-keyed upstream, so debounced search/filter
+// changes resend identical rows — cache both payload shapes on the array itself.
+const streamSelectorRowCache = new WeakMap<
+  readonly AddonStream[],
+  { plain: StreamSelectorRowPayload[] | null; searchable: StreamSelectorRowPayload[] | null }
+>();
+
+function buildStreamSelectorRow(
+  stream: AddonStream,
+  searchable: boolean,
+): StreamSelectorRowPayload {
+  return {
+    sourceId: stream.sourceId,
+    resolution: stream.presentation.resolution,
+    deliveryKind: stream.presentation.deliveryKind,
+    isBatch: stream.presentation.isBatch,
+    isPlayable: stream.presentation.isInstantlyPlayable,
+    seeders: stream.seeders,
+    sizeBytes: stream.sizeBytes,
+    // Filter-only changes skip the per-row search strings — Rust reads them only when searching.
+    searchFields: searchable
+      ? [
+          stream.sourceName,
+          stream.presentation.streamTitle,
+          stream.presentation.sourceName,
+          stream.presentation.deliveryLabel,
+          stream.presentation.codecLabel,
+          stream.presentation.hdrLabel,
+          stream.presentation.audioLabel,
+          stream.presentation.multiAudioLabel,
+          stream.presentation.sizeLabel,
+          stream.presentation.resolution,
+        ]
+      : [],
+  };
+}
+
 export const playbackApi = {
   getStreamPackRows: (
     coverage: NonNullable<AddonStream['matchSummary']>['packCoverage'],
@@ -122,35 +170,19 @@ export const playbackApi = {
     streams: readonly AddonStream[],
     filters: StreamSelectorPreferences,
     searchQuery: string,
-  ) =>
-    safeInvoke<number[]>('get_stream_selector_indices', {
-      rows: streams.map((stream) => ({
-        sourceId: stream.sourceId,
-        resolution: stream.presentation.resolution,
-        deliveryKind: stream.presentation.deliveryKind,
-        isBatch: stream.presentation.isBatch,
-        isPlayable: stream.presentation.isInstantlyPlayable,
-        seeders: stream.seeders,
-        sizeBytes: stream.sizeBytes,
-        // Filter-only changes skip the per-row search strings — Rust reads them only when searching.
-        searchFields: searchQuery
-          ? [
-              stream.sourceName,
-              stream.presentation.streamTitle,
-              stream.presentation.sourceName,
-              stream.presentation.deliveryLabel,
-              stream.presentation.codecLabel,
-              stream.presentation.hdrLabel,
-              stream.presentation.audioLabel,
-              stream.presentation.multiAudioLabel,
-              stream.presentation.sizeLabel,
-              stream.presentation.resolution,
-            ]
-          : [],
-      })),
+  ) => {
+    let cached = streamSelectorRowCache.get(streams);
+    if (!cached) streamSelectorRowCache.set(streams, (cached = { plain: null, searchable: null }));
+    const variant = searchQuery ? 'searchable' : 'plain';
+    const rows = (cached[variant] ??= streams.map((stream) =>
+      buildStreamSelectorRow(stream, variant === 'searchable'),
+    ));
+    return safeInvoke<number[]>('get_stream_selector_indices', {
+      rows,
       filters,
       searchQuery,
-    }),
+    });
+  },
   getAddonSubtitles: (type: string, id: string, season?: number, episode?: number) =>
     safeInvoke<AddonSubtitle[]>('get_addon_subtitles', {
       mediaType: type,

@@ -45,6 +45,10 @@ export function useMediaSession({
   // Leave Next unbound when there is no next episode.
   const hasNextTrack = onNextTrack !== undefined;
   const artworkKey = JSON.stringify(artworkSrcs ?? []);
+  // Latest sources on each run — `artworkKey` stays the content-stable dep.
+  const getArtwork = useEffectEvent(() =>
+    (artworkSrcs ?? []).filter((src): src is string => !!src).map((src) => ({ src })),
+  );
 
   useEffect(() => {
     if (!supported || typeof MediaMetadata === 'undefined' || !title) return;
@@ -52,9 +56,7 @@ export function useMediaSession({
       title,
       artist: artist ?? '',
       album: 'Stremiro',
-      artwork: (JSON.parse(artworkKey) as (string | null)[])
-        .filter((src): src is string => !!src)
-        .map((src) => ({ src })),
+      artwork: getArtwork(),
     });
     return () => {
       navigator.mediaSession.metadata = null;

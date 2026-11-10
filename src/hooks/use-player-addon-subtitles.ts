@@ -217,7 +217,7 @@ export function usePlayerAddonSubtitles({
       ? null
       : activeAddonMatches.some((subtitle) => subtitle.selectionKey === pickedAddonSubtitleId)
         ? pickedAddonSubtitleId
-        : activeAddonMatches[0].selectionKey;
+        : activeAddonMatches[0]!.selectionKey;
 
   return {
     activeAddonSubtitleId,

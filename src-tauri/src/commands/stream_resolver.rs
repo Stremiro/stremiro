@@ -326,8 +326,9 @@ fn build_resolved_direct_stream(
     final_url: String,
     request_headers: &[(String, String)],
 ) -> Result<ResolvedStream, String> {
-    let landed = parse_playback_url(&final_url)
-        .ok_or_else(|| "Invalid or oversized resolved stream URL.".to_string())?;
+    let landed = parse_playback_url(&final_url).ok_or_else(|| {
+        "Resolved stream URL is invalid, oversized or an unverifiable HTTPS IP address.".to_string()
+    })?;
     let request_headers =
         if crate::providers::fetch_policy::same_origin_for_proxy_headers(initial, &landed) {
             request_headers

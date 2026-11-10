@@ -1,6 +1,7 @@
 import { type MouseEvent as ReactMouseEvent, useSyncExternalStore } from 'react';
 import { type NavigateFunction, type NavigateOptions, NavigationType, type To } from 'react-router';
 import { createSubscribableStore } from '@/lib/subscribable-store';
+import { prefersReducedMotion } from '@/lib/utils';
 
 // Root binding avoids per-card router subscriptions during search URL updates.
 let navigateFn: NavigateFunction | null = null;
@@ -108,7 +109,7 @@ export function recordLocationEntry(key: string, path: string, action: Navigatio
 
 // Undefined means the caller needs an explicit fallback.
 export function pathBelowTop(): string | undefined {
-  return entryIndex > 0 ? entryStack[entryIndex - 1].path : undefined;
+  return entryIndex > 0 ? entryStack[entryIndex - 1]!.path : undefined;
 }
 
 // POP cannot carry state; the player hands its details return payload through this slot.
@@ -160,13 +161,13 @@ let activeDetailsTransition: Pick<ViewTransition, 'finished'> | null = null;
 function canMorphToDetails(): boolean {
   return (
     typeof document.startViewTransition === 'function' &&
-    !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
+    !prefersReducedMotion() &&
     !document.querySelector('[data-mini-video]')
   );
 }
 
 /** Opens details while the clicked artwork zooms through and the details hero settles in. */
-export function navigateToDetails(
+export function navigateToDetailsMorph(
   event: ReactMouseEvent<HTMLAnchorElement>,
   to: To,
   options: NavigateOptions,

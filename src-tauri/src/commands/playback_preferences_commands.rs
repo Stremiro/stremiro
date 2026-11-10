@@ -161,9 +161,9 @@ fn normalize_playback_preference_scope(
     let media_id = media_id.and_then(normalize_media_id);
     let media_type = match media_type {
         Some(value) => Some(
-            normalize_stream_media_type(value, media_id.as_deref())
-                .ok_or_else(|| "Invalid media type for playback language preferences.".to_string())?
-                .to_string(),
+            normalize_stream_media_type(value, media_id.as_deref()).ok_or_else(|| {
+                "Invalid media type for playback language preferences.".to_string()
+            })?,
         ),
         None => None,
     };
@@ -304,8 +304,7 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
     let media_id = normalize_media_id(&media_id)
         .ok_or_else(|| "Media ID is required for playback preference outcomes.".to_string())?;
     let media_type = normalize_stream_media_type(&media_type, Some(&media_id))
-        .ok_or_else(|| "Invalid media type for playback preference outcomes.".to_string())?
-        .to_string();
+        .ok_or_else(|| "Invalid media type for playback preference outcomes.".to_string())?;
     let audio_track = audio_track.map(normalize_track_language_candidate);
     let subtitle_track = subtitle_track.map(normalize_track_language_candidate);
 

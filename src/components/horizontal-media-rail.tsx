@@ -12,7 +12,7 @@ import {
 } from 'react';
 import { Button } from '@/components/ui/button';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
-import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
+import { scrollEdgeMask, useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import { boundedMapSet, cn, scrollBehavior, TITLE_ICON_CLASS } from '@/lib/utils';
 import { MediaCardSkeleton, MEDIA_CARD_SLOT_CLASS_NAME } from './media-card';
 
@@ -33,6 +33,15 @@ function rememberRailScrollPosition(railId: string, position: number): void {
 }
 
 const RAIL_VIRTUALIZATION_THRESHOLD = 48;
+
+/** The rail's card-skeleton items, shared by placeholders that must not mount the rail. */
+export function RailSkeleton({ skeletonCount = 8 }: { skeletonCount?: number }) {
+  return Array.from({ length: skeletonCount }, (_, index) => (
+    <div key={`rail-skeleton-${index + 1}`} className={DEFAULT_ITEM_CLASS_NAME}>
+      <MediaCardSkeleton />
+    </div>
+  ));
+}
 
 interface HorizontalMediaRailProps<T> {
   /** Concatenated, never `cn()`-merged — tailwind-merge would collapse `lg:pl-*`+`lg:px-*` pairs. */
@@ -93,7 +102,7 @@ export function HorizontalMediaRail<T>({
     [focusedIndex],
   );
   const getVirtualItemKey = useCallback(
-    (index: number) => getItemKey(items[index], index),
+    (index: number) => getItemKey(items[index]!, index),
     [getItemKey, items],
   );
   const virtualizer = useVirtualizer({
@@ -227,9 +236,7 @@ export function HorizontalMediaRail<T>({
     current.scrollBy({ left: delta, behavior: scrollBehavior() });
   };
 
-  const edgeMask = scrollState.hasOverflow
-    ? `linear-gradient(to right, ${scrollState.canScrollLeft ? 'transparent 0px, black 28px' : 'black 0px'}, ${scrollState.canScrollRight ? 'black calc(100% - 28px), transparent 100%' : 'black 100%'})`
-    : undefined;
+  const edgeMask = scrollEdgeMask(scrollState);
 
   return (
     <section
@@ -322,7 +329,7 @@ export function HorizontalMediaRail<T>({
               if (!slot) return;
               if (shouldVirtualize) {
                 const index = Number(slot.dataset.mediaRailIndex);
-                setFocusedKey(getItemKey(items[index], index));
+                setFocusedKey(getItemKey(items[index]!, index));
               }
               if (!event.target.matches(':focus-visible')) return;
               const container = event.currentTarget;
@@ -363,7 +370,7 @@ export function HorizontalMediaRail<T>({
                 else return;
                 event.preventDefault();
                 if (nextIndex === index) return;
-                const nextKey = getItemKey(items[nextIndex], nextIndex);
+                const nextKey = getItemKey(items[nextIndex]!, nextIndex);
                 if (!focusItem(nextKey) && shouldVirtualize) {
                   pendingFocusKeyRef.current = nextKey;
                   setFocusedKey(nextKey);
@@ -394,32 +401,30 @@ export function HorizontalMediaRail<T>({
                 : {}),
             }}
           >
-            {isLoading
-              ? Array.from({ length: skeletonCount }, (_, index) => (
-                  <div key={`rail-skeleton-${index + 1}`} className={DEFAULT_ITEM_CLASS_NAME}>
-                    <MediaCardSkeleton />
-                  </div>
-                ))
-              : shouldVirtualize
-                ? virtualizer.getVirtualItems().map((virtualItem) => (
-                    <div
-                      key={virtualItem.key}
-                      data-media-rail-index={virtualItem.index}
-                      className={DEFAULT_ITEM_CLASS_NAME}
-                      style={{ gridColumn: virtualItem.index + 1, gridRow: 1 }}
-                    >
-                      {renderItem(items[virtualItem.index], virtualItem.index)}
-                    </div>
-                  ))
-                : items.map((item, index) => (
-                    <div
-                      key={getItemKey(item, index)}
-                      data-media-rail-index={index}
-                      className={DEFAULT_ITEM_CLASS_NAME}
-                    >
-                      {renderItem(item, index)}
-                    </div>
-                  ))}
+            {isLoading ? (
+              <RailSkeleton skeletonCount={skeletonCount} />
+            ) : shouldVirtualize ? (
+              virtualizer.getVirtualItems().map((virtualItem) => (
+                <div
+                  key={virtualItem.key}
+                  data-media-rail-index={virtualItem.index}
+                  className={DEFAULT_ITEM_CLASS_NAME}
+                  style={{ gridColumn: virtualItem.index + 1, gridRow: 1 }}
+                >
+                  {renderItem(items[virtualItem.index]!, virtualItem.index)}
+                </div>
+              ))
+            ) : (
+              items.map((item, index) => (
+                <div
+                  key={getItemKey(item, index)}
+                  data-media-rail-index={index}
+                  className={DEFAULT_ITEM_CLASS_NAME}
+                >
+                  {renderItem(item, index)}
+                </div>
+              ))
+            )}
           </div>
         </div>
       )}

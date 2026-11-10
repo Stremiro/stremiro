@@ -1,6 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ChevronLeft, ChevronRight, Maximize2, Minimize2, Minus, X } from 'lucide-react';
-import { memo, useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
 import { navigateBack, navigateForward, useNavigationHistoryState } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
@@ -44,15 +44,8 @@ function TitlebarHistoryControls() {
   );
 }
 
-export const DesktopTitlebar = memo(function DesktopTitlebar({
-  className,
-  historyControls = false,
-}: DesktopTitlebarProps = {}) {
-  const isDesktopRuntime = isTauriDesktopRuntime();
-  const appWindow = useMemo(
-    () => (isDesktopRuntime ? getCurrentWindow() : null),
-    [isDesktopRuntime],
-  );
+export function DesktopTitlebar({ className, historyControls = false }: DesktopTitlebarProps = {}) {
+  const [appWindow] = useState(() => (isTauriDesktopRuntime() ? getCurrentWindow() : null));
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -166,7 +159,7 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
       </div>
     </div>
   );
-});
+}
 
 interface TitlebarButtonProps {
   children: React.ReactNode;

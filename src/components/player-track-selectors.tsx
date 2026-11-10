@@ -1,5 +1,5 @@
 import { AudioLines, Captions, Check, Loader2, Minus, Plus } from 'lucide-react';
-import { memo, type ReactNode, useId, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useId, useRef, useState } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
@@ -110,7 +110,7 @@ interface AudioTrackSelectorProps {
   onSelectTrack: (id: number) => void;
 }
 
-export const AudioTrackSelector = memo(function AudioTrackSelector({
+export function AudioTrackSelector({
   open,
   onOpenChange,
   audioTracks,
@@ -240,7 +240,7 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
       </PopoverContent>
     </Popover>
   );
-});
+}
 
 interface SubtitleTrackSelectorProps {
   open: boolean;
@@ -268,7 +268,7 @@ interface SubtitleTrackSelectorProps {
   onSubtitleMenuOpenChange: (open: boolean) => void;
 }
 
-export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
+export function SubtitleTrackSelector({
   open,
   subTracks,
   trackSwitching,
@@ -316,9 +316,8 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   const subtitleSwitchBusy = trackSwitching.sub || !!addonSubtitleLoadingId;
   const [view, setView] = useState<'tracks' | 'addons' | 'style'>('tracks');
   const [viewTabsNode, setViewTabsNode] = useState<HTMLDivElement | null>(null);
-  const viewTabsRef = useMemo(() => ({ current: viewTabsNode }), [viewTabsNode]);
   const viewTabButtons = useRef(new Map<string, HTMLButtonElement>());
-  const viewIndicator = useSlidingIndicator(view, viewTabsRef, viewTabButtons);
+  const viewIndicator = useSlidingIndicator(view, viewTabsNode, viewTabButtons);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (nextOpen) setView(activeAddonSubtitleId ? 'addons' : 'tracks');
@@ -643,7 +642,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                         step={row.step}
                         aria-label={`Subtitle ${row.label.toLowerCase()}`}
                         aria-valuetext={row.value}
-                        onValueChange={(values) => row.onApply(values[0])}
+                        onValueChange={(values) => row.onApply(values[0]!)}
                         className='h-6 min-w-0 flex-1'
                       />
                       <StepButton
@@ -669,4 +668,4 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
       </PopoverContent>
     </Popover>
   );
-});
+}

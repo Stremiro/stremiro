@@ -1,5 +1,5 @@
 import { LayoutGrid, List, type LucideIcon } from 'lucide-react';
-import { handleRadioGroupKeyDown } from '@/lib/dom';
+import { handleRovingGroupKeyDown } from '@/lib/dom';
 import { cn } from '@/lib/utils';
 
 const SEGMENTED_FOCUS_RING_CLASS =
@@ -76,7 +76,7 @@ export function SegmentedControl<T extends string>({
             aria-label={Icon ? option.label : undefined}
             title={Icon ? option.label : undefined}
             tabIndex={selected ? 0 : -1}
-            onKeyDown={handleRadioGroupKeyDown}
+            onKeyDown={handleRovingGroupKeyDown}
             onClick={() => {
               if (!selected) onChange(option.value);
             }}

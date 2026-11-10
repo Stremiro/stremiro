@@ -1,6 +1,7 @@
 import { ArrowLeft, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
-import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteImage } from '@/components/remote-image';
+import { IndeterminateBar } from '@/components/ui/skeleton';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useFailedSrc } from '@/hooks/use-failed-src';
@@ -35,7 +36,7 @@ interface PlayerErrorOverlayProps {
   onBack: () => void;
 }
 
-export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
+export function PlayerErrorOverlay({
   message,
   onRetry,
   onChooseStream,
@@ -74,7 +75,7 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
       </div>
     </div>
   );
-});
+}
 
 const PLAYER_LOADING_STAGES = [
   { id: 'starting', label: 'Starting player' },
@@ -102,7 +103,7 @@ interface PlayerLoadingOverlayProps {
   onBack: () => void;
 }
 
-export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
+export function PlayerLoadingOverlay({
   headline,
   detail,
   stageIndex = 0,
@@ -126,18 +127,18 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   if (!revealed) return null;
 
   return (
-    <div className='pointer-events-none fixed inset-0 z-50 flex items-center justify-center'>
+    <div className='pointer-events-none fixed inset-0 z-50 flex items-center justify-center p-4'>
       <div
         inert={exiting}
         className={cn(
-          'relative mx-4 w-full max-w-[22.5rem] overflow-hidden rounded-[14px] border border-white/[0.08] bg-zinc-950/80 px-5 pb-4 pt-5 shadow-2xl shadow-black/60 backdrop-blur-2xl motion-reduce:animate-none',
+          'pointer-events-auto relative max-h-[calc(100dvh-2rem)] w-full max-w-sm overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-zinc-950/95 p-5 shadow-2xl shadow-black/50 backdrop-blur-md motion-reduce:animate-none',
           exiting
-            ? 'animate-out fade-out zoom-out-[0.98] duration-150 ease-in fill-mode-forwards'
-            : 'animate-in fade-in zoom-in-[0.97] slide-in-from-bottom-1.5 duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
+            ? 'animate-out fade-out duration-150 ease-in fill-mode-forwards'
+            : 'animate-in fade-in duration-200 ease-out',
         )}
       >
         {(logoSrc || logoPending || title || context) && (
-          <div className='mb-4 border-b border-white/[0.06] pb-4'>
+          <div className='mb-5'>
             {logoSrc ? (
               <RemoteImage
                 src={logoSrc}
@@ -150,13 +151,13 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
               <div aria-hidden='true' className='h-9' />
             ) : (
               title && (
-                <p className='truncate text-[17px] font-semibold leading-9 tracking-tight text-white'>
+                <p className='line-clamp-2 text-[17px] font-semibold leading-6 tracking-tight text-white'>
                   {title}
                 </p>
               )
             )}
             {context && (
-              <p className='mt-2 truncate text-[12.5px] font-medium tabular-nums leading-none text-white/55'>
+              <p className='mt-1.5 truncate text-xs font-medium tabular-nums leading-5 text-zinc-400'>
                 {context}
               </p>
             )}
@@ -169,65 +170,59 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
           aria-atomic='true'
           className='sr-only'
         >
-          {[PLAYER_LOADING_STAGES[stageIndex].label, headline, detail].filter(Boolean).join('. ')}
+          {[PLAYER_LOADING_STAGES[stageIndex]!.label, headline, detail].filter(Boolean).join('. ')}
         </p>
         <div aria-hidden='true'>
-          <div className='flex items-center gap-2.5'>
-            <span className='relative h-4 w-4 shrink-0'>
-              <span className='absolute inset-0 rounded-full border-2 border-white/10' />
-              <span className='absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-(--accent-act) [animation-duration:650ms]' />
-            </span>
+          <div className='flex items-center gap-2'>
             <span
               key={stageIndex}
-              className='min-w-0 truncate text-[14px] font-semibold leading-5 text-white animate-in fade-in slide-in-from-bottom-1 duration-150 motion-reduce:animate-none'
+              className='min-w-0 truncate text-sm font-medium leading-5 text-white animate-in fade-in duration-150 motion-reduce:animate-none'
             >
-              {PLAYER_LOADING_STAGES[stageIndex].label}
+              {PLAYER_LOADING_STAGES[stageIndex]!.label}
             </span>
-            <span className='ml-auto text-[11px] font-medium tabular-nums leading-none text-white/35'>
-              {stageIndex + 1}/{PLAYER_LOADING_STAGES.length}
+            <span className='ml-auto shrink-0 text-xs tabular-nums leading-5 text-zinc-400'>
+              {stageIndex + 1} / {PLAYER_LOADING_STAGES.length}
             </span>
           </div>
-          <div className='mt-3.5 flex gap-1'>
+          <div className='mt-2.5 flex gap-1.5'>
             {PLAYER_LOADING_STAGES.map((step, index) => (
               <div
                 key={step.id}
                 className={cn(
-                  'relative h-[3px] flex-1 overflow-hidden rounded-full transition-colors duration-200',
-                  index === stageIndex
-                    ? 'bg-[rgb(var(--accent-prog-rgb)/0.22)]'
-                    : 'bg-white/[0.08]',
+                  'relative h-0.5 flex-1 overflow-hidden rounded-full',
+                  index < stageIndex
+                    ? 'bg-(--accent-prog)/70'
+                    : index === stageIndex
+                      ? 'bg-[rgb(var(--accent-prog-rgb)/0.2)]'
+                      : 'bg-white/10',
                 )}
               >
                 {index === stageIndex && (
-                  <div className='absolute inset-y-0 left-0 w-1/3 rounded-full bg-(--accent-prog) animate-[progress-slide_1s_cubic-bezier(0.45,0,0.55,1)_infinite] motion-reduce:hidden' />
+                  <IndeterminateBar className='absolute inset-y-0 left-0 rounded-full bg-(--accent-prog) motion-reduce:hidden' />
                 )}
-                <div
-                  className='absolute inset-0 origin-left rounded-full bg-(--accent-prog) transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]'
-                  style={{ transform: `scaleX(${index < stageIndex ? 1 : 0})` }}
-                />
               </div>
             ))}
           </div>
         </div>
         <p
           aria-hidden='true'
-          className='mt-3 line-clamp-2 text-[12.5px] leading-snug text-white/50'
+          className='mt-3 line-clamp-3 wrap-anywhere text-[13px] leading-5 text-zinc-300'
         >
           {[headline, detail].filter(Boolean).join(' · ')}
         </p>
 
-        <div className='mt-4 flex items-center gap-1.5 pointer-events-auto'>
+        <div className='mt-5 flex flex-wrap items-center gap-2'>
           <button
             type='button'
             onClick={onChooseStream}
-            className='h-8 rounded-lg bg-white/[0.07] px-3 text-[12.5px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+            className='min-h-9 rounded-md border border-white/10 bg-white/[0.06] px-3 text-[13px] font-medium text-white transition-colors hover:border-white/20 hover:bg-white/[0.1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
           >
             Choose stream
           </button>
           <button
             type='button'
             onClick={onBack}
-            className='h-8 rounded-lg px-3 text-[12.5px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+            className='min-h-9 rounded-md px-3 text-[13px] font-medium text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
           >
             Go back
           </button>
@@ -235,7 +230,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
       </div>
     </div>
   );
-});
+}
 
 interface PlayerIdleOverlayProps {
   visible: boolean;
@@ -250,7 +245,7 @@ interface PlayerIdleOverlayProps {
 }
 
 // Idle "you're watching" card for zero-input stretches while paused; timing/dismissal live in usePlayerIdleOverlay.
-export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
+export function PlayerIdleOverlay({
   visible,
   isFullscreen,
   logo,
@@ -318,7 +313,7 @@ export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
       </div>
     </div>
   );
-});
+}
 
 interface PlayerPauseResumeButtonProps {
   visible: boolean;
@@ -326,10 +321,7 @@ interface PlayerPauseResumeButtonProps {
 }
 
 // Only healthy paused playback shows this; segment/EOF actions use the toolbar.
-export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
-  visible,
-  onResume,
-}: PlayerPauseResumeButtonProps) {
+export function PlayerPauseResumeButton({ visible, onResume }: PlayerPauseResumeButtonProps) {
   const keymap = usePlayerKeymap();
   return (
     <div
@@ -361,7 +353,7 @@ export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
       </button>
     </div>
   );
-});
+}
 
 interface PlayerUpNextCardProps {
   episode: Episode;
@@ -378,7 +370,7 @@ const UP_NEXT_RING_CIRCUMFERENCE = 2 * Math.PI * UP_NEXT_RING_RADIUS;
 
 // EOF "Up Next": one click (or the next-episode key) runs the silent auto-resolve. With auto-play on, a countdown ring arms the
 // same action; the cancel chip disarms it.
-export const PlayerUpNextCard = memo(function PlayerUpNextCard({
+export function PlayerUpNextCard({
   episode,
   thumbnail,
   autoPlayCountdown,
@@ -480,7 +472,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
       )}
     </div>
   );
-});
+}
 
 interface PlayerEndCardProps {
   title: string;
@@ -493,7 +485,7 @@ interface PlayerEndCardProps {
 
 // EOF without a next episode (movies, finales): replay or head back instead of idling on a frozen last frame.
 // The mini strip keeps it visible under hover — docked chrome has no replay control of its own.
-export const PlayerEndCard = memo(function PlayerEndCard({
+export function PlayerEndCard({
   title,
   thumbnail,
   variant,
@@ -582,4 +574,4 @@ export const PlayerEndCard = memo(function PlayerEndCard({
       </div>
     </div>
   );
-});
+}

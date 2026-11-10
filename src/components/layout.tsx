@@ -104,7 +104,7 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
         Skip to content
       </a>
       <DesktopTitlebar historyControls className='vt-pin-titlebar' />
-      <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
+      <div data-mini-mask className='fixed inset-0 bg-background -z-10' />
       {/* One top-left gradient avoids WebView2 blur rings and clipped bottom-edge washes.
           --app-glow previews the intensity slider live. */}
       <div

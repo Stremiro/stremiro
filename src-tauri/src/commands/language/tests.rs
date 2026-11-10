@@ -236,49 +236,24 @@ fn resolve_preferred_track_selection_prefers_main_matching_track() {
 }
 
 #[test]
-fn resolve_preferred_track_selection_conflicting_tag_alone_yields_no_match() {
-    let tracks = vec![TrackLanguageCandidate {
-        id: 1,
-        lang: Some("jpn".to_string()),
-        title: Some("English Main".to_string()),
-        default_track: true,
-        forced: false,
-        hearing_impaired: false,
-    }];
+fn resolve_preferred_track_selection_single_track_tags() {
+    // A conflicting tag beats the title; regional tags match; `und` falls back to the title.
+    for (lang, title, default_track, selected_matches) in [
+        ("jpn", Some("English Main"), true, false),
+        ("en-US", None, false, true),
+        ("und", Some("English"), false, true),
+    ] {
+        let tracks = vec![TrackLanguageCandidate {
+            id: 1,
+            lang: Some(lang.to_string()),
+            title: title.map(str::to_string),
+            default_track,
+            forced: false,
+            hearing_impaired: false,
+        }];
 
-    let resolution = resolve_preferred_track_selection(&tracks, Some("en"), Some(1));
-    assert!(!resolution.selected_matches);
-    assert_eq!(resolution.matched_track_id, None);
-}
-
-#[test]
-fn resolve_preferred_track_selection_keeps_regional_lang_tag() {
-    let tracks = vec![TrackLanguageCandidate {
-        id: 1,
-        lang: Some("en-US".to_string()),
-        title: None,
-        default_track: false,
-        forced: false,
-        hearing_impaired: false,
-    }];
-
-    let resolution = resolve_preferred_track_selection(&tracks, Some("en"), Some(1));
-    assert!(resolution.selected_matches);
-    assert_eq!(resolution.matched_track_id, None);
-}
-
-#[test]
-fn resolve_preferred_track_selection_und_tag_falls_back_to_title() {
-    let tracks = vec![TrackLanguageCandidate {
-        id: 1,
-        lang: Some("und".to_string()),
-        title: Some("English".to_string()),
-        default_track: false,
-        forced: false,
-        hearing_impaired: false,
-    }];
-
-    let resolution = resolve_preferred_track_selection(&tracks, Some("en"), Some(1));
-    assert!(resolution.selected_matches);
-    assert_eq!(resolution.matched_track_id, None);
+        let resolution = resolve_preferred_track_selection(&tracks, Some("en"), Some(1));
+        assert_eq!(resolution.selected_matches, selected_matches, "{lang}");
+        assert_eq!(resolution.matched_track_id, None, "{lang}");
+    }
 }

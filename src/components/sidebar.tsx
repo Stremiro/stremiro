@@ -1,16 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
-import { memo, type MouseEvent, type ReactNode, useEffect, useRef } from 'react';
+import { type MouseEvent, type ReactNode, useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useProfileAvatar } from '@/hooks/use-local-profile';
-import {
-  playbackLanguagePreferencesQueryOptions,
-  supportedLanguagesQueryOptions,
-} from '@/hooks/use-playback-language-preferences';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { api } from '@/lib/api';
 import { focusSearchInput } from '@/lib/dom';
@@ -115,7 +111,7 @@ function SidebarNavIndicator({
 
 // One rendering for browse and player — the player mounts its own copy, so any
 // visual difference reads as the rail jumping when playback opens.
-export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
+export function Sidebar({ className }: SidebarProps) {
   const { pathname } = useLocation();
   const queryClient = useQueryClient();
   const { isUpdateAvailable, pendingUpdate } = useAppUpdater();
@@ -145,12 +141,12 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
     const avatar = item.href === PROFILE_HREF ? identity?.avatar : undefined;
     const isActive = group.activeHref === item.href;
     const isSearch = item.href === SEARCH_HREF;
+    const to = isSearch ? lastSearchPath() : showUpdate ? '/settings?section=updates' : item.href;
     return (
       <SidebarNavButton
         key={item.href}
         item={item}
-        // Search reopens the last URL; other items keep their static href.
-        to={isSearch ? lastSearchPath() : item.href}
+        to={to}
         isActive={isActive}
         sharedIndicator={group.indicator !== null}
         itemRef={(node) => {
@@ -161,11 +157,8 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
         tooltip={showUpdate ? updateTooltip : undefined}
         onIntent={() => {
           warmRouteChunk(item.href);
-          if (item.href === SETTINGS_HREF) {
+          if (item.href === SETTINGS_HREF && !showUpdate) {
             void queryClient.prefetchQuery(api.launchAtLoginQueryOptions());
-            void queryClient.prefetchQuery(api.addonConfigsQueryOptions());
-            void queryClient.prefetchQuery(playbackLanguagePreferencesQueryOptions);
-            void queryClient.prefetchQuery(supportedLanguagesQueryOptions);
           }
           if (isSearch && navigator.onLine) {
             void prefetchSearchCatalog(queryClient, lastSearchFacets());
@@ -179,7 +172,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
                 if (isSearch) {
                   event.preventDefault();
                   focusSearchInput();
-                } else if (currentPathWithSearch() === item.href) {
+                } else if (currentPathWithSearch() === to) {
                   event.preventDefault();
                   window.scrollTo({ top: 0, behavior: scrollBehavior() });
                 }
@@ -241,7 +234,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
       </div>
     </TooltipProvider>
   );
-});
+}
 
 const NAV_DOT_CLASS =
   'absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-emerald-400 ring-2 ring-black';

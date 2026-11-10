@@ -2,7 +2,7 @@ use super::AddonStream;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 // Release-tag flag vocabulary — every regex over the lowered stream fields lives in this module.
 static STREAM_DV_REGEX: LazyLock<Regex> =
@@ -36,7 +36,10 @@ static STREAM_HDR_REGEX: LazyLock<Regex> =
 static STREAM_4K_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b4k\b").expect("valid stream 4k regex"));
 static STREAM_ATMOS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:atmos|truehd)(?:\d+(?:\.\d+)?)?\b").expect("valid stream atmos regex")
+    Regex::new(r"(?i)\batmos(?:\d+(?:\.\d+)?)?\b").expect("valid stream atmos regex")
+});
+static STREAM_TRUEHD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\btruehd(?:\d+(?:\.\d+)?)?\b").expect("valid stream truehd regex")
 });
 static STREAM_DTS_HD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bdts(?:-hd|-x|x)(?:\d+(?:\.\d+)?)?\b").expect("valid stream dts-hd regex")
@@ -247,10 +250,6 @@ fn bare_episode_ranges(text: &str) -> impl Iterator<Item = regex::Captures<'_>> 
         })
 }
 
-fn has_episode_range(text: &str) -> bool {
-    episode_range_claims(text).next().is_some()
-}
-
 fn ordinal_season_word_number(word: &str) -> Option<u32> {
     const ORDINALS: [&str; 9] = [
         "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
@@ -303,26 +302,53 @@ fn explicit_season_ranges(text: &str) -> impl Iterator<Item = (u32, u32)> + '_ {
     ranges.chain(x_ranges).chain(singles).chain(ordinals)
 }
 
+/// One `episode_range_claims` row — an optional season span plus the episode span.
+type EpisodeRangeClaim = (Option<(u32, u32)>, u32, u32);
+
+/// A field's text-invariant season claims: every explicit season range plus
+/// the numberless "final season" marker. The multi-regex battery runs at most
+/// once per field — each (season, final-flag) target then evaluates for free.
+#[derive(Debug, Clone)]
+struct SeasonClaims {
+    ranges: Vec<(u32, u32)>,
+    final_season_marker: bool,
+}
+
+impl SeasonClaims {
+    fn of(text: &str) -> Self {
+        Self {
+            ranges: explicit_season_ranges(text).collect(),
+            final_season_marker: FINAL_SEASON_MARKER_REGEX.is_match(text),
+        }
+    }
+
+    /// `None` = no season claim; `Some(false)` = a different season claimed.
+    /// A numberless "final season" claim needs the caller's final-season fact.
+    fn matches(&self, requested_season: u32, final_season: bool) -> Option<bool> {
+        if self
+            .ranges
+            .iter()
+            .any(|&(start, end)| range_contains(requested_season, start, end))
+        {
+            return Some(true);
+        }
+        if self.final_season_marker {
+            return Some(final_season);
+        }
+        (!self.ranges.is_empty()).then_some(false)
+    }
+}
+
 /// `None` = no season claim; `Some(false)` = a different season claimed.
 /// A numberless "final season" claim needs the caller's final-season fact.
+/// Test-only: production reads the memoized `SeasonClaims` on `StreamMatchText`.
+#[cfg(test)]
 pub(super) fn text_matches_requested_season(
     text: &str,
     requested_season: u32,
     final_season: bool,
 ) -> Option<bool> {
-    let mut saw_explicit_season = false;
-    for (start, end) in explicit_season_ranges(text) {
-        saw_explicit_season = true;
-        if range_contains(requested_season, start, end) {
-            return Some(true);
-        }
-    }
-
-    if FINAL_SEASON_MARKER_REGEX.is_match(text) {
-        return Some(final_season);
-    }
-
-    saw_explicit_season.then_some(false)
+    SeasonClaims::of(text).matches(requested_season, final_season)
 }
 
 /// Blanks every episode-range claim so only standalone episode tokens remain.
@@ -404,13 +430,13 @@ fn episode_range_claims(text: &str) -> impl Iterator<Item = (Option<(u32, u32)>,
 }
 
 /// `season_context` is the caller's `text_matches_requested_season` result.
-fn episode_range_contains_text(
-    text: &str,
+fn episode_range_claims_cover(
+    claims: &[EpisodeRangeClaim],
     season: u32,
     episode: u32,
     season_context: Option<bool>,
 ) -> bool {
-    episode_range_claims(text).any(|(seasons, start, end)| {
+    claims.iter().any(|&(seasons, start, end)| {
         if let Some((start_season, end_season)) = seasons {
             let start = (start_season, start);
             let end = (end_season, end);
@@ -634,8 +660,8 @@ pub(crate) struct StreamFlags {
     pub hdr10_plus: bool,
     pub hdr10: bool,
     pub hdr: bool,
-    /// TrueHD folds into Atmos for both badge and score.
     pub atmos: bool,
+    pub truehd: bool,
     /// `dts-hd`/`dts-x`/`dtsx`; `dts` stays raw — consumers gate it on `!dts_hd`.
     pub dts_hd: bool,
     pub dts: bool,
@@ -668,7 +694,7 @@ impl StreamFlags {
         fill!(RESOLUTION, resolution);
         fill!(RELEASE, release, capture_release);
         fill!(HDR, dolby_vision, hdr10_plus, hdr10, hdr);
-        fill!(AUDIO, atmos, dts_hd, dts, eac3, aac);
+        fill!(AUDIO, atmos, truehd, dts_hd, dts, eac3, aac);
         fill!(CHANNELS, surround);
         fill!(CODEC, hevc, av1);
         self
@@ -762,6 +788,7 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
         hdr10: false,
         hdr: false,
         atmos: STREAM_ATMOS_REGEX.is_match(haystack),
+        truehd: STREAM_TRUEHD_REGEX.is_match(haystack),
         dts_hd: STREAM_DTS_HD_REGEX.is_match(haystack),
         dts: STREAM_DTS_REGEX.is_match(haystack),
         eac3: STREAM_EAC3_REGEX.is_match(haystack),
@@ -793,7 +820,7 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
             StreamFlags::HDR,
         ),
         (
-            flags.atmos || flags.dts_hd || flags.dts || flags.eac3 || flags.aac,
+            flags.atmos || flags.truehd || flags.dts_hd || flags.dts || flags.eac3 || flags.aac,
             StreamFlags::AUDIO,
         ),
         (flags.surround, StreamFlags::CHANNELS),
@@ -832,6 +859,14 @@ pub(crate) struct StreamMatchText {
     batch: BatchTextFlags,
     episode_range: BatchTextFlags,
     claims: [Option<EpisodeClaimProfile>; 3],
+    /// Per-field claim batteries indexed like `claims` (filename, title, name):
+    /// the season markers stay lazy for movie pools; the episode-range listing
+    /// is built eagerly so `episode_range`/`claims`/pack coverage share it.
+    /// The stripped copy (`text`, whether ranges were blanked) is lazily shared
+    /// across every target probe instead of being rebuilt per coordinate.
+    season_claims: [OnceLock<Box<SeasonClaims>>; 3],
+    episode_ranges: [Box<[EpisodeRangeClaim]>; 3],
+    stripped_ranges: [OnceLock<(Box<str>, bool)>; 3],
     pub(crate) pack_coverage: Option<StreamPackCoverage>,
     /// Display-field flags with filename-only technical evidence as a fallback.
     pub(crate) flags: StreamFlags,
@@ -861,10 +896,17 @@ impl StreamMatchText {
             name.as_deref().unwrap_or(""),
             title.as_deref().unwrap_or("")
         );
+        // One `episode_range_claims` pass per field serves the range memo, the
+        // batch flags, the claim profiles and every later target probe.
+        let episode_ranges: [Box<[EpisodeRangeClaim]>; 3] =
+            [filename.as_deref(), title.as_deref(), name.as_deref()].map(|text| match text {
+                Some(text) => episode_range_claims(text).collect(),
+                None => Box::default(),
+            });
         let episode_range = BatchTextFlags {
-            name: name.as_deref().is_some_and(has_episode_range),
-            title: title.as_deref().is_some_and(has_episode_range),
-            filename: filename.as_deref().is_some_and(has_episode_range),
+            name: !episode_ranges[2].is_empty(),
+            title: !episode_ranges[1].is_empty(),
+            filename: !episode_ranges[0].is_empty(),
         };
         let batch = BatchTextFlags {
             name: name
@@ -893,11 +935,11 @@ impl StreamMatchText {
             ));
         }
         let claims = [
-            (filename.as_deref(), episode_range.filename),
-            (title.as_deref(), episode_range.title),
-            (name.as_deref(), episode_range.name),
+            (filename.as_deref(), &episode_ranges[0]),
+            (title.as_deref(), &episode_ranges[1]),
+            (name.as_deref(), &episode_ranges[2]),
         ]
-        .map(|(text, has_range)| text.and_then(|text| episode_claim_profile(text, has_range)));
+        .map(|(text, ranges)| text.and_then(|text| episode_claim_profile(text, ranges)));
         let mut texts = Self {
             name,
             title,
@@ -906,6 +948,9 @@ impl StreamMatchText {
             batch,
             episode_range,
             claims,
+            season_claims: Default::default(),
+            episode_ranges,
+            stripped_ranges: Default::default(),
             pack_coverage: None,
             flags,
         };
@@ -915,7 +960,30 @@ impl StreamMatchText {
         texts
     }
 
+    /// Field-indexed like `claims` (filename, title, name): the season battery
+    /// runs once per field, ever; absent fields stay unclaimed.
+    fn field_season_claims(&self, index: usize, text: &str) -> &SeasonClaims {
+        self.season_claims[index].get_or_init(|| Box::new(SeasonClaims::of(text)))
+    }
+
+    /// The field's episode-range listing — eager in `lower`, so this only ever reads.
+    fn field_episode_ranges(&self, index: usize) -> &[EpisodeRangeClaim] {
+        &self.episode_ranges[index]
+    }
+
+    /// (ranges-blanked text, whether anything was stripped) — one `strip_episode_ranges`
+    /// pass per field, ever; `false` means the text survived untouched (borrowed).
+    fn field_stripped_ranges(&self, index: usize, text: &str) -> (&str, bool) {
+        let (stripped, changed) = self.stripped_ranges[index].get_or_init(|| {
+            let stripped = strip_episode_ranges(text);
+            let changed = matches!(stripped, Cow::Owned(_));
+            (stripped.into(), changed)
+        });
+        (stripped, *changed)
+    }
+
     fn build_pack_coverage(&self) -> Option<StreamPackCoverage> {
+        // Enumerate index = claim-battery slot: fields are filename, title, name.
         let fields = [
             (
                 self.filename.as_deref(),
@@ -934,38 +1002,49 @@ impl StreamMatchText {
             ),
         ];
         // A pack's per-episode filename must not narrow its season-wide title.
-        let (text, _, has_range) = fields
+        let (index, text, has_range) = fields
             .iter()
             .copied()
-            .find(|(text, batch, range)| {
+            .enumerate()
+            .find(|(index, (text, batch, range))| {
                 *batch
-                    && text
-                        .is_some_and(|text| *range || explicit_season_ranges(text).next().is_some())
+                    && text.is_some_and(|text| {
+                        *range || !self.field_season_claims(*index, text).ranges.is_empty()
+                    })
             })
             .or_else(|| {
-                fields.into_iter().find(|(text, _, _)| {
-                    text.is_some_and(|text| explicit_season_ranges(text).next().is_some())
-                })
-            })?;
+                fields
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(index, (text, _, _))| {
+                        text.is_some_and(|text| {
+                            !self.field_season_claims(*index, text).ranges.is_empty()
+                        })
+                    })
+            })
+            .map(|(index, (text, _, range))| (index, text, range))?;
         let text = text?;
+        let (season_index, season_text) =
+            if !self.field_season_claims(index, text).ranges.is_empty() {
+                (index, text)
+            } else {
+                fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (text, _, _))| text.map(|text| (index, text)))
+                    .find(|(index, text)| !self.field_season_claims(*index, text).ranges.is_empty())
+                    .unwrap_or((index, text))
+            };
         let mut seasons = Vec::new();
-        let season_text = if explicit_season_ranges(text).next().is_some() {
-            text
-        } else {
-            fields
-                .into_iter()
-                .filter_map(|(text, _, _)| text)
-                .find(|text| explicit_season_ranges(text).next().is_some())
-                .unwrap_or(text)
-        };
-        for (start, end) in explicit_season_ranges(season_text) {
+        for &(start, end) in &self.field_season_claims(season_index, season_text).ranges {
             seasons.extend(start.min(end)..=start.max(end));
         }
         seasons.sort_unstable();
         seasons.dedup();
         let mut episode_ranges = Vec::new();
         if has_range {
-            for (claim_seasons, start, end) in episode_range_claims(text) {
+            for &(claim_seasons, start, end) in self.field_episode_ranges(index) {
                 if let Some((start_season, end_season)) = claim_seasons {
                     let first = (start_season, start).min((end_season, end));
                     let last = (start_season, start).max((end_season, end));
@@ -984,9 +1063,9 @@ impl StreamMatchText {
                     });
                 }
             }
-            let standalone = strip_episode_ranges(text);
+            let (standalone, _) = self.field_stripped_ranges(index, text);
             for regex in [&*SEASON_EPISODE_TOKEN_REGEX, &*X_EPISODE_TOKEN_REGEX] {
-                for captures in regex.captures_iter(&standalone) {
+                for captures in regex.captures_iter(standalone) {
                     if let (Some(season), Some(episode)) = (
                         parse_captured_u32(&captures, 1),
                         parse_captured_u32(&captures, 2),
@@ -1006,9 +1085,9 @@ impl StreamMatchText {
                 ]
                 .into_iter()
                 .filter(|(_, enabled)| *enabled)
-                .flat_map(|(regex, _)| regex.captures_iter(&standalone))
+                .flat_map(|(regex, _)| regex.captures_iter(standalone))
                 .filter_map(|captures| parse_captured_u32(&captures, 1))
-                .chain(absolute_episode_claims(&standalone))
+                .chain(absolute_episode_claims(standalone))
                 .map(|episode| StreamPackEpisodeRange {
                     season: None,
                     start: episode,
@@ -1027,8 +1106,9 @@ impl StreamMatchText {
         &self.name_title
     }
 
-    /// (field text, season context, batch-without-range memo) per field — the season regexes
-    /// run once per field, not per probe. Absent fields stay `None`.
+    /// (field text, season context, batch-without-range memo) per field — the season
+    /// battery memoizes per field, so repeated targets probe claim slices, not regexes.
+    /// Absent fields stay `None`.
     pub(super) fn fields_with_season_context(
         &self,
         season: u32,
@@ -1038,21 +1118,25 @@ impl StreamMatchText {
             (
                 self.name.as_ref(),
                 self.batch.name && !self.episode_range.name,
+                2,
             ),
             (
                 self.title.as_ref(),
                 self.batch.title && !self.episode_range.title,
+                1,
             ),
             (
                 self.filename.as_ref(),
                 self.batch.filename && !self.episode_range.filename,
+                0,
             ),
         ]
-        .map(|(text, is_batch)| {
+        .map(|(text, is_batch, index)| {
             let text = text?;
             Some((
                 text,
-                text_matches_requested_season(text, season, final_season),
+                self.field_season_claims(index, text)
+                    .matches(season, final_season),
                 is_batch,
             ))
         })
@@ -1076,13 +1160,23 @@ pub(crate) fn stream_episode_match_texts(
 ) -> StreamEpisodeMatch {
     let fields = texts.fields_with_season_context(season, final_season);
     // Same conflict rule as `stream_conflicts_with_episode_targets`, reusing the season context.
+    // `claims` runs (filename, title, name); `fields` is reversed into the same order.
     let claimed = texts
         .claims
         .iter()
+        .enumerate()
         .zip(fields.iter().rev())
-        .find_map(|(profile, field)| Some((profile.as_ref()?, (*field)?)));
-    if claimed.is_some_and(|(profile, (text, season_context, _))| {
-        !numeric_episode_claim_matches(profile, text, season, episode, season_context)
+        .find_map(|((index, profile), field)| Some((index, profile.as_ref()?, (*field)?)));
+    if claimed.is_some_and(|(index, profile, (text, season_context, _))| {
+        !numeric_episode_claim_matches(
+            profile,
+            text,
+            texts.field_stripped_ranges(index, text).0,
+            texts.field_episode_ranges(index),
+            season,
+            episode,
+            season_context,
+        )
     }) {
         return StreamEpisodeMatch {
             kind: StreamEpisodeMatchKind::None,
@@ -1098,7 +1192,7 @@ pub(crate) fn stream_episode_match_texts(
         texts.episode_range.title,
         texts.episode_range.filename,
     ];
-    for (field, has_range) in fields.iter().zip(has_ranges) {
+    for (index, (field, has_range)) in fields.iter().zip(has_ranges).enumerate() {
         let Some((text, season_context, _)) = field else {
             continue;
         };
@@ -1112,14 +1206,15 @@ pub(crate) fn stream_episode_match_texts(
         ) {
             continue;
         }
-        let standalone = if has_range {
-            strip_episode_ranges(text)
+        // `fields` is (name, title, filename) — claim batteries index the reverse.
+        let (standalone, changed) = if has_range {
+            texts.field_stripped_ranges(2 - index, text)
         } else {
-            Cow::Borrowed(text.as_str())
+            (text.as_str(), false)
         };
-        if matches!(standalone, Cow::Borrowed(_))
+        if !changed
             || episode_matches_lowered_with_scratch(
-                &standalone,
+                standalone,
                 season,
                 episode,
                 *season_context,
@@ -1144,11 +1239,17 @@ pub(crate) fn stream_episode_match_texts(
 
     let mut matched_range = false;
     let mut range_claim_verified = false;
-    for (field, has_range) in fields.iter().zip(has_ranges) {
-        let Some((text, season_context, _)) = field.filter(|_| has_range) else {
+    for (index, (field, has_range)) in fields.iter().zip(has_ranges).enumerate() {
+        let Some((_, season_context, _)) = field.filter(|_| has_range) else {
             continue;
         };
-        if episode_range_contains_text(text, season, episode, season_context) {
+        // `fields` is (name, title, filename) — claim batteries index the reverse.
+        if episode_range_claims_cover(
+            texts.field_episode_ranges(2 - index),
+            season,
+            episode,
+            season_context,
+        ) {
             matched_range = true;
             range_claim_verified |= matches!(season_context, Some(true));
         }
@@ -1199,10 +1300,15 @@ struct EpisodeClaimProfile {
     has_range: bool,
 }
 
-fn episode_claim_profile(text: &str, has_range: bool) -> Option<EpisodeClaimProfile> {
+fn episode_claim_profile(
+    text: &str,
+    episode_ranges: &[EpisodeRangeClaim],
+) -> Option<EpisodeClaimProfile> {
+    let has_range = !episode_ranges.is_empty();
     // A range claims both season and episode; dashless `S01E05E06` trips no `\b` token below.
-    let has_season_episode_range =
-        has_range && episode_range_claims(text).any(|(seasons, _, _)| seasons.is_some());
+    let has_season_episode_range = episode_ranges
+        .iter()
+        .any(|(seasons, _, _)| seasons.is_some());
     let has_season = has_season_episode_range
         || [
             &*SEASON_RANGE_REGEX,
@@ -1238,6 +1344,8 @@ fn episode_claim_profile(text: &str, has_range: bool) -> Option<EpisodeClaimProf
 fn numeric_episode_claim_matches(
     profile: &EpisodeClaimProfile,
     text: &str,
+    stripped: &str,
+    episode_ranges: &[EpisodeRangeClaim],
     season: u32,
     episode: u32,
     season_context: Option<bool>,
@@ -1247,13 +1355,8 @@ fn numeric_episode_claim_matches(
     }
     if profile.has_range {
         // A standalone token beside a range still claims its episode.
-        return episode_range_contains_text(text, season, episode, season_context)
-            || episode_matches_lowered(
-                &strip_episode_ranges(text),
-                season,
-                episode,
-                season_context,
-            );
+        return episode_range_claims_cover(episode_ranges, season, episode, season_context)
+            || episode_matches_lowered(stripped, season, episode, season_context);
     }
     if profile.has_episode {
         episode_matches_lowered(text, season, episode, season_context)
@@ -1273,25 +1376,31 @@ pub(crate) fn stream_conflicts_with_episode_targets(
         return false;
     }
 
-    for (text, profile) in [
+    for (index, (text, profile)) in [
         texts.filename.as_deref(),
         texts.title.as_deref(),
         texts.name.as_deref(),
     ]
     .into_iter()
     .zip(&texts.claims)
+    .enumerate()
     {
         // No season/episode markers at all: no target can claim this text.
         let (Some(text), Some(profile)) = (text, profile) else {
             continue;
         };
+        // One season/range/strip battery serves every target sharing this text.
+        let season_claims = texts.field_season_claims(index, text);
+        let stripped = texts.field_stripped_ranges(index, text).0;
         return targets.iter().all(|&(season, episode)| {
             !numeric_episode_claim_matches(
                 profile,
                 text,
+                stripped,
+                texts.field_episode_ranges(index),
                 season,
                 episode,
-                text_matches_requested_season(text, season, final_season_season == Some(season)),
+                season_claims.matches(season, final_season_season == Some(season)),
             )
         });
     }

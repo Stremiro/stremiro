@@ -1,7 +1,7 @@
 use super::config_store::{addon_configs_generation, load_addon_configs, AddonConfig};
 use super::media_normalization::{normalize_media_details, normalize_media_item};
 use super::{js_trim, SETTINGS_STORE_FILE};
-use crate::providers::addon_manifest::snapshot_supports_request;
+use crate::providers::addon_manifest::{snapshot_supports_request, AddonCatalogCapability};
 use crate::providers::addon_resource::{
     catalog_declares_extra, snapshot_supports_catalog, AddonResourceClient, AddonSubtitle,
     CatalogExtra, CatalogPage,
@@ -332,8 +332,29 @@ pub(crate) fn merge_catalog_pages(
 /// with its capability snapshot.
 pub(crate) struct CatalogTarget {
     url: String,
+    media_type: String,
     catalog_id: String,
     catalog_genre: Option<String>,
+}
+
+/// A catalog's `genre` extra accepts the sent value only when it is free-form
+/// (no options) or lists it — a closed options list that excludes it cannot
+/// filter, so the sent genre must not be stamped on the returned items.
+fn catalog_accepts_genre(catalog: &AddonCatalogCapability, sent_genre: Option<&str>) -> bool {
+    let Some(extra) = catalog
+        .extras
+        .iter()
+        .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
+    else {
+        return false;
+    };
+    extra.options.is_empty()
+        || sent_genre.is_some_and(|sent| {
+            extra
+                .options
+                .iter()
+                .any(|option| option.trim().eq_ignore_ascii_case(sent.trim()))
+        })
 }
 
 pub(crate) fn select_catalog_targets(
@@ -353,18 +374,19 @@ pub(crate) fn select_catalog_targets(
             };
             Some(CatalogTarget {
                 url: addon.url.clone(),
+                media_type: catalog
+                    .map_or_else(|| type_.to_string(), |catalog| catalog.type_.clone()),
                 // Use the manifest's canonical id even for a case-insensitive match.
                 catalog_id: catalog
                     .map_or(catalog_id, |catalog| catalog.id.as_str())
                     .to_string(),
-                catalog_genre: catalog
-                    .filter(|catalog| catalog_declares_extra(catalog, "genre"))
-                    .and_then(|_| {
-                        extras
-                            .iter()
-                            .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
-                    })
-                    .map(|extra| extra.value.clone()),
+                catalog_genre: catalog.and_then(|catalog| {
+                    extras
+                        .iter()
+                        .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
+                        .filter(|sent| catalog_accepts_genre(catalog, Some(sent.value.as_str())))
+                        .map(|sent| sent.value.clone())
+                }),
             })
         })
         .take(MAX_CATALOG_SOURCES)
@@ -373,6 +395,58 @@ pub(crate) fn select_catalog_targets(
     if targets.is_empty() {
         return Err(no_capable_addon_error(
             &format!("the {type_}/{catalog_id} catalog"),
+            "catalog",
+        ));
+    }
+
+    Ok(targets)
+}
+
+/// Addon browse source space: every non-movie/series catalog that declares a
+/// `genre` extra accepting the sent genre and passes the usual capability
+/// checks (a required `search` extra still excludes it). Bound shared with the
+/// typed selector.
+pub(crate) fn select_addon_catalog_targets(
+    snapshot: &[AddonConfig],
+    extras: &[CatalogExtra],
+) -> Result<Vec<CatalogTarget>, String> {
+    let sent_genre = extras
+        .iter()
+        .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
+        .map(|extra| extra.value.as_str());
+    let targets: Vec<CatalogTarget> = snapshot
+        .iter()
+        .filter_map(|addon| {
+            addon
+                .capabilities
+                .as_ref()
+                .map(|snapshot| (&addon.url, snapshot))
+        })
+        .flat_map(|(url, snapshot)| {
+            snapshot
+                .catalogs
+                .iter()
+                .filter(move |catalog| {
+                    !matches!(
+                        catalog.type_.trim().to_ascii_lowercase().as_str(),
+                        "movie" | "series"
+                    ) && catalog_accepts_genre(catalog, sent_genre)
+                        && snapshot_supports_catalog(snapshot, &catalog.type_, &catalog.id, extras)
+                            .is_ok()
+                })
+                .map(move |catalog| CatalogTarget {
+                    url: url.clone(),
+                    media_type: catalog.type_.clone(),
+                    catalog_id: catalog.id.clone(),
+                    catalog_genre: sent_genre.map(str::to_string),
+                })
+        })
+        .take(MAX_CATALOG_SOURCES)
+        .collect();
+
+    if targets.is_empty() {
+        return Err(no_capable_addon_error(
+            "a catalog for the selected genre",
             "catalog",
         ));
     }
@@ -511,7 +585,6 @@ async fn run_catalog_work_pool(
 /// order so per-group failures stay isolated for the caller's own merge.
 pub(crate) async fn fetch_catalog_pages_for_target_groups(
     client: &AddonResourceClient,
-    type_: &str,
     groups: Vec<CatalogGroupSelection>,
     deadline: Option<tokio::time::Instant>,
 ) -> Vec<Result<CatalogFetchPage, String>> {
@@ -530,7 +603,7 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
                         group,
                         order,
                         addon_url: target.url,
-                        media_type: type_.to_string(),
+                        media_type: target.media_type,
                         catalog_id: target.catalog_id,
                         extras: extras.clone(),
                         catalog_genre: target.catalog_genre,
@@ -589,12 +662,39 @@ fn search_source_key(
     hash_segment(&(genre, addon_url, media_type, catalog_id))
 }
 
+/// The request's fixed catalog types plus, when allowed, every custom type in
+/// which the addon itself declares a `search` catalog. Unclassified addons keep
+/// only the fixed types — their `top` fallback must not fan out per extra type.
+fn addon_search_types<'a>(
+    addon: &'a AddonConfig,
+    media_types: &[&'a str],
+    include_custom_types: bool,
+) -> Vec<&'a str> {
+    let mut types = media_types.to_vec();
+    let Some(snapshot) = addon.capabilities.as_ref() else {
+        return types;
+    };
+    if include_custom_types {
+        for catalog in &snapshot.catalogs {
+            if catalog_declares_extra(catalog, "search")
+                && !types
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(&catalog.type_))
+            {
+                types.push(catalog.type_.as_str());
+            }
+        }
+    }
+    types
+}
+
 fn select_search_catalog_work(
     snapshot: &[AddonConfig],
     query: &str,
     media_types: &[&str],
     genres: &[Option<String>],
     cursors: Option<&[SearchSourceCursor]>,
+    include_custom_types: bool,
 ) -> (Vec<CatalogWorkItem>, Vec<Vec<SearchCatalogSource>>) {
     let cursors = cursors.map(|cursors| {
         cursors
@@ -609,7 +709,7 @@ fn select_search_catalog_work(
     for (group, genre) in genres.iter().enumerate() {
         let mut group_sources = Vec::new();
         'addons: for addon in snapshot {
-            for media_type in media_types {
+            for media_type in addon_search_types(addon, media_types, include_custom_types) {
                 for (catalog_id, supports_skip) in searchable_catalog_ids(addon, media_type) {
                     let key =
                         search_source_key(genre.as_deref(), &addon.url, media_type, catalog_id);
@@ -637,7 +737,7 @@ fn select_search_catalog_work(
                         group,
                         order: group_sources.len(),
                         addon_url: addon.url.clone(),
-                        media_type: (*media_type).to_string(),
+                        media_type: media_type.to_string(),
                         catalog_id: catalog_id.to_string(),
                         extras,
                         catalog_genre: None,
@@ -658,6 +758,8 @@ fn select_search_catalog_work(
 }
 
 /// One shared pool for every genre/source, with independent provider offsets.
+/// `include_custom_types` adds each addon's own search-capable catalog types to
+/// the fixed `media_types` — the All tab searches addon-declared types too.
 pub(crate) async fn search_catalog_pages_for_genres(
     app: &AppHandle,
     client: &AddonResourceClient,
@@ -665,10 +767,17 @@ pub(crate) async fn search_catalog_pages_for_genres(
     media_types: &[&str],
     genres: &[Option<String>],
     cursors: Option<&[SearchSourceCursor]>,
+    include_custom_types: bool,
 ) -> Result<SearchCatalogFetchPage, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
-    let (work, sources) =
-        select_search_catalog_work(&snapshot, query, media_types, genres, cursors);
+    let (work, sources) = select_search_catalog_work(
+        &snapshot,
+        query,
+        media_types,
+        genres,
+        cursors,
+        include_custom_types,
+    );
     if work.is_empty() && cursors.is_none() {
         return Err(no_capable_addon_error(
             "a searchable catalog for this type",
@@ -728,6 +837,7 @@ fn merge_search_catalog_pages(
                             cursor.skip = skip;
                             cursor.retry = false;
                             cursors.push(cursor);
+                            debug_assert!(cursors.len() <= u64::BITS as usize);
                             1_u64 << (cursors.len() - 1)
                         })
                         .unwrap_or(0);
@@ -768,7 +878,7 @@ pub async fn fetch_meta_details(
     id: &str,
 ) -> Result<Arc<MediaDetails>, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
-    fetch_meta_details_from_addons(client, &snapshot, type_, id).await
+    fetch_meta_details_from_addons(client, &snapshot, type_, id, None).await
 }
 
 async fn fetch_ranked_meta(
@@ -780,7 +890,17 @@ async fn fetch_ranked_meta(
 ) -> (usize, Result<Arc<MediaDetails>, String>) {
     let result = client
         .fetch_meta(url, type_, id, normalize_media_details)
-        .await;
+        .await
+        .and_then(|details| {
+            let response_type = super::normalize_watch_progress_type(&details.type_);
+            if response_type.is_some()
+                && response_type == super::normalize_watch_progress_type(type_)
+            {
+                Ok(details)
+            } else {
+                Err("Metadata type does not match the requested media type.".to_string())
+            }
+        });
     (rank, result)
 }
 
@@ -789,7 +909,9 @@ pub(super) async fn fetch_meta_details_from_addons(
     snapshot: &[AddonConfig],
     type_: &str,
     id: &str,
+    genres_deadline: Option<tokio::time::Instant>,
 ) -> Result<Arc<MediaDetails>, String> {
+    let require_genres = genres_deadline.is_some();
     let targets: Vec<_> = snapshot
         .iter()
         .filter(|addon| addon_allows_resource(addon, "meta", type_, id))
@@ -821,7 +943,8 @@ pub(super) async fn fetch_meta_details_from_addons(
     let hedged = tokio::select! {
         biased;
         (_, result) = &mut first_fetch => match result {
-            Ok(details) => return Ok(details),
+            Ok(details) if !require_genres || details.genres.is_some() => return Ok(details),
+            Ok(_) => false,
             Err(error) => {
                 first_error = Some(error);
                 false
@@ -860,8 +983,12 @@ pub(super) async fn fetch_meta_details_from_addons(
     let mut grace_expired = false;
 
     while !pending.is_empty() {
-        // Copy for the async-move branch so the select handler can re-arm.
-        let deadline = grace_deadline;
+        // Copy for the async-move branch so the select handler can re-arm; the
+        // genre budget binds the pre-result wait too, not just the post-ready grace.
+        let deadline = match (grace_deadline, genres_deadline) {
+            (Some(grace), Some(genres)) => Some(grace.min(genres)),
+            (grace, genres) => grace.or(genres),
+        };
         tokio::select! {
             // A result landing as the grace expires must win: the deadline
             // only matters when nothing better is ready.
@@ -870,18 +997,18 @@ pub(super) async fn fetch_meta_details_from_addons(
                 let Some((index, result)) = next else { break };
                 pending.remove(&index);
                 match result {
-                    Ok(details) => {
+                    Ok(details) if !require_genres || details.genres.is_some() => {
                         let is_better = best_ok
                             .as_ref()
                             .is_none_or(|(best_index, _)| index < *best_index);
                         if is_better {
                             best_ok = Some((index, details));
-                            grace_deadline
-                                .get_or_insert_with(|| {
-                                    tokio::time::Instant::now() + META_FALLBACK_GRACE
-                                });
+                            grace_deadline.get_or_insert_with(|| {
+                                tokio::time::Instant::now() + META_FALLBACK_GRACE
+                            });
                         }
                     }
+                    Ok(_) => {},
                     Err(error) => errors.push((index, error)),
                 }
                 if best_ok.as_ref().is_some_and(|(best_index, _)| {
@@ -898,7 +1025,8 @@ pub(super) async fn fetch_meta_details_from_addons(
                     None => std::future::pending().await,
                 }
             } => {
-                grace_expired = true;
+                grace_expired = grace_deadline
+                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline);
                 break;
             },
         }

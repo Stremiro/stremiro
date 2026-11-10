@@ -134,6 +134,11 @@ function Assert-NativeRuntimePair {
 Push-Location $root
 
 try {
+  $seenPathEntries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $env:Path = (($env:Path -split ';') | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_) -and $seenPathEntries.Add($_.TrimEnd('\'))
+  }) -join ';'
+
   if ($Clean) {
     & (Join-Path $PSScriptRoot 'clean-tauri.ps1')
   }

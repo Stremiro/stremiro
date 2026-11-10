@@ -634,14 +634,27 @@ fn stream_audit_labelled_language_overrides_reference_title_suppression() {
 }
 
 #[test]
-fn title_initialism_keeps_partial_relevance_without_overlap() {
-    let reference = build_reference_title(Some("Full Metal Alchemist"));
-    let mut stream = sort_stream("alpha");
-    stream.name = Some("FMA 1080p".to_string());
-    assert_eq!(
-        super::stream_title_relevance_score(&stream, "series", reference.as_ref()),
-        2
-    );
+fn title_relevance_preserves_initialisms_digits_and_repeated_words() {
+    for (title, release, expected) in [
+        ("Full Metal Alchemist", "FMA 1080p", 2),
+        ("Se7en", "Se7en 1080p", 4),
+        ("S1m0ne", "S1m0ne 1080p", 4),
+        ("Alpha Beta Gamma", "Alpha Beta Gamma Extra Extra 720p", 4),
+        (
+            "Alpha Beta Gamma",
+            "Alpha Alpha Beta Beta Gamma Gamma 720p",
+            4,
+        ),
+    ] {
+        let reference = build_reference_title(Some(title));
+        let mut stream = sort_stream("alpha");
+        stream.name = Some(release.to_string());
+        assert_eq!(
+            super::stream_title_relevance_score(&stream, "series", reference.as_ref()),
+            expected,
+            "{title}"
+        );
+    }
 }
 
 #[test]
@@ -1009,6 +1022,46 @@ fn borrowed_preview_ranking_keeps_final_declaration_ties_and_row_allocations() {
         assert_eq!(stream.url.as_ref().unwrap().as_ptr(), url);
         assert!(stream.selection_priority.is_some());
     }
+
+    let urls = [
+        None,
+        Some("https://cdn.example/first"),
+        Some("https://cdn.example/second"),
+    ];
+    let mut streams = prepare_addon_streams(
+        urls.into_iter()
+            .map(|url| AddonStream {
+                name: Some(
+                    if url.is_some() {
+                        "Show S01E05 720p"
+                    } else {
+                        "Show S01E03 2160p"
+                    }
+                    .to_string(),
+                ),
+                url: url.map(str::to_string),
+                content_hash: Some("abc123".to_string()),
+                ..test_stream()
+            })
+            .collect(),
+        "Fixture",
+        "fixture",
+    );
+    sort_streams_by_recommendation(
+        &mut streams,
+        StreamRecommendationInputs {
+            match_context: episode_match_context("Show", &[(1, 3)]),
+            ..inputs
+        },
+        &mut StreamSignalCache::default(),
+    );
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.url.as_deref())
+            .collect::<Vec<_>>(),
+        [urls[1], urls[2], urls[0]]
+    );
 }
 
 #[test]
@@ -1063,6 +1116,9 @@ fn title_tokenization_preserves_ascii_rules_boundaries_and_word_limit() {
             "show one 2 s01e05 bonus",
         ),
         ("ep A 1", true, ""),
+        ("Se7en 1080p", true, "se7en"),
+        ("S1m0ne S01E05v2 bonus", true, "s1m0ne"),
+        ("Show S01E05E06 bonus", true, "show"),
         (
             "one two three four five six seven eight nine ten eleven twelve thirteen",
             false,

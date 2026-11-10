@@ -8,6 +8,9 @@ use super::resume_store::ResumeStore;
 use super::search_commands::fetch_genre_catalog_pages;
 use super::store_helpers::{load_watch_statuses_map, normalize_library_item};
 use crate::operational_log::{field, log_warn};
+use crate::providers::anime_ids::{parse_anime_id, AnimeId};
+use crate::providers::anime_recommendations::{anime_recommendations, AnimeRecommendation};
+use crate::providers::enrichment::EnrichmentClient;
 use crate::providers::{
     addon_resource::AddonResourceClient, first_ascii_year_run, MediaDetails, MediaItem,
 };
@@ -20,6 +23,7 @@ use tauri::{command, AppHandle, State};
 const MAX_SIMILAR_TITLES: usize = 20;
 const MAX_SEED_GENRES: usize = 3;
 const WATCHED_TITLES_TIMEOUT: Duration = Duration::from_secs(1);
+const ANIME_RECOMMENDATIONS_TIMEOUT: Duration = Duration::from_secs(4);
 const YEAR_SPAN: f64 = 25.0;
 const RANK_SPAN: usize = 50;
 const STOPWORDS: &[&str] = &[
@@ -128,12 +132,22 @@ fn primary_year(item: &MediaItem) -> Option<u32> {
     item.year.as_deref().and_then(first_ascii_year_run)
 }
 
+fn recommendation_title_key(title: &str) -> String {
+    title
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 struct Candidate {
     item: Option<MediaItem>,
     genres: BTreeSet<String>,
     description: BTreeSet<String>,
     title: BTreeSet<String>,
     catalog_index: usize,
+    recommendation_rank: usize,
 }
 
 impl Candidate {
@@ -152,6 +166,7 @@ fn rank_similar_titles(
     source: &MediaItem,
     lists: Vec<Vec<MediaItem>>,
     watched: &HashSet<String>,
+    recommendations: &[AnimeRecommendation],
 ) -> Vec<MediaItem> {
     let source_genres = lower_genres(source);
     if source_genres.is_empty() {
@@ -162,6 +177,39 @@ fn rank_similar_titles(
     let source_animated = source_genres.contains("animation");
     let source_description = tokens(source.description.as_deref().unwrap_or_default());
     let source_title = tokens(&source.title);
+    let mut aliases = HashMap::<String, Option<usize>>::new();
+    for (rank, recommendation) in recommendations.iter().enumerate() {
+        for title in &recommendation.titles {
+            let key = recommendation_title_key(title);
+            if !key.is_empty() {
+                aliases
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if *existing != Some(rank) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert(Some(rank));
+            }
+        }
+    }
+    // A title alias cannot choose between two distinct addon identities.
+    let ambiguous_titles = if aliases.is_empty() {
+        HashSet::new()
+    } else {
+        let mut ids = HashMap::<String, &str>::new();
+        let mut ambiguous = HashSet::new();
+        for item in lists.iter().flatten() {
+            let key = recommendation_title_key(&item.title);
+            if ids
+                .insert(key.clone(), &item.id)
+                .is_some_and(|id| id != item.id)
+            {
+                ambiguous.insert(key);
+            }
+        }
+        ambiguous
+    };
     let mut candidates = Vec::new();
     for list in lists {
         for (index, candidate) in list.into_iter().enumerate() {
@@ -171,14 +219,39 @@ fn rank_similar_titles(
             if candidate.id == source.id || Some(candidate_type) != source_type {
                 continue;
             }
+            let direct_rank = if recommendations.is_empty() {
+                None
+            } else {
+                let candidate_anime_id = parse_anime_id(&candidate.id);
+                recommendations
+                    .iter()
+                    .position(|recommendation| match candidate_anime_id {
+                        Some(AnimeId::AniList(id)) => id == recommendation.anilist_id,
+                        Some(AnimeId::Mal(id)) => Some(id) == recommendation.mal_id,
+                        _ => false,
+                    })
+            };
             let genres = lower_genres(&candidate);
-            if genres.contains("animation") != source_animated {
+            if direct_rank.is_none()
+                && (genres.contains("animation") != source_animated
+                    || genres.is_disjoint(&source_genres))
+            {
                 continue;
             }
-            if genres.is_disjoint(&source_genres) {
-                continue;
-            }
+            let recommendation_rank = direct_rank
+                .or_else(|| {
+                    if aliases.is_empty() {
+                        return None;
+                    }
+                    let title_key = recommendation_title_key(&candidate.title);
+                    if ambiguous_titles.contains(&title_key) {
+                        return None;
+                    }
+                    aliases.get(&title_key).copied().flatten()
+                })
+                .unwrap_or(recommendations.len());
             candidates.push(Candidate {
+                recommendation_rank,
                 description: tokens(candidate.description.as_deref().unwrap_or_default()),
                 title: tokens(&candidate.title),
                 genres,
@@ -242,7 +315,10 @@ fn rank_similar_titles(
         match indices.entry(item.id.as_str()) {
             Entry::Occupied(index) => {
                 let existing = &mut ranked[*index.get()];
-                if score > existing.score {
+                let existing_rank = candidates[existing.candidate_index].recommendation_rank;
+                if candidate.recommendation_rank < existing_rank
+                    || (candidate.recommendation_rank == existing_rank && score > existing.score)
+                {
                     *existing = entry;
                 }
             }
@@ -258,6 +334,11 @@ fn rank_similar_titles(
     ranked.sort_by(|a, b| {
         a.watched
             .cmp(&b.watched)
+            .then_with(|| {
+                candidates[a.candidate_index]
+                    .recommendation_rank
+                    .cmp(&candidates[b.candidate_index].recommendation_rank)
+            })
             .then_with(|| b.score.total_cmp(&a.score))
     });
     ranked
@@ -276,6 +357,7 @@ fn ranked_catalog_pages(
     source: &MediaItem,
     pages: Vec<Result<Vec<MediaItem>, String>>,
     watched: &HashSet<String>,
+    recommendations: &[AnimeRecommendation],
 ) -> Result<Vec<MediaItem>, String> {
     let mut lists = Vec::new();
     let mut first_error = None;
@@ -292,12 +374,12 @@ fn ranked_catalog_pages(
             return Err(error);
         }
     }
-    Ok(rank_similar_titles(source, lists, watched))
+    Ok(rank_similar_titles(source, lists, watched, recommendations))
 }
 
 /// Animated series browse the anime catalog so recommendations stay animated.
 fn similar_titles_media_type(source: &MediaItem, source_genres: &BTreeSet<String>) -> &'static str {
-    if normalize_watch_progress_type(&source.type_) == Some("movie") {
+    if normalize_watch_progress_type(&source.type_).as_deref() == Some("movie") {
         "movie"
     } else if source_genres.contains("animation") {
         "anime"
@@ -310,8 +392,11 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
     let anime = similar_titles_media_type(source, &lower_genres(source)) == "anime";
     let supported: HashMap<String, &str> = supported
         .iter()
-        .filter(|genre| !anime || !js_trim(genre).eq_ignore_ascii_case("animation"))
-        .map(|genre| (js_trim(genre).to_lowercase(), js_trim(genre)))
+        .filter_map(|genre| {
+            let trimmed = js_trim(genre);
+            (!anime || !trimmed.eq_ignore_ascii_case("animation"))
+                .then(|| (trimmed.to_lowercase(), trimmed))
+        })
         .collect();
     let mut seeds: Vec<String> = Vec::with_capacity(MAX_SEED_GENRES);
     for genre in source.genres.iter().flatten() {
@@ -323,7 +408,9 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
     }
     // Broad genres return near-identical pages; spend the fetch budget on
     // specific ones first (stable sort keeps the source order otherwise).
-    seeds.sort_by_key(|genre| matches!(genre.to_lowercase().as_str(), "drama" | "comedy"));
+    seeds.sort_by_key(|genre| {
+        genre.eq_ignore_ascii_case("drama") || genre.eq_ignore_ascii_case("comedy")
+    });
     seeds.truncate(MAX_SEED_GENRES);
     if seeds.is_empty() && anime {
         // Animation is implied by the anime route and hidden from its browse menu.
@@ -402,7 +489,7 @@ fn watched_title_ids(
     status_store: &super::DurableStore,
 ) -> Result<HashSet<String>, String> {
     let mut watched = match normalize_watch_progress_type(media_type) {
-        Some(media_type) => ResumeStore::load_watched_title_ids(resume_path, media_type)?,
+        Some(media_type) => ResumeStore::load_watched_title_ids(resume_path, &media_type)?,
         None => HashSet::new(),
     };
     watched.extend(
@@ -419,11 +506,13 @@ fn watched_title_ids(
 pub async fn query_similar_titles(
     app: AppHandle,
     client: State<'_, AddonResourceClient>,
+    enrichment: State<'_, EnrichmentClient>,
     source: MediaItem,
 ) -> Result<Vec<MediaItem>, String> {
     let source = normalize_library_item(source)
         .ok_or_else(|| "Invalid media item for similar titles.".to_string())?;
-    let media_type = similar_titles_media_type(&source, &lower_genres(&source));
+    let source_genres = lower_genres(&source);
+    let media_type = similar_titles_media_type(&source, &source_genres);
     let addons = load_enabled_addons_snapshot(&app).await?;
     let browse_genres = build_browse_genres(&addons);
     let supported = if media_type == "movie" {
@@ -442,21 +531,35 @@ pub async fn query_similar_titles(
         let status_store = super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)?;
         watched_title_ids(&resume_path?, &source_type, &status_store)
     }));
-    let mut pages = std::pin::pin!(fetch_genre_catalog_pages(
-        &addons,
-        &client,
-        media_type,
-        seed_genres
-    ));
-    // Watched demotion is advisory: a busy store gate gets only a short window
-    // past the catalogs instead of its full budget.
-    let (pages, watched) = tokio::select! {
-        watched = &mut watched => (pages.await, watched),
-        pages = &mut pages => {
-            let watched = tokio::time::timeout(WATCHED_TITLES_TIMEOUT, watched)
-                .await
-                .unwrap_or_else(|_| Err("Watched titles read timed out.".to_string()));
-            (pages, watched)
+    let (pages, watched) = {
+        let fetch_pages = fetch_genre_catalog_pages(&addons, &client, media_type, seed_genres);
+        let fetch_recommendations = async {
+            if parse_anime_id(&source.id).is_none()
+                && !source_genres.contains("animation")
+                && !source_genres.contains("anime")
+            {
+                return Vec::new();
+            }
+            tokio::time::timeout(
+                ANIME_RECOMMENDATIONS_TIMEOUT,
+                anime_recommendations(&enrichment, &source.id),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+        };
+        let mut pages = std::pin::pin!(async { tokio::join!(fetch_pages, fetch_recommendations) });
+        // Watched demotion is advisory: a busy store gate gets only a short window
+        // past the catalogs instead of its full budget.
+        tokio::select! {
+            watched = &mut watched => (pages.await, watched),
+            pages = &mut pages => {
+                let watched = tokio::time::timeout(WATCHED_TITLES_TIMEOUT, watched)
+                    .await
+                    .unwrap_or_else(|_| Err("Watched titles read timed out.".to_string()));
+                (pages, watched)
+            }
         }
     };
     let watched = watched.unwrap_or_else(|error| {
@@ -468,18 +571,21 @@ pub async fn query_similar_titles(
         );
         HashSet::new()
     });
+    let (pages, recommendations) = pages;
     let pages = pages?;
-    tokio::task::spawn_blocking(move || ranked_catalog_pages(&source, pages, &watched))
-        .await
-        .map_err(|error| {
-            log_warn(
-                "similar-titles",
-                "query_similar_titles",
-                "ranking-task-failed",
-                &[field("error", error)],
-            );
-            "Similar titles ranking task failed.".to_string()
-        })?
+    tokio::task::spawn_blocking(move || {
+        ranked_catalog_pages(&source, pages, &watched, &recommendations)
+    })
+    .await
+    .map_err(|error| {
+        log_warn(
+            "similar-titles",
+            "query_similar_titles",
+            "ranking-task-failed",
+            &[field("error", error)],
+        );
+        "Similar titles ranking task failed.".to_string()
+    })?
 }
 
 #[cfg(test)]
@@ -502,6 +608,132 @@ mod tests {
             description: Some(description.to_string()),
             ..item(id, genres, None)
         }
+    }
+
+    #[test]
+    fn anilist_votes_prioritize_playable_matches_before_truncation_and_keep_watched_demotion() {
+        let source = item("source", &["Animation", "Adventure"], None);
+        let mut candidates: Vec<_> = (0..25)
+            .map(|index| MediaItem {
+                title: format!("Catalog {index}"),
+                ..item(&format!("tt{index}"), &["Animation", "Adventure"], None)
+            })
+            .collect();
+        candidates.extend([
+            MediaItem {
+                title: "Hunter x Hunter (2011)".into(),
+                ..item("kitsu:7205", &["Animation", "Adventure"], None)
+            },
+            MediaItem {
+                title: "Different provider title".into(),
+                ..item("mal:20", &["Anime"], None)
+            },
+            MediaItem {
+                title: "Hunter x Hunter (1999)".into(),
+                ..item("kitsu:10", &["Animation", "Adventure"], None)
+            },
+        ]);
+        let recommendations = [
+            AnimeRecommendation {
+                anilist_id: 11061,
+                mal_id: Some(11061),
+                titles: vec!["Hunter x Hunter (2011)".into()],
+            },
+            AnimeRecommendation {
+                anilist_id: 20,
+                mal_id: Some(20),
+                titles: vec!["Naruto".into()],
+            },
+        ];
+        let unwatched = rank_similar_titles(
+            &source,
+            vec![candidates.clone()],
+            &HashSet::new(),
+            &recommendations,
+        );
+        assert_eq!(unwatched[0].id, "kitsu:7205");
+        assert_eq!(unwatched[1].id, "mal:20");
+        let watched = HashSet::from(["kitsu:7205".to_string()]);
+        let ranked = rank_similar_titles(&source, vec![candidates], &watched, &recommendations);
+        assert_eq!(ranked.len(), MAX_SIMILAR_TITLES);
+        assert_eq!(ranked[0].id, "mal:20");
+        assert!(!ranked.iter().any(|item| item.id == "kitsu:7205"));
+        assert!(!ranked.iter().any(|item| item.id == "kitsu:10"));
+    }
+
+    #[test]
+    fn duplicate_catalog_copies_keep_the_verified_anilist_match() {
+        let source = MediaItem {
+            title: "Close local match".into(),
+            ..item(
+                "source",
+                &["Animation", "Adventure", "Mystery"],
+                Some("2024"),
+            )
+        };
+        let recommended = MediaItem {
+            title: "Community recommendation".into(),
+            ..item("kitsu:20", &["Animation"], Some("1990"))
+        };
+        let local_match = MediaItem {
+            title: source.title.clone(),
+            ..item(
+                "kitsu:20",
+                &["Animation", "Adventure", "Mystery"],
+                Some("2024"),
+            )
+        };
+        let recommendations = [AnimeRecommendation {
+            anilist_id: 20,
+            mal_id: Some(20),
+            titles: vec![recommended.title.clone()],
+        }];
+        for copies in [
+            vec![recommended.clone(), local_match.clone()],
+            vec![local_match, recommended],
+        ] {
+            let ranked =
+                rank_similar_titles(&source, vec![copies], &HashSet::new(), &recommendations);
+            assert_eq!(ranked.len(), 1);
+            assert_eq!(ranked[0].title, "Community recommendation");
+        }
+    }
+
+    #[test]
+    fn anime_aliases_do_not_guess_between_remakes_or_live_action_titles() {
+        let source = item("source", &["Animation", "Adventure"], None);
+        let make = |id: &str, title: &str, genres: &[&str]| MediaItem {
+            title: title.into(),
+            ..item(id, genres, None)
+        };
+        let recommendations = [AnimeRecommendation {
+            anilist_id: 20,
+            mal_id: Some(20),
+            titles: vec!["Naruto".into()],
+        }];
+        let ranked = rank_similar_titles(
+            &source,
+            vec![vec![
+                make("base", "A different title", &["Animation", "Adventure"]),
+                make("remake", "Naruto", &["Animation", "Adventure"]),
+                make("original", "Naruto", &["Animation", "Adventure"]),
+                make("live", "Naruto", &["Adventure"]),
+            ]],
+            &HashSet::new(),
+            &recommendations,
+        );
+        assert_eq!(ranked[0].id, "base");
+        assert_eq!(ranked.len(), 3);
+        let ranked = rank_similar_titles(
+            &source,
+            vec![vec![
+                make("base", "A different title", &["Animation", "Adventure"]),
+                make("playable", "NARUTO", &["Animation", "Adventure"]),
+            ]],
+            &HashSet::new(),
+            &recommendations,
+        );
+        assert_eq!(ranked[0].id, "playable");
     }
 
     #[test]
@@ -550,7 +782,7 @@ mod tests {
             title: "Match".into(),
             ..item("source", &["Animation", "Mystery", "Thriller"], None)
         };
-        let ranked = ranked_catalog_pages(&source, pages, &HashSet::new()).unwrap();
+        let ranked = ranked_catalog_pages(&source, pages, &HashSet::new(), &[]).unwrap();
         assert_eq!(
             ranked
                 .iter()
@@ -590,13 +822,9 @@ mod tests {
             ("Anime", "series", &["Drama"][..], "series", true),
             ("series", "movie", &["Drama"][..], "series", false),
             ("series", "unsupported", &["Drama"][..], "series", false),
-            (
-                "unsupported",
-                "unsupported",
-                &["Drama"][..],
-                "series",
-                false,
-            ),
+            // Arbitrary addon catalog types are valid and match their own kind.
+            ("unsupported", "unsupported", &["Drama"][..], "series", true),
+            (" ", "movie", &["Drama"][..], "series", false),
             ("unsupported", "series", &["Animation"][..], "anime", false),
         ] {
             let mut source = item("source", genres, None);
@@ -608,7 +836,7 @@ mod tests {
                 browse_type,
                 "{source_type}"
             );
-            let ranked = rank_similar_titles(&source, vec![vec![candidate]], &HashSet::new());
+            let ranked = rank_similar_titles(&source, vec![vec![candidate]], &HashSet::new(), &[]);
             assert_eq!(
                 ranked.len(),
                 usize::from(matches),
@@ -649,6 +877,7 @@ mod tests {
                 ],
             ],
             &HashSet::new(),
+            &[],
         );
         let ids: Vec<_> = ranked.iter().map(|item| item.id.as_str()).collect();
         assert_eq!(ids, ["duplicate", "second-tie", "first-tie", "partial"]);
@@ -661,6 +890,7 @@ mod tests {
                 vec![item("second", &["Drama"], None)],
             ],
             &HashSet::new(),
+            &[],
         );
         assert_eq!(ties[0].id, "first");
         assert_eq!(ties[1].id, "second");
@@ -669,6 +899,7 @@ mod tests {
             &item("empty", &[], None),
             vec![vec![item("candidate", &["Drama"], None)]],
             &HashSet::new(),
+            &[],
         )
         .is_empty());
     }
@@ -680,7 +911,7 @@ mod tests {
             .map(|index| item(&format!("drama-{index}"), &["Drama"], None))
             .collect();
         candidates.push(item("rare", &["Mystery"], None));
-        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new());
+        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new(), &[]);
         assert_eq!(ranked[0].id, "rare");
     }
 
@@ -704,6 +935,7 @@ mod tests {
                 vec![relevant],
             ],
             &HashSet::new(),
+            &[],
         );
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].id, "duplicate");
@@ -726,7 +958,7 @@ mod tests {
             &["Drama"],
             "Cryptographic conspiracy",
         ));
-        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new());
+        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new(), &[]);
         assert_eq!(ranked[0].id, "rare");
 
         let source = MediaItem {
@@ -741,6 +973,7 @@ mod tests {
             &source,
             vec![vec![item("adventure", &["Sci-Fi"], None), sequel]],
             &HashSet::new(),
+            &[],
         );
         assert_eq!(ranked[0].id, "sequel");
         assert_eq!(
@@ -761,7 +994,7 @@ mod tests {
             described_item("matched", &["Sci-Fi"], description),
             described_item("unrelated", &["Sci-Fi"], "Detective solves murder"),
         ];
-        let ranked = rank_similar_titles(&source, vec![candidates.clone()], &HashSet::new());
+        let ranked = rank_similar_titles(&source, vec![candidates.clone()], &HashSet::new(), &[]);
         assert_eq!(
             ranked
                 .iter()
@@ -770,7 +1003,7 @@ mod tests {
             ["matched", "missing", "unrelated"]
         );
         source.description = Some("The and with".into());
-        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new());
+        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new(), &[]);
         assert_eq!(
             ranked
                 .iter()
@@ -803,6 +1036,7 @@ mod tests {
                 item("unwatched", &["Drama"], Some("1980")),
             ]],
             &HashSet::from(["watched".into()]),
+            &[],
         );
         assert_eq!(
             ranked
@@ -878,6 +1112,7 @@ mod tests {
                 item("unwatched", &["Drama"], Some("1980")),
             ]],
             &watched,
+            &[],
         );
         assert_eq!(
             ranked
@@ -980,7 +1215,7 @@ mod tests {
         let candidates = (0..40)
             .map(|index| item(&index.to_string(), &["Animation"], None))
             .collect();
-        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new());
+        let ranked = rank_similar_titles(&source, vec![candidates], &HashSet::new(), &[]);
         assert_eq!(ranked.len(), MAX_SIMILAR_TITLES);
         assert_eq!(ranked[0].id, "0");
         assert_eq!(ranked[19].id, "19");
@@ -990,7 +1225,7 @@ mod tests {
             .chain([item("not-animated", &["Drama"], None)])
             .collect();
         let watched = (0..25).map(|index| index.to_string()).collect();
-        let ranked = rank_similar_titles(&source, vec![candidates], &watched);
+        let ranked = rank_similar_titles(&source, vec![candidates], &watched, &[]);
         assert_eq!(ranked.len(), MAX_SIMILAR_TITLES);
         assert_eq!(ranked[0].id, "25");
         assert_eq!(ranked[14].id, "39");
@@ -1021,7 +1256,8 @@ mod tests {
         assert!(ranked_catalog_pages(
             &source,
             vec![Err("first".into()), Ok(vec![])],
-            &HashSet::new()
+            &HashSet::new(),
+            &[]
         )
         .unwrap()
         .is_empty());
@@ -1029,7 +1265,8 @@ mod tests {
             ranked_catalog_pages(
                 &source,
                 vec![Err("first".into()), Err("second".into())],
-                &HashSet::new()
+                &HashSet::new(),
+                &[]
             )
             .unwrap_err(),
             "first"
@@ -1041,6 +1278,7 @@ mod tests {
                 Ok(vec![item("result", &["Drama"], None)]),
             ],
             &HashSet::new(),
+            &[],
         )
         .unwrap();
         assert_eq!(ranked[0].id, "result");

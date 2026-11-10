@@ -33,7 +33,7 @@ const SLOT_IDS = ['primary', 'secondary'] as const;
 const MODIFIER_KEYS = new Set(['shift', 'control', 'alt', 'altgraph', 'meta', 'os']);
 
 const KEY_SLOT_CLASS =
-  'inline-flex h-6 min-w-6 cursor-pointer items-center justify-center whitespace-nowrap rounded-[5px] border px-1.5 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
+  'inline-flex h-7 min-w-7 cursor-pointer items-center justify-center whitespace-nowrap rounded-md border px-2 font-mono text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
 const SHORTCUT_CAPTION_CLASS = `mb-1.5 ${SETTINGS_CAPTION_CLASS}`;
 export const FIXED_SHORTCUT_SECTIONS = [
   ['Player', FIXED_PLAYER_SHORTCUTS],
@@ -180,7 +180,7 @@ export function ShortcutsSection() {
               aria-disabled={isSaving || !hasOverrides || undefined}
               onClick={handleResetAll}
               className={cn(
-                'h-9 gap-2 px-3.5 text-[13px] aria-disabled:pointer-events-none aria-disabled:opacity-50',
+                'h-10 gap-2 px-3.5 text-[14px] aria-disabled:pointer-events-none aria-disabled:opacity-50',
                 SETTINGS_OUTLINE_BUTTON_CLASS,
               )}
             >
@@ -193,7 +193,7 @@ export function ShortcutsSection() {
           <p
             aria-live='polite'
             className={cn(
-              'border-b border-white/[0.06] px-4 sm:px-5 text-[12.5px] text-zinc-300',
+              'border-b border-white/[0.06] px-4 sm:px-6 text-[13px] text-zinc-300',
               notice ? 'py-2.5' : 'hidden',
             )}
           >
@@ -247,7 +247,7 @@ export function ShortcutsSection() {
                   <ShortcutTable
                     shortcuts={shortcuts}
                     idPrefix={`setting-fixed-${title}`}
-                    className='grid-cols-1 divide-y divide-white/[0.06] @xl:grid-cols-1 [&>div]:h-auto [&>div]:min-h-9 [&>div]:py-1.5 [&_dt]:whitespace-normal [&_dt]:overflow-visible [&_dd]:max-w-[60%] [&_dd]:flex-wrap [&_dd]:justify-end'
+                    className='grid-cols-1 divide-y divide-white/[0.06] @xl:grid-cols-1 [&>div]:h-auto [&>div]:min-h-10 [&>div]:py-1.5 [&_dt]:whitespace-normal [&_dt]:overflow-visible [&_dd]:max-w-[60%] [&_dd]:flex-wrap [&_dd]:justify-end'
                   />
                 </section>
               ))}
@@ -290,9 +290,9 @@ function PlayerBindingRow({
   return (
     <li
       id={`setting-shortcut-${action}`}
-      className='flex min-h-10 items-center justify-between gap-3 py-2'
+      className='flex min-h-11 items-center justify-between gap-3 py-2.5'
     >
-      <span className='flex min-w-0 flex-1 items-center gap-2 text-[13px] leading-snug text-zinc-200'>
+      <span className='flex min-w-0 flex-1 items-center gap-2 text-[15px] leading-snug text-zinc-200'>
         <span>{label}</span>
         {customized ? (
           <span title='Customized' className='h-1.5 w-1.5 shrink-0 rounded-full bg-(--accent-nav)'>

@@ -26,13 +26,16 @@ import {
 } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { EpisodeThumb } from '@/components/episode-thumb';
+import { StatePanel } from '@/components/state-panel';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
+import { IndeterminateBar } from '@/components/ui/skeleton';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useLocalDay } from '@/hooks/use-local-day';
+import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import {
   type AddonStream,
   type AddonStreamResolution,
@@ -46,14 +49,14 @@ import {
   type WatchProgress,
   type TitleWatchProgress,
 } from '@/lib/api';
-import { handleRadioGroupKeyDown, whenRowMounted } from '@/lib/dom';
+import { handleRovingGroupKeyDown, whenRowMounted } from '@/lib/dom';
 import {
   episodeMatchesCoordinates,
   isEpisodeSpoiler,
   type NextEpisodeStreamCoordinates,
 } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
-import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
+import { RESOLUTION_LABELS, type StreamBatchCounts } from '@/lib/stream-selector-utils';
 import { formatAirDate } from '@/lib/schedule-dates';
 import {
   cn,
@@ -65,8 +68,9 @@ import {
 } from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
-  'h-8 px-2.5 rounded-md text-[13px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
-const SELECTOR_SEGMENT_INACTIVE_CLASS = 'text-zinc-400 not-aria-disabled:hover:text-zinc-200';
+  'h-8 px-2.5 rounded-md text-[13px] font-semibold transition-[background-color,color,box-shadow] duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30 motion-reduce:transition-none';
+const SELECTOR_SEGMENT_INACTIVE_CLASS =
+  'text-zinc-400 not-aria-disabled:hover:bg-white/[0.04] not-aria-disabled:hover:text-zinc-200';
 
 // Filters use the app accent; only Quality keeps its own hue, echoing the violet 4K badge it sorts by.
 const SORT_OPTIONS: SegmentOption<StreamSelectorSort>[] = [
@@ -74,7 +78,8 @@ const SORT_OPTIONS: SegmentOption<StreamSelectorSort>[] = [
   {
     value: 'quality',
     label: 'Quality',
-    activeClass: 'bg-violet-500/25 text-violet-300 shadow-xs',
+    activeClass: 'bg-violet-500/25',
+    activeTextClass: 'text-violet-300',
   },
   { value: 'seeds', label: 'Seeds' },
 ];
@@ -89,6 +94,7 @@ interface SegmentOption<T extends string> {
   count?: number;
   /** Defaults to the app-accent filter treatment. */
   activeClass?: string;
+  activeTextClass?: string;
 }
 
 function SegmentGroup<T extends string>({
@@ -106,22 +112,46 @@ function SegmentGroup<T extends string>({
   isResolving: boolean;
   value: T;
 }) {
+  const groupRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef(new Map<T, HTMLButtonElement>());
+  const indicator = useSlidingIndicator(value, groupRef, optionRefs);
+  const selectedOption = options.find((option) => option.value === value);
+
   return (
     <div
+      ref={groupRef}
       role='radiogroup'
       aria-label={label}
-      className='flex shrink-0 items-center gap-px bg-black/50 rounded-lg p-0.5'
+      className='relative isolate flex shrink-0 items-center gap-px bg-black/50 rounded-lg p-0.5'
     >
+      {indicator && (
+        <span
+          aria-hidden='true'
+          className={cn(
+            'nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-md shadow-xs',
+            selectedOption?.activeClass ?? 'bg-[rgb(var(--accent-nav-rgb)/0.16)]',
+          )}
+          style={{
+            width: indicator.width,
+            height: indicator.height,
+            transform: `translate3d(${indicator.left}px, ${indicator.top}px, 0)`,
+          }}
+        />
+      )}
       {leading}
       {options.map((option) => (
         <button
           key={option.value}
+          ref={(node) => {
+            if (node) optionRefs.current.set(option.value, node);
+            else optionRefs.current.delete(option.value);
+          }}
           type='button'
           role='radio'
           aria-checked={value === option.value}
           tabIndex={value === option.value ? 0 : -1}
           aria-disabled={isResolving || undefined}
-          onKeyDown={handleRadioGroupKeyDown}
+          onKeyDown={handleRovingGroupKeyDown}
           onFocus={(event) => {
             if (event.currentTarget.matches(':focus-visible')) {
               event.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -133,8 +163,9 @@ function SegmentGroup<T extends string>({
           }}
           className={cn(
             SELECTOR_SEGMENT_BASE_CLASS,
+            'relative z-10',
             value === option.value
-              ? (option.activeClass ?? 'accent-active shadow-xs')
+              ? (option.activeTextClass ?? 'text-(--accent-nav)')
               : SELECTOR_SEGMENT_INACTIVE_CLASS,
           )}
         >
@@ -247,7 +278,7 @@ export function StreamSelectorHeader({
         aria-label='Close stream selector'
         aria-keyshortcuts='Escape'
         title='Close (Esc)'
-        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-400 backdrop-blur-md transition-colors hover:border-red-500/50 hover:bg-red-500/25 hover:text-red-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-400/50 motion-reduce:transition-none'
+        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-black/40 text-white/70 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
       >
         <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
       </button>
@@ -440,7 +471,7 @@ export function StreamListErrorState({
   );
 }
 
-const STREAM_LIST_MESSAGE_ICON = <FileVideo className='w-10 h-10 opacity-15' />;
+const STREAM_LIST_MESSAGE_ICON = <FileVideo aria-hidden='true' className='w-10 h-10 opacity-15' />;
 
 function StreamListMessage({
   action,
@@ -460,15 +491,17 @@ function StreamListMessage({
   return (
     <div className='flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain px-3 py-3'>
       {healthStrip}
-      <div
-        role={role}
-        className='flex flex-1 shrink-0 flex-col items-center justify-center gap-2 text-muted-foreground text-center'
-      >
-        {icon}
-        <p className='text-sm'>{title}</p>
-        <p className='text-[13px] text-zinc-400 leading-relaxed max-w-sm break-words'>{body}</p>
-        {action}
-      </div>
+      <StatePanel
+        role={role ?? 'presentation'}
+        icon={icon}
+        iconClassName='h-auto w-auto'
+        title={title}
+        titleClassName='text-sm font-normal text-muted-foreground'
+        description={body}
+        descriptionClassName='max-w-sm break-words text-[13px]'
+        action={action}
+        className='flex-1 shrink-0 gap-2 text-muted-foreground'
+      />
     </div>
   );
 }
@@ -478,18 +511,22 @@ export function StreamListOfflineState() {
 }
 
 export function StreamListNoAddonsState({
-  metadataOnly,
+  addonsEnabled,
+  mediaLabel,
   onManageAddons,
 }: {
-  metadataOnly: boolean;
+  addonsEnabled: boolean;
+  mediaLabel: string;
   onManageAddons: () => void;
 }) {
   return (
     <StreamListMessage
-      title={metadataOnly ? 'No stream-capable addons enabled.' : 'No enabled stream sources.'}
+      title={
+        addonsEnabled ? `No addon provides ${mediaLabel} streams.` : 'No enabled stream sources.'
+      }
       body={
-        metadataOnly
-          ? 'Your enabled addons provide metadata only. Add a stream addon in Settings → Addons to get playable sources.'
+        addonsEnabled
+          ? 'None of your enabled addons serve streams for this media type. Add a stream-capable addon for it in Settings → Addons.'
           : 'Enable at least one addon in Settings → Addons, then try again.'
       }
       action={
@@ -746,10 +783,12 @@ export function StreamAddonHealthStrip({
 }
 
 interface StreamFilterToolbarProps {
+  batchCounts: StreamBatchCounts;
   filteredCount: number;
   filters: StreamSelectorPreferences;
   hasActiveFilter: boolean;
   isResolving: boolean;
+  isSearchPending?: boolean;
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
   onResetFilters: () => void;
   onSearchQueryChange: (value: string) => void;
@@ -762,10 +801,12 @@ interface StreamFilterToolbarProps {
 }
 
 export function StreamFilterToolbar({
+  batchCounts,
   filteredCount,
   filters,
   hasActiveFilter,
   isResolving,
+  isSearchPending = false,
   onFiltersChange,
   onResetFilters,
   onSearchQueryChange,
@@ -786,6 +827,7 @@ export function StreamFilterToolbar({
       <div className='mb-2 flex flex-wrap items-center gap-2'>
         <SearchInput
           inputRef={searchInputRef}
+          pending={isSearchPending}
           value={searchQuery}
           onValueChange={(value) => {
             if (isResolving) return;
@@ -824,7 +866,7 @@ export function StreamFilterToolbar({
         </button>
       </div>
       <div className='flex items-center gap-2'>
-        <div className='-my-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-1 pr-5 scrollbar-hide [mask-image:linear-gradient(to_right,black_calc(100%_-_20px),transparent)]'>
+        <div className='-my-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto overscroll-x-contain py-1 pr-5 scrollbar-hide [mask-image:linear-gradient(to_right,black_calc(100%_-_20px),transparent)]'>
           <SegmentGroup
             label='Quality filter'
             isResolving={isResolving}
@@ -867,8 +909,8 @@ export function StreamFilterToolbar({
                   onChange={(batch) => onFiltersChange((f) => ({ ...f, batch }))}
                   options={(
                     [
-                      { value: 'episodes', label: 'Episodes', count: stats.episodeLikeCount },
-                      { value: 'packs', label: 'Packs', count: stats.batchCount },
+                      { value: 'episodes', label: 'Episodes', count: batchCounts.episodes },
+                      { value: 'packs', label: 'Packs', count: batchCounts.packs },
                       { value: 'all', label: 'All' },
                     ] satisfies SegmentOption<StreamSelectorBatch>[]
                   ).filter((option) => option.count !== 0 || option.value === filters.batch)}
@@ -899,14 +941,24 @@ export function StreamFilterToolbar({
   );
 }
 
-export function StreamP2pNotice({ p2pCount }: { p2pCount: number }) {
+export function StreamP2pNotice({
+  p2pCount,
+  onManageAddons,
+}: {
+  p2pCount: number;
+  onManageAddons: () => void;
+}) {
   return (
-    <div className='mb-3 flex items-start gap-2 rounded-lg border border-amber-400/15 bg-amber-400/[0.06] px-3 py-2'>
-      <Magnet className='mt-px h-3.5 w-3.5 shrink-0 text-amber-300/70' />
-      <p className='text-[13px] leading-5 text-amber-200/90'>
+    <div className='mb-3 flex items-center gap-2 rounded-lg border border-amber-400/15 bg-amber-400/[0.06] px-3 py-2'>
+      <Magnet className='mt-px h-3.5 w-3.5 shrink-0 self-start text-amber-300/70' />
+      <p className='flex-1 text-[13px] leading-5 text-amber-200/90'>
         {pluralize(p2pCount, 'P2P source')} found, but none are playable in this build — it plays
-        cached and direct links only. Try another addon.
+        cached and direct links only. Copy a magnet link to open it in a torrent client, or add
+        another stream addon.
       </p>
+      <Button variant='ghost' size='sm' onClick={onManageAddons} className='shrink-0'>
+        Manage addons
+      </Button>
     </div>
   );
 }
@@ -962,7 +1014,7 @@ export function StreamResolveFeedbackToast({
         </div>
 
         <div className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'>
-          <div className='h-full w-1/3 bg-white/50 motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+          <IndeterminateBar className='bg-white/50' />
         </div>
       </div>
     </div>
@@ -1026,6 +1078,8 @@ export function StreamPackEpisodeList({
   targetMasked,
   targetSeason,
 }: StreamPackEpisodeListProps) {
+  // The compiler caches getVirtualItems() on the stable virtualizer instance, freezing rows on scroll.
+  'use no memo';
   const localDay = useLocalDay();
   const { preferences: spoilerProtection, isHydrating: isSpoilerPreferencePending } =
     useAppUiPreferences((preferences) => preferences.spoilerProtection);
@@ -1073,7 +1127,7 @@ export function StreamPackEpisodeList({
     (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
   );
-  const getItemKey = useCallback((index: number) => packRowKey(rows[index]), [rows]);
+  const getItemKey = useCallback((index: number) => packRowKey(rows[index]!), [rows]);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getItemKey,
@@ -1111,7 +1165,7 @@ export function StreamPackEpisodeList({
 
   const focusRow = useCallback(
     (index: number) => {
-      const key = packRowKey(rows[index]);
+      const key = packRowKey(rows[index]!);
       setFocusedKey(key);
       if (isVirtualized) {
         virtualizer.scrollToIndex(index, { align: 'auto' });
@@ -1162,7 +1216,7 @@ export function StreamPackEpisodeList({
     const anchor = targetIndex >= 0 ? targetIndex : firstEpisodeIndex;
     if (anchor < 0) return;
     initialFocusDoneRef.current = true;
-    const key = packRowKey(rows[anchor]);
+    const key = packRowKey(rows[anchor]!);
     setFocusedKey(key);
     if (isVirtualized) {
       virtualizer.scrollToIndex(anchor, { align: 'center' });
@@ -1224,7 +1278,7 @@ export function StreamPackEpisodeList({
           data-pack-row={packRowKey(row)}
           data-current-episode={isTarget ? '' : undefined}
           aria-current={isTarget ? 'true' : undefined}
-          aria-label={`Play ${formatSeasonEpisode(ep.season, ep.episode)} — ${episodeTitle}`}
+          aria-label={`Play ${formatSeasonEpisode(ep.season, ep.episode)} — ${episodeTitle}${watchEntry?.is_watched ? ', watched' : ''}`}
           // aria-disabled, not disabled — a resolving pick must not drop the row out of the roving tabindex (focus → <body>).
           aria-disabled={disabled || undefined}
           aria-busy={isPending || undefined}
@@ -1257,7 +1311,7 @@ export function StreamPackEpisodeList({
               aria-hidden='true'
               className='pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'
             >
-              <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+              <IndeterminateBar className='bg-(--accent-prog)' />
             </div>
           )}
           <EpisodeThumb
@@ -1282,9 +1336,9 @@ export function StreamPackEpisodeList({
               )}
               {watchEntry?.is_watched && (
                 <Check
+                  aria-hidden='true'
                   className='h-3 w-3 shrink-0 text-zinc-400'
                   strokeWidth={3}
-                  aria-label='Watched'
                 />
               )}
             </div>

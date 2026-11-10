@@ -1,12 +1,12 @@
-import { Check, ChevronDown } from 'lucide-react';
+import { ChevronDown, type LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
+  RadioDropdownItem,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 
@@ -42,7 +42,7 @@ export function SettingsQueryError({
 
 /** Plain status text for a group header's action slot — no chip chrome. */
 export const SETTINGS_HEADER_STATUS_CLASS =
-  'block pt-0.5 text-[13px] font-medium leading-5 tabular-nums text-zinc-400';
+  'block pt-0.5 text-[14px] font-medium leading-5 tabular-nums text-zinc-400';
 
 /** Glass chrome for outline `Button`s across sections; callers own size. */
 export const SETTINGS_OUTLINE_BUTTON_CLASS =
@@ -56,9 +56,9 @@ export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-xl border border-white/[0.0
 
 /** Shared `SettingsRow` shells — used directly by rows with a custom label slot (clear-records). */
 export const SETTINGS_ROW_CLASS =
-  'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-3.5 first:pt-0 last:pb-0';
+  'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-4 first:pt-0 last:pb-0';
 export const SETTINGS_ROW_DESCRIPTION_CLASS =
-  'mt-1 block max-w-[64ch] text-[13px] leading-normal text-zinc-400';
+  'mt-1 block max-w-[64ch] text-[14px] leading-normal text-zinc-400';
 
 export function settingsControlId(label: string) {
   return `setting-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
@@ -80,7 +80,9 @@ export function SettingsBody({
   rows?: boolean;
 }) {
   return (
-    <div className={cn('px-4 py-4 sm:px-5', rows && 'divide-y divide-white/[0.06]', className)}>
+    <div
+      className={cn('px-4 py-4 sm:px-6 sm:py-5', rows && 'divide-y divide-white/[0.06]', className)}
+    >
       {children}
     </div>
   );
@@ -96,23 +98,34 @@ export function SettingsRow({
   className,
   description,
   descriptionId,
+  icon: Icon,
   label,
 }: {
   children: ReactNode;
   className?: string;
   description?: string;
   descriptionId?: string;
+  icon?: LucideIcon;
   label: string;
 }) {
   return (
     <div id={settingsControlId(label)} className={cn(SETTINGS_ROW_CLASS, className)}>
-      <div className='min-w-0 flex-1 basis-32'>
-        <span className='block text-[14px] font-medium leading-snug text-zinc-100'>{label}</span>
-        {description ? (
-          <span id={descriptionId} className={SETTINGS_ROW_DESCRIPTION_CLASS}>
-            {description}
-          </span>
+      <div className='flex min-w-0 flex-1 basis-32 items-center gap-3'>
+        {Icon ? (
+          <Icon
+            aria-hidden='true'
+            className='size-[18px] shrink-0 text-zinc-400'
+            strokeWidth={1.75}
+          />
         ) : null}
+        <div className='min-w-0'>
+          <span className='block text-[16px] font-medium leading-snug text-zinc-100'>{label}</span>
+          {description ? (
+            <span id={descriptionId} className={SETTINGS_ROW_DESCRIPTION_CLASS}>
+              {description}
+            </span>
+          ) : null}
+        </div>
       </div>
       <div className='min-w-0 max-w-full shrink-0 [&>button]:max-w-full'>{children}</div>
     </div>
@@ -142,7 +155,7 @@ export function SettingsSelect<Value extends string>({
           aria-label={`${ariaLabel}: ${valueLabel}`}
           disabled={disabled}
           className={cn(
-            'group/select h-9 w-40 min-w-0 max-w-full justify-between px-3 text-[14px] shadow-none',
+            'group/select h-10 w-44 min-w-0 max-w-full justify-between px-3.5 text-[15px] shadow-none',
             SETTINGS_OUTLINE_BUTTON_CLASS,
           )}
         >
@@ -160,22 +173,17 @@ export function SettingsSelect<Value extends string>({
         className='max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] min-w-40 border-white/10 bg-zinc-950 backdrop-blur-none'
       >
         {options.map((option) => (
-          <DropdownMenuItem
+          <RadioDropdownItem
             key={option.value}
-            role='menuitemradio'
-            aria-checked={option.value === value}
+            checked={option.value === value}
+            checkClassName='h-4 w-4 text-white'
             onSelect={() => {
               if (option.value !== value) onChange(option.value);
             }}
             className='cursor-pointer gap-2.5 px-3 py-2 text-sm text-zinc-200'
           >
-            {option.value === value ? (
-              <Check aria-hidden='true' className='h-4 w-4 text-white' />
-            ) : (
-              <span className='w-4' />
-            )}
             {option.label}
-          </DropdownMenuItem>
+          </RadioDropdownItem>
         ))}
       </DropdownMenuContent>
     </DropdownMenu>

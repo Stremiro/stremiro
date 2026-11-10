@@ -44,13 +44,14 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
     }
 
     // positionRef mirrors scrollLeft so an unmount cleanup can persist it after React detaches the ref.
-    if (positionRef) positionRef.current = el.scrollLeft;
+    const scrollLeft = el.scrollLeft;
+    if (positionRef) positionRef.current = scrollLeft;
     const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
     const hasOverflow = maxScrollLeft > SCROLL_BOUNDARY_EPSILON;
     const next: ScrollEdgeState = {
       hasOverflow,
-      canScrollLeft: hasOverflow && el.scrollLeft > SCROLL_BOUNDARY_EPSILON,
-      canScrollRight: hasOverflow && el.scrollLeft < maxScrollLeft - SCROLL_BOUNDARY_EPSILON,
+      canScrollLeft: hasOverflow && scrollLeft > SCROLL_BOUNDARY_EPSILON,
+      canScrollRight: hasOverflow && scrollLeft < maxScrollLeft - SCROLL_BOUNDARY_EPSILON,
     };
     setEdges((prev) =>
       prev.hasOverflow === next.hasOverflow &&
@@ -64,7 +65,6 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
   useEffect(() => {
     if (!node) return;
 
-    const initialSyncFrame = window.requestAnimationFrame(syncScrollState);
     // Scroll events outpace frames — one state read per frame.
     let scrollFrame: number | null = null;
     const handleScroll = () => {
@@ -81,7 +81,6 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
     resizeObserver.observe(node);
 
     return () => {
-      window.cancelAnimationFrame(initialSyncFrame);
       if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
       node.removeEventListener('scroll', handleScroll);
       resizeObserver.disconnect();
@@ -89,6 +88,13 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
   }, [node, positionRef, syncScrollState]);
 
   return { bind, syncScrollState, ...edges };
+}
+
+/** Fade mask for a horizontal scroller: transparent only where the scroll continues. */
+export function scrollEdgeMask(scrollState: ScrollEdgeState) {
+  return scrollState.hasOverflow
+    ? `linear-gradient(to right, ${scrollState.canScrollLeft ? 'transparent 0px, black 28px' : 'black 0px'}, ${scrollState.canScrollRight ? 'black calc(100% - 28px), transparent 100%' : 'black 100%'})`
+    : undefined;
 }
 
 /** True once `sentinelRef` scrolls under the 32px frameless titlebar. Focus inside the

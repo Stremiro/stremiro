@@ -53,11 +53,15 @@ fn additional_video_ids_preserve_source_mapping_and_reject_unusable_ids() {
         );
         assert_eq!(source.lookup_id, "tt123");
     }
-    for len in [255, 256, 257] {
+    for len in [
+        crate::commands::MEDIA_ID_MAX_CHARS - 1,
+        crate::commands::MEDIA_ID_MAX_CHARS,
+        crate::commands::MEDIA_ID_MAX_CHARS + 1,
+    ] {
         episode.id = "x".repeat(len);
         assert_eq!(
             additional_episode_video_id(&episode, &source),
-            (len <= 256).then(|| episode.id.clone())
+            (len <= crate::commands::MEDIA_ID_MAX_CHARS).then(|| episode.id.clone())
         );
     }
 }

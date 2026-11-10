@@ -2,6 +2,52 @@ use super::*;
 use crate::test_helpers::test_episode;
 
 #[test]
+fn duplicate_episode_coordinates_keep_the_first_source_mapping_and_video_id() {
+    let fixture = crate::test_helpers::test_store();
+    let store = &fixture.store;
+    let mut episodes = [
+        test_episode("video:first", 1, 2),
+        test_episode("video:alternate", 1, 2),
+    ];
+    episodes[0].stream_lookup_id = Some("tt111".into());
+    episodes[0].stream_season = Some(4);
+    episodes[0].stream_episode = Some(12);
+    episodes[1].stream_lookup_id = Some("tt222".into());
+    episodes[1].stream_season = Some(5);
+    episodes[1].stream_episode = Some(13);
+    let snapshots: Vec<_> = episodes
+        .iter()
+        .map(|episode| build_episode_mapping_snapshot("series", "show", None, episode, 1))
+        .collect();
+    let mut index = Vec::new();
+    let (writes, deletes, changed) =
+        collect_episode_mapping_writes(store, "series", "show", &episodes, &snapshots, &mut index);
+    assert!(changed && deletes.is_empty());
+    for (key, cached) in writes {
+        store.set(playback_episode_mapping_item_key(&key), json!(cached));
+    }
+    let key = playback_episode_mapping_snapshot_key("series", "show", 1, 2);
+    let cached: CachedEpisodeMapping = store
+        .get_typed(playback_episode_mapping_item_key(&key))
+        .unwrap();
+    assert_eq!(cached.snapshot, snapshots[0]);
+    assert_eq!(cached.video_id.as_deref(), Some("video:first"));
+    let (writes, deletes, changed) =
+        collect_episode_mapping_writes(store, "series", "show", &episodes, &snapshots, &mut index);
+    assert!(writes.is_empty() && deletes.is_empty() && !changed);
+    let digest = episode_mappings_digest("series", "show", None, &episodes);
+    assert_eq!(
+        digest,
+        episode_mappings_digest("series", "show", None, &episodes[..1])
+    );
+    episodes.swap(0, 1);
+    assert_ne!(
+        digest,
+        episode_mappings_digest("series", "show", None, &episodes)
+    );
+}
+
+#[test]
 fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     let fixture = crate::test_helpers::test_store();
     let store = &fixture.store;

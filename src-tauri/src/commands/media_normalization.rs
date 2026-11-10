@@ -251,6 +251,7 @@ pub(crate) fn with_requested_media_id(
 }
 
 pub(crate) fn normalize_media_details(mut details: MediaDetails) -> MediaDetails {
+    details.type_ = details.type_.trim().to_ascii_lowercase();
     details.title = normalize_title(&details.title, MEDIA_TITLE_MAX_CHARS);
     details.imdb_id = bound_optional(details.imdb_id, MEDIA_ID_MAX_CHARS);
     details.poster = details.poster.and_then(|s| normalize_media_image_url(&s));

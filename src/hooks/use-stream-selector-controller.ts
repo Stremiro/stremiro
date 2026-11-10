@@ -1,6 +1,6 @@
 import { Channel } from '@tauri-apps/api/core';
 import { replaceEqualDeep, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDebounce } from '@/hooks/use-debounce';
 import { ITEM_SEARCH_DEBOUNCE_MS } from '@/hooks/use-item-search';
 import { useOnlineStatus } from '@/hooks/use-online-status';
@@ -253,17 +253,20 @@ export function useStreamSelectorController({
   const lastStreamFamily = lastStreamEntry?.stream_family || undefined;
   // Per-episode watch rows — the pack picker reads resume points from the same snapshot as the badge.
   const episodeProgress = titleProgress?.episodeProgress;
-  // Rust already ranked these rows playable-first; the default view needs no filter IPC.
+  // Batch never reaches the index query: the backend-ranked set is split client-side, so
+  // segment counts always reflect the other filters and batch toggles reuse the same cache.
+  const indexFilters: StreamSelectorPreferences =
+    effectiveFilters.batch === 'all' ? effectiveFilters : { ...effectiveFilters, batch: 'all' };
   const selectorViewResetKey = JSON.stringify([effectiveFilters, requestedSearchQuery]);
   const unfilteredView =
     effectiveFilters.quality === 'all' &&
     effectiveFilters.source === 'all' &&
     effectiveFilters.addon === 'all' &&
-    effectiveFilters.batch === 'all' &&
     effectiveFilters.sort === 'smart' &&
     !requestedSearchQuery
-      ? { streams, resetKey: selectorViewResetKey }
+      ? { streams }
       : undefined;
+  const selectorPoolId = getSelectorPoolId(streams);
   const {
     data: selectorView,
     error: selectorViewError,
@@ -273,33 +276,57 @@ export function useStreamSelectorController({
     queryKey: [
       'stream-selector-view',
       selectorSessionKey,
-      getSelectorPoolId(streams),
-      effectiveFilters,
+      selectorPoolId,
+      indexFilters,
       requestedSearchQuery,
     ],
     queryFn: async () => {
-      if (unfilteredView) return unfilteredView;
       const indices = await api.getStreamSelectorIndices(
         streams,
-        effectiveFilters,
+        indexFilters,
         requestedSearchQuery,
       );
       return {
-        streams: indices.map((index) => streams[index]),
-        resetKey: selectorViewResetKey,
+        streams: indices.flatMap((index) => streams[index] ?? []),
       };
     },
+    initialData: unfilteredView,
     placeholderData: (previousData, previousQuery) =>
       unfilteredView ??
       (previousQuery?.queryKey[1] === selectorSessionKey ? previousData : undefined),
-    enabled: open && streams.length > 0,
+    enabled: open && streams.length > 0 && !unfilteredView,
     staleTime: Infinity,
     gcTime: unfilteredView ? 0 : STREAM_SELECTOR_GC_TIME_MS,
     retry: false,
     structuralSharing: false,
   });
-  const sortedStreams = selectorView?.streams ?? EMPTY_SELECTOR_STREAMS;
-  const listResetKey = selectorView?.resetKey ?? '';
+  useEffect(() => {
+    // Superseded pool identities cannot be revisited; keep current filters and other observers.
+    queryClient.removeQueries({
+      queryKey: ['stream-selector-view', selectorSessionKey],
+      predicate: (query) => query.queryKey[2] !== selectorPoolId && query.getObserversCount() === 0,
+    });
+  }, [queryClient, selectorSessionKey, selectorPoolId]);
+  const matchingStreams =
+    unfilteredView?.streams ?? selectorView?.streams ?? EMPTY_SELECTOR_STREAMS;
+  const batchCounts = useMemo(() => {
+    let packs = 0;
+    for (const stream of matchingStreams) {
+      if (stream.presentation.isBatch) packs += 1;
+    }
+    return { all: matchingStreams.length, episodes: matchingStreams.length - packs, packs };
+  }, [matchingStreams]);
+  // A subsequence keeps the backend's playable-first ordering and chosen sort.
+  const sortedStreams = useMemo(
+    () =>
+      effectiveFilters.batch === 'all'
+        ? matchingStreams
+        : matchingStreams.filter(
+            (stream) => stream.presentation.isBatch === (effectiveFilters.batch === 'packs'),
+          ),
+    [effectiveFilters.batch, matchingStreams],
+  );
+  const listResetKey = selectorViewResetKey;
   const isSearchPending = normalizedSearchQuery !== requestedSearchQuery || isFetchingSelectorView;
 
   const [retryState, setRetryState] = useState<{
@@ -346,6 +373,7 @@ export function useStreamSelectorController({
     activeResolveFeedback,
     activeResolveKey,
     addonHealthMetrics,
+    batchCounts,
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,

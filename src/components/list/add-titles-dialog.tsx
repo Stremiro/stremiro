@@ -25,10 +25,12 @@ import { canonicalizeSearchText, foldAsciiCase } from '@/lib/api-cache';
 import { whenRowMounted } from '@/lib/dom';
 import { notifyAction } from '@/lib/notify';
 import { invalidateListQueries, SEARCH_CATALOG_QUERY_KEY } from '@/lib/query-invalidation';
-import { cn, pluralize } from '@/lib/utils';
+import { cn, mediaTypeLabel, pluralize } from '@/lib/utils';
 import { ListIconTile } from './list-icons';
 
 const VISIBLE_PAGE_SIZE = 150;
+const FOOTER_ACTION_BUTTON_CLASS =
+  'rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-40';
 const EMPTY_ITEMS: MediaItem[] = [];
 const TITLE_SOURCE_OPTIONS = [
   { value: 'library', label: 'Library' },
@@ -74,7 +76,9 @@ export function AddTitlesDialog({
     matchingLibraryQuery.isError ||
     (matchingLibraryQuery.isFetched &&
       (matchingLibraryQuery.isPending || matchingLibraryQuery.isPlaceholderData));
-  const sourceError = source === 'library' ? hasLibraryError : discoverQuery.isError;
+  const discoverPartial = discoverQuery.data?.partial === true;
+  const sourceError =
+    source === 'library' ? hasLibraryError : discoverQuery.isError || discoverPartial;
   const isSearchPending = search !== debouncedSearch || sourceQuery.isPlaceholderData;
   const matchingItems = sourceQuery.data?.items ?? EMPTY_ITEMS;
   const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
@@ -113,7 +117,7 @@ export function AddTitlesDialog({
       if (focusedIndex >= 0) {
         for (const direction of [-1, 1]) {
           let index = focusedIndex + direction;
-          while (index >= 0 && index < range.count && existingIds.has(matchingItems[index].id))
+          while (index >= 0 && index < range.count && existingIds.has(matchingItems[index]!.id))
             index += direction;
           if (index >= 0 && index < range.count && !indices.includes(index)) indices.push(index);
         }
@@ -126,7 +130,7 @@ export function AddTitlesDialog({
     count: rowCount,
     enabled: virtualize,
     getScrollElement: () => scrollRef.current,
-    getItemKey: (index) => matchingItems[index].id,
+    getItemKey: (index) => matchingItems[index]!.id,
     estimateSize: () => 64,
     gap: 2,
     overscan: 5,
@@ -200,7 +204,13 @@ export function AddTitlesDialog({
         </span>
         {sourceError && (
           <RetryBanner
-            message={source === 'library' ? "Couldn't load your library." : "Couldn't load titles."}
+            message={
+              source === 'library'
+                ? "Couldn't load your library."
+                : discoverPartial
+                  ? 'Results may be incomplete.'
+                  : "Couldn't load titles."
+            }
             onRetry={() => void sourceQuery.refetch()}
             isRetrying={sourceQuery.isFetching}
           />
@@ -252,7 +262,7 @@ export function AddTitlesDialog({
                 style={virtualize ? { height: virtualizer.getTotalSize() } : undefined}
               >
                 {rows.map((row) => {
-                  const item = matchingItems[row.index];
+                  const item = matchingItems[row.index]!;
                   const inList = existingIds.has(item.id);
                   const selected = selectedItems.has(item.id) && !inList;
                   const year = item.displayYear || item.primaryYear || item.year;
@@ -292,7 +302,7 @@ export function AddTitlesDialog({
                         </span>
                         <span className='mt-0.5 block text-[11px] text-zinc-500'>
                           {year && `${year} · `}
-                          {item.type === 'movie' ? 'Movie' : 'Series'}
+                          {mediaTypeLabel(item.type)}
                         </span>
                       </span>
                       {inList && <span className='text-[10px] text-zinc-500'>In list</span>}
@@ -330,11 +340,11 @@ export function AddTitlesDialog({
                         matchingItems.length,
                       );
                       let nextIndex = rowCount;
-                      while (nextIndex < nextLimit && existingIds.has(matchingItems[nextIndex].id))
+                      while (nextIndex < nextLimit && existingIds.has(matchingItems[nextIndex]!.id))
                         nextIndex += 1;
                       setVisibleLimit((limit) => limit + VISIBLE_PAGE_SIZE);
                       if (nextIndex < nextLimit) {
-                        const id = matchingItems[nextIndex].id;
+                        const id = matchingItems[nextIndex]!.id;
                         setFocusedId(id);
                         whenRowMounted(
                           () => scrollRef.current,
@@ -371,7 +381,7 @@ export function AddTitlesDialog({
                   return next;
                 })
               }
-              className='rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-40'
+              className={FOOTER_ACTION_BUTTON_CLASS}
             >
               Select all
             </button>
@@ -379,7 +389,7 @@ export function AddTitlesDialog({
               type='button'
               disabled={selectionDisabled || selectedItems.size === 0}
               onClick={() => setSelectedItems(new Map())}
-              className='rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-40'
+              className={FOOTER_ACTION_BUTTON_CLASS}
             >
               Clear
             </button>
@@ -412,7 +422,7 @@ export function AddTitlesDialog({
                       setSelectedItems((previous) => {
                         const next = new Map(previous);
                         for (const [index, result] of results.entries()) {
-                          if (result.status === 'fulfilled') next.delete(items[index].id);
+                          if (result.status === 'fulfilled') next.delete(items[index]!.id);
                         }
                         return next;
                       });

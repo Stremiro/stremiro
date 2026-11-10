@@ -5,9 +5,10 @@ use super::config_store::{
 };
 use crate::providers::{
     addon_resource::AddonResourceClient, addons::AddonTransport, enrichment::EnrichmentClient,
+    lock_or_recover,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
@@ -107,15 +108,20 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     let app_name = app.config().product_name.as_deref().unwrap_or("Stremiro");
     let show = MenuItem::with_id(app, "show", format!("Show {app_name}"), true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", format!("Quit {app_name}"), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &settings, &separator, &quit])?;
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip(app_name)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => reveal_main_window(app),
+            "settings" => {
+                reveal_main_window(app);
+                let _ = app.emit("app://settings-requested", ());
+            }
             "quit" => request_quit(app),
             _ => {}
         })
@@ -261,17 +267,38 @@ fn handle_main_window_minimized(app: &AppHandle) {
         }
         return;
     }
-    if state.webview_memory_low.load(Ordering::Relaxed) {
+    release_background_memory_when_idle(app);
+}
+
+fn should_release_background_memory(
+    playback_active: bool,
+    window_visible: bool,
+    window_minimized: bool,
+) -> bool {
+    !playback_active && (!window_visible || window_minimized)
+}
+
+fn release_background_memory_when_idle(app: &AppHandle) {
+    if app
+        .state::<AppShellState>()
+        .webview_memory_low
+        .load(Ordering::Relaxed)
+    {
         return;
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         // Playback keeps the normal target: the player still drives its clock and media session.
-        if !super::player_mpv_commands::is_playback_active(app.clone()).await
-            && app
-                .get_webview_window("main")
-                .is_some_and(|window| window.is_minimized().unwrap_or(false))
-        {
+        let playback_active = super::player_mpv_commands::is_playback_active(app.clone()).await;
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        // Recheck after the native probe: the user may already have restored the window.
+        if should_release_background_memory(
+            playback_active,
+            window.is_visible().unwrap_or(true),
+            window.is_minimized().unwrap_or(false),
+        ) {
             release_background_memory(&app);
         }
     });
@@ -282,20 +309,13 @@ pub(crate) fn accept_app_link(app: &AppHandle, args: impl IntoIterator<Item = St
     let Some(link) = find_app_link(args) else {
         return;
     };
-    *app.state::<AppShellState>()
-        .pending_app_link
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = Some(link);
+    *lock_or_recover(&app.state::<AppShellState>().pending_app_link) = Some(link);
     let _ = app.emit("app://link", ());
 }
 
 #[tauri::command]
 pub(crate) fn take_pending_app_link(app: AppHandle) -> Option<AppLink> {
-    app.state::<AppShellState>()
-        .pending_app_link
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take()
+    lock_or_recover(&app.state::<AppShellState>().pending_app_link).take()
 }
 
 pub(crate) fn reveal_on_startup(app: &AppHandle) {
@@ -387,7 +407,7 @@ fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     state.initial_reveal_pending.store(false, Ordering::Relaxed);
     state.quit_pending.store(false, Ordering::Relaxed);
     window.hide().map_err(|error| error.to_string())?;
-    release_background_memory(app);
+    release_background_memory_when_idle(app);
     Ok(())
 }
 
@@ -425,5 +445,25 @@ mod tests {
         assert!(!state.begin_frontend_quit());
         state.frontend_quit_ready.store(true, Ordering::Relaxed);
         assert!(state.begin_frontend_quit());
+    }
+
+    #[test]
+    fn active_playback_keeps_the_normal_memory_target_even_when_hidden() {
+        for visible in [false, true] {
+            for minimized in [false, true] {
+                assert!(
+                    !should_release_background_memory(true, visible, minimized),
+                    "active playback: visible={visible}, minimized={minimized}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn idle_memory_is_released_only_while_hidden_or_minimized() {
+        assert!(should_release_background_memory(false, false, false));
+        assert!(should_release_background_memory(false, false, true));
+        assert!(should_release_background_memory(false, true, true));
+        assert!(!should_release_background_memory(false, true, false));
     }
 }

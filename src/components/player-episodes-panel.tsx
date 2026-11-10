@@ -10,7 +10,6 @@ import {
 } from 'lucide-react';
 import {
   type KeyboardEvent,
-  memo,
   type Ref,
   useCallback,
   useEffect,
@@ -38,10 +37,10 @@ import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-item-sea
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import { useLocalDay } from '@/hooks/use-local-day';
-import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@/lib/api';
+import type { Episode, MediaDetails, TitleWatchProgress } from '@/lib/api';
 import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { episodeMatchesCoordinates, isEpisodeSpoiler } from '@/lib/episode-stream-target';
-import { getWatchProgressPercent } from '@/lib/history-playback';
+import { episodeProgressKey, getWatchProgressPercent } from '@/lib/history-playback';
 import { formatAirDate } from '@/lib/schedule-dates';
 import { cn, getEpisodeTitle, pluralize } from '@/lib/utils';
 
@@ -87,8 +86,8 @@ interface PlayerEpisodesPanelProps {
   currentSeason?: number;
   currentEpisode?: number;
   backdrop?: string;
-  /** Per-episode watch-row lookup — the same rows details cards render. */
-  episodeProgressFor?: (episode: Episode) => WatchProgress | undefined;
+  mediaId?: string;
+  episodeProgress?: TitleWatchProgress['episodeProgress'];
   watchedEpisodeCeiling?: TitleWatchProgress['watchedEpisodeCeiling'];
   /** The title's Continue target; that row gets the Resume pill. */
   resumeTarget?: { season?: number; episode?: number };
@@ -103,8 +102,7 @@ const SEASON_STEP_CLASS =
   'flex h-full w-7 cursor-pointer items-center justify-center text-zinc-400 outline-hidden transition-colors duration-120 not-aria-disabled:hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:text-zinc-700 motion-reduce:transition-none';
 const EPISODE_LIST_VIRTUALIZE_THRESHOLD = 40;
 
-// Memoized so playback ticks never re-render the episode list while the panel sits closed off-screen.
-export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
+export function PlayerEpisodesPanel({
   panelRef,
   open,
   isFullscreen,
@@ -115,12 +113,15 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   currentSeason,
   currentEpisode,
   backdrop,
-  episodeProgressFor,
+  mediaId,
+  episodeProgress,
   watchedEpisodeCeiling,
   resumeTarget,
   onEpisodeSelect,
   onClose,
 }: PlayerEpisodesPanelProps) {
+  // The compiler caches getVirtualItems() on the stable virtualizer instance, freezing rows on scroll.
+  'use no memo';
   const localDay = useLocalDay();
   const spoilerProtection = useSpoilerProtection();
   const seasonEpisodes = useMemo(
@@ -242,7 +243,9 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       const isCurrent = episodeMatchesCoordinates(ep, currentSeason, currentEpisode);
       const airDate = formatAirDate(ep.releaseDate, localDay);
       // The Continue target gets Resume, never the already-marked Now playing row.
-      const watchEntry = episodeProgressFor?.(ep);
+      const watchEntry = mediaId
+        ? episodeProgress?.[episodeProgressKey(mediaId, ep.season, ep.episode)]
+        : undefined;
       const isWatched = watchEntry?.is_watched === true;
       const isSpoiler = isEpisodeSpoiler(
         ep,
@@ -338,7 +341,8 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       backdrop,
       currentEpisode,
       currentSeason,
-      episodeProgressFor,
+      mediaId,
+      episodeProgress,
       handleRowKeyDown,
       localDay,
       onEpisodeSelect,
@@ -410,7 +414,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                   aria-label='Previous season'
                   aria-disabled={seasonIndex <= 0 || undefined}
                   onClick={() => {
-                    if (seasonIndex > 0) onSeasonChange(seasons[seasonIndex - 1].number);
+                    if (seasonIndex > 0) onSeasonChange(seasons[seasonIndex - 1]!.number);
                   }}
                   className={SEASON_STEP_CLASS}
                 >
@@ -477,7 +481,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                   aria-disabled={seasonIndex < 0 || seasonIndex >= seasons.length - 1 || undefined}
                   onClick={() => {
                     if (seasonIndex >= 0 && seasonIndex < seasons.length - 1)
-                      onSeasonChange(seasons[seasonIndex + 1].number);
+                      onSeasonChange(seasons[seasonIndex + 1]!.number);
                   }}
                   className={SEASON_STEP_CLASS}
                 >
@@ -557,4 +561,4 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       </div>
     </aside>
   );
-});
+}

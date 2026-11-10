@@ -445,10 +445,7 @@ fn stream_conflicts(s: &AddonStream, targets: &[(u32, u32)]) -> bool {
 }
 
 fn named_stream(name: &str) -> AddonStream {
-    AddonStream {
-        name: Some(name.to_string()),
-        ..test_stream()
-    }
+    stream_fixture(Some(name), None)
 }
 
 #[test]
@@ -1104,30 +1101,50 @@ fn sanitize_preserves_short_protocol_path_segments() {
 }
 
 #[test]
+fn sanitize_redacts_empty_query_names_and_complete_userinfo() {
+    assert_eq!(
+        sanitize_addon_log("https://cdn.example/video?=secret&other=token"),
+        "https://cdn.example/video?=[redacted]&other=[redacted]"
+    );
+    assert_eq!(
+        sanitize_addon_log("failed https://user:pa@ss@cdn.example/video"),
+        "failed https://[redacted-userinfo]@cdn.example/video"
+    );
+    // An @ in the path or fragment must not consume the hostname or another URL.
+    let plain = "https://cdn.example/a@b#c@d https://other.example/video";
+    assert_eq!(sanitize_addon_log(plain), plain);
+}
+
+#[test]
 fn decode_strips_blocked_url_but_keeps_stream_and_magnets() {
     let bytes = br#"{"streams": [
             {"name": "Good", "url": "https://example.com/video.mp4"},
             {"name": "File", "url": "file:///etc/passwd"},
             {"name": "Loopback", "url": "http://127.0.0.1:9999/video.mp4"},
             {"name": "Creds", "url": "https://user:pass@example.com/video.mp4"},
-            {"name": "Magnet", "url": "magnet:?xt=urn:btih:abc123"}
+            {"name": "HttpsIp", "url": "https://8.8.8.8/video.mp4"},
+            {"name": "HttpsNumericIp", "url": "https://134744072/video.mp4"},
+            {"name": "HttpsIpv6", "url": "https://[2606:4700::1111]/video.mp4"},
+            {"name": "Magnet", "url": "magnet:?xt=urn:btih:abc123"},
+            {"name": "HttpIp", "url": "http://8.8.8.8/video.mp4"}
         ]}"#;
     let streams = decode_stream_items(bytes).expect("decodes");
-    assert_eq!(streams.len(), 5);
+    assert_eq!(streams.len(), 9);
     assert_eq!(
         streams[0].url.as_deref(),
         Some("https://example.com/video.mp4")
     );
-    for (index, blocked) in streams.iter().enumerate().skip(1).take(3) {
+    for (index, blocked) in streams.iter().enumerate().skip(1).take(6) {
         assert!(
             blocked.url.is_none(),
             "stream {index} url must be stripped: {blocked:?}"
         );
     }
     assert_eq!(
-        streams[4].url.as_deref(),
+        streams[7].url.as_deref(),
         Some("magnet:?xt=urn:btih:abc123")
     );
+    assert_eq!(streams[8].url.as_deref(), Some("http://8.8.8.8/video.mp4"));
 }
 
 #[test]
@@ -1294,7 +1311,7 @@ fn audio_tags_respect_word_boundaries_and_filename_fallback() {
         ("DDP5.1", "AAC2.0", (false, true, false)),
         ("EAC3", "AAC2.0", (false, true, false)),
         ("AAC2.0", "EAC3", (false, false, true)),
-        ("TrueHD", "AAC2.0", (true, false, false)),
+        ("TrueHD", "AAC2.0", (false, false, false)),
         ("Atmos", "AAC2.0", (true, false, false)),
     ] {
         let stream = AddonStream {
@@ -1307,6 +1324,7 @@ fn audio_tags_respect_word_boundaries_and_filename_fallback() {
         };
         let flags = stream.match_texts().flags;
         assert_eq!((flags.atmos, flags.eac3, flags.aac), expected, "{title}");
+        assert_eq!(flags.truehd, title == "TrueHD", "{title}");
     }
 }
 

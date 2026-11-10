@@ -261,10 +261,12 @@ export function DetailsTrailer({ trailers, title, triggerClassName }: DetailsTra
               className='pointer-events-none absolute inset-0 z-10 grid place-items-center'
             >
               <div className='delayed-fade-in flex flex-col items-center gap-3 text-center motion-reduce:animate-none'>
-                <Loader2
-                  aria-hidden='true'
-                  className='h-6 w-6 animate-spin text-zinc-400 motion-reduce:animate-none'
-                />
+                {delayedFrameKey !== frameKey && (
+                  <Loader2
+                    aria-hidden='true'
+                    className='h-6 w-6 animate-spin text-zinc-400 motion-reduce:animate-none'
+                  />
+                )}
                 {delayedFrameKey === frameKey ? (
                   <>
                     <p className='text-sm text-zinc-300'>Taking longer than expected</p>

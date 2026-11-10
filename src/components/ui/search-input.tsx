@@ -76,6 +76,7 @@ export function SearchInput({
         onChange={(e) => onValueChange(e.target.value)}
         placeholder={placeholder}
         aria-label={ariaLabel ?? placeholder}
+        aria-busy={pending || undefined}
         className={cn('pl-9 pr-8', className)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && onSubmit && !e.nativeEvent.isComposing) {
@@ -96,7 +97,7 @@ export function SearchInput({
           onClick={() => {
             onValueChange('');
             // The button unmounts with the text — keep focus in the field.
-            inputRef.current?.focus();
+            inputRef.current?.focus({ preventScroll: true });
           }}
           aria-label={clearLabel}
           title={clearLabel}

@@ -28,6 +28,16 @@ fn probeable_stream(stream_key: &str, content_hash: Option<&str>) -> AddonStream
     }
 }
 
+fn header_stream(key: &str, headers: serde_json::Value) -> AddonStream {
+    AddonStream {
+        behavior_hints: Some(
+            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
+                .unwrap(),
+        ),
+        ..probeable_stream(key, None)
+    }
+}
+
 #[test]
 fn candidate_input_moves_identity_and_preserves_probe_fields() {
     let mut stream = probeable_stream("s:prepared", None);
@@ -228,14 +238,7 @@ fn probe_plan_deduplicates_header_names_without_changing_values_or_duplicates() 
         ),
     ]
     .into_iter()
-    .map(|(key, headers)| {
-        let mut stream = probeable_stream(key, None);
-        stream.behavior_hints = Some(
-            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
-                .unwrap(),
-        );
-        stream
-    })
+    .map(|(key, headers)| header_stream(key, headers))
     .collect::<Vec<_>>();
     let original_headers = streams[0].request_headers();
 
@@ -288,14 +291,7 @@ fn recovery_probe_plan_excludes_failed_requests_without_collapsing_auth_variants
         ),
     ]
     .into_iter()
-    .map(|(key, headers)| {
-        let mut stream = probeable_stream(key, None);
-        stream.behavior_hints = Some(
-            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
-                .unwrap(),
-        );
-        stream
-    })
+    .map(|(key, headers)| header_stream(key, headers))
     .collect();
 
     for (failed_key, expected) in [
@@ -339,11 +335,7 @@ fn recovery_probe_plan_excludes_failed_requests_without_collapsing_auth_variants
 fn recovery_exclusions_cover_the_chain_and_request_aliases_but_keep_distinct_auth() {
     let stream = |key: &str, path: &str, headers: serde_json::Value| AddonStream {
         url: Some(format!("https://cdn.example/{path}")),
-        behavior_hints: Some(
-            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
-                .unwrap(),
-        ),
-        ..probeable_stream(key, None)
+        ..header_stream(key, headers)
     };
     let first = stream(
         "s:older",
@@ -624,6 +616,16 @@ preferred_position_tests! {
             stream_family: Some("alpha|release:x"),
             ..hint("s:rotted")
         }, None) => Some(1);
+    preferred_position_keeps_missing_priority_on_first_probeable_row:
+        ({
+            let mut streams = pair();
+            streams[0].source_id = Some("addon-a".to_string());
+            streams[1].selection_priority = priority(StreamEpisodeMatchKind::Exact, true, 4, 6);
+            streams
+        }, PreferredStreamHint {
+            source_id: Some("addon-a"),
+            ..PreferredStreamHint::default()
+        }, None) => Some(0);
     preferred_position_exact_key_honored_below_best_priority:
         ({
             let mut streams = pair();
@@ -640,13 +642,7 @@ fn pool_query(media_type: &str, season: Option<u32>, episode: Option<u32>) -> St
         season,
         episode,
         None,
-        StreamRankingOverrides {
-            media_type: None,
-            media_id: None,
-            title: None,
-            season: None,
-            episode: None,
-        },
+        StreamRankingOverrides::default(),
         "stream lookup",
     )
     .expect("valid query")
@@ -661,21 +657,25 @@ fn stream_pool_query_preserves_composed_ipc_trimming() {
             None,
             None,
             None,
-            StreamRankingOverrides {
-                media_type: None,
-                media_id: None,
-                title: None,
-                season: None,
-                episode: None,
-            },
+            StreamRankingOverrides::default(),
             "stream lookup",
         )
         .map(|query| (query.media_type, query.id))
     };
-    for (prefix, suffix, valid) in [
-        (" \t\u{feff}\u{a0}", "\u{2028}\u{feff}\r\n ", true),
-        ("\u{feff}\u{85}", "\u{85}\u{feff}", true),
-        ("\u{85}\u{feff}", "\u{feff}\u{85}", false),
+    for (prefix, suffix, expected) in [
+        (
+            " \t\u{feff}\u{a0}",
+            "\u{2028}\u{feff}\r\n ",
+            ("movie", "tt123"),
+        ),
+        ("\u{feff}\u{85}", "\u{85}\u{feff}", ("movie", "tt123")),
+        // `\u{feff}` is not Rust whitespace: it survives `trim`, so the wrapped
+        // value passes through as a bounded arbitrary addon type/id.
+        (
+            "\u{85}\u{feff}",
+            "\u{feff}\u{85}",
+            ("\u{feff}movie\u{feff}", "\u{feff}tt123\u{feff}"),
+        ),
     ] {
         let media_type = format!("{prefix}MoViE{suffix}");
         let id = format!("{prefix}tt123{suffix}");
@@ -687,11 +687,26 @@ fn stream_pool_query_preserves_composed_ipc_trimming() {
                 crate::commands::js_trim(&id)
             )
         );
-        assert_eq!(actual.is_ok(), valid);
-        if valid {
-            assert_eq!(actual.unwrap(), ("movie".to_string(), "tt123".to_string()));
-        }
+        assert_eq!(
+            actual.ok(),
+            Some((expected.0.to_string(), expected.1.to_string()))
+        );
     }
+}
+
+#[test]
+fn stream_pool_query_accepts_addon_catalog_types() {
+    let query = StreamPoolQuery::new(
+        "Channel",
+        "addon:1",
+        None,
+        None,
+        None,
+        StreamRankingOverrides::default(),
+        "stream lookup",
+    )
+    .unwrap();
+    assert_eq!(query.media_type, "channel");
 }
 
 /// Keys that survive the fetch-time episode gate for `query.request(fetch_id)`.
@@ -1042,38 +1057,14 @@ async fn fake_probe(
 }
 
 #[tokio::test]
-async fn candidate_results_consume_in_rank_order() {
-    let mut candidates = FuturesOrdered::new();
-    candidates.push_back(fake_probe(
-        candidate_input("slow-a", "s:rank-order-a"),
-        Duration::from_secs(1),
-        Box::pin(async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok(resolved("https://cdn.example/a.mkv"))
-        }),
-    ));
-    candidates.push_back(fake_probe(
-        candidate_input("fast-b", "s:b"),
-        Duration::from_secs(1),
-        Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
-    ));
-
-    let winner = resolve_candidate_results(candidates, None)
-        .await
-        .expect("first-ranked probe wins");
-
-    assert_eq!(winner.url, "https://cdn.example/a.mkv");
-    assert_eq!(winner.stream_key.as_deref(), Some("s:rank-order-a"));
-}
-
-#[tokio::test]
 async fn candidate_results_failed_first_rank_passes_to_next() {
-    let cases: [(&str, Duration, FakeProbeInner, Option<&str>); 3] = [
+    let cases: [(&str, Duration, FakeProbeInner, Option<&str>, &str); 4] = [
         (
             "a",
             Duration::from_secs(1),
             Box::pin(async { Err("boom".to_string().into()) }),
             None,
+            "s:b",
         ),
         (
             "slow-a",
@@ -1083,15 +1074,28 @@ async fn candidate_results_failed_first_rank_passes_to_next() {
                 Ok(resolved("https://cdn.example/a.mkv"))
             }),
             None,
+            "s:b",
         ),
         (
             "a",
             Duration::from_secs(1),
             Box::pin(async { Ok(resolved("https://cdn.example/excluded.mkv#new")) }),
             Some("https://cdn.example/excluded.mkv#old"),
+            "s:b",
+        ),
+        // Rank beats completion speed: a slow first-ranked success still leads.
+        (
+            "slow-a",
+            Duration::from_secs(1),
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(resolved("https://cdn.example/a.mkv"))
+            }),
+            None,
+            "s:a",
         ),
     ];
-    for (source, timeout, inner, excluded_url) in cases {
+    for (source, timeout, inner, excluded_url, expected_key) in cases {
         let mut candidates = FuturesOrdered::new();
         candidates.push_back(fake_probe(candidate_input(source, "s:a"), timeout, inner));
         candidates.push_back(fake_probe(
@@ -1104,7 +1108,7 @@ async fn candidate_results_failed_first_rank_passes_to_next() {
             .await
             .expect("next-ranked probe wins");
 
-        assert_eq!(winner.stream_key.as_deref(), Some("s:b"));
+        assert_eq!(winner.stream_key.as_deref(), Some(expected_key));
     }
 }
 

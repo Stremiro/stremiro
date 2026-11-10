@@ -554,7 +554,7 @@ impl PlaybackStateService {
     }
 }
 
-fn normalize_title_scope(media_type: &str, media_id: &str) -> Option<(&'static str, String)> {
+fn normalize_title_scope(media_type: &str, media_id: &str) -> Option<(String, String)> {
     Some((
         normalize_watch_progress_type(media_type)?,
         normalize_media_id(media_id)?,

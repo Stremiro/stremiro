@@ -1,11 +1,5 @@
 import { Pause, Play, RotateCcw, SkipBack, SkipForward } from 'lucide-react';
-import {
-  memo,
-  type MouseEventHandler,
-  type ReactNode,
-  useState,
-  type WheelEventHandler,
-} from 'react';
+import { type MouseEventHandler, type ReactNode, useState, type WheelEventHandler } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
@@ -162,7 +156,7 @@ interface PlayerVolumeControlProps {
   onVolumeWheel?: (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => Promise<void>;
 }
 
-export const PlayerVolumeControl = memo(function PlayerVolumeControl({
+export function PlayerVolumeControl({
   variant,
   active,
   keymap,
@@ -244,4 +238,4 @@ export const PlayerVolumeControl = memo(function PlayerVolumeControl({
       )}
     </div>
   );
-});
+}

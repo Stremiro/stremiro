@@ -22,7 +22,7 @@ const CONTROL_CLASS =
 const CONTROL_OPEN_CLASS = 'bg-white/[0.09] text-white hover:bg-white/[0.09]';
 const CONTROL_PRESSED_CLASS = 'bg-white/[0.14] text-white hover:bg-white/[0.16] hover:text-white';
 const LIST_ITEM_CLASS =
-  'flex h-8 min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left text-[12.5px] transition-colors duration-150 hover:bg-white/[0.07] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--accent-nav) motion-reduce:transition-none';
+  'flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left transition-colors duration-150 hover:bg-white/[0.07] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--accent-nav) motion-reduce:transition-none';
 
 function previewStyle(
   font: SubtitleFont,
@@ -78,7 +78,7 @@ function OptionList<Value extends string>({
       role='group'
       aria-label={label}
       className={cn(
-        'player-menu-swap grid gap-0.5 rounded-lg border border-white/[0.07] bg-black/25 p-1',
+        'player-menu-swap scrollbar-hide grid gap-0.5 rounded-lg border border-white/[0.07] bg-black/25 p-1',
         compact ? 'max-h-32 grid-cols-2 overflow-y-auto' : 'max-h-44 grid-cols-3 overflow-y-auto',
       )}
     >
@@ -93,6 +93,7 @@ function OptionList<Value extends string>({
             onClick={() => onChange(option.value)}
             className={cn(
               LIST_ITEM_CLASS,
+              compact ? 'h-8 text-[13px]' : 'h-9 text-[14px]',
               isSelected ? 'bg-white/[0.1] text-white' : 'text-zinc-300',
             )}
           >
@@ -153,8 +154,10 @@ export function SubtitleAppearanceControls({
       onClick={() => toggle(target)}
       className={cn(
         CONTROL_CLASS,
-        'min-w-0 justify-between pl-2.5 text-[13px] text-zinc-100',
-        compact ? 'h-8 border-transparent bg-white/[0.06] pr-1.5' : 'h-9 pr-2',
+        'min-w-0 justify-between pl-3 text-zinc-100',
+        compact
+          ? 'h-8 border-transparent bg-white/[0.06] pr-1.5 text-[13px]'
+          : 'h-10 pr-2.5 text-[14px]',
         menuOpen && menu === target && CONTROL_OPEN_CLASS,
       )}
     >
@@ -192,7 +195,7 @@ export function SubtitleAppearanceControls({
           // A dim film frame, not a swatch: soft vignette + faint horizon so the
           // sample text reads the way it will over real video.
           'relative flex items-center justify-center overflow-hidden rounded-lg bg-[#0b0b0d] px-3',
-          compact ? 'h-12' : 'h-16 border border-white/[0.06]',
+          compact ? 'h-12' : 'h-14 border border-white/[0.06]',
         )}
       >
         <span className='pointer-events-none absolute inset-0 bg-[radial-gradient(120%_140%_at_50%_-20%,rgba(255,255,255,0.09),transparent_62%)]' />
@@ -230,8 +233,9 @@ export function SubtitleAppearanceControls({
             onClick={() => onPatch(patch)}
             className={cn(
               CONTROL_CLASS,
-              'text-[13px]',
-              compact ? 'h-8 w-8 border-transparent bg-white/[0.06]' : 'h-9 w-9',
+              compact
+                ? 'h-8 w-8 border-transparent bg-white/[0.06] text-[13px]'
+                : 'h-10 w-10 text-[14px]',
               pressed && CONTROL_PRESSED_CLASS,
             )}
           >
@@ -291,7 +295,7 @@ export function SubtitleAppearanceControls({
               onClick={() => onPatch({ subtitleColor: option.value })}
               className={cn(
                 'cursor-pointer rounded-full shadow-[inset_0_0_0_1px_rgba(0,0,0,0.35)] transition-[transform,box-shadow] duration-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) disabled:cursor-wait disabled:opacity-35 motion-reduce:transition-none',
-                compact ? 'size-4' : 'size-[18px]',
+                compact ? 'size-4' : 'size-5',
                 isSelected
                   ? 'ring-2 ring-white/85 ring-offset-2 ring-offset-zinc-950'
                   : 'hover:scale-110',
@@ -301,7 +305,7 @@ export function SubtitleAppearanceControls({
           );
         })}
       </div>
-      <p className='text-[11px] leading-relaxed text-zinc-500'>
+      <p className='text-[12px] leading-relaxed text-zinc-500'>
         Plain-text subtitles only. Styled (ASS) subtitles keep their own look.
       </p>
     </div>

@@ -1,5 +1,6 @@
 import * as React from 'react';
 
+import { handleRovingGroupKeyDown } from '@/lib/dom';
 import { cn } from '@/lib/utils';
 
 type TabsContextValue = {
@@ -48,16 +49,6 @@ function TabsList({ className, ...props }: React.ComponentProps<'div'>) {
   );
 }
 
-// Roving tabindex needs the matching ARIA half: arrows/Home/End move focus AND activate.
-const TAB_NAVIGATION_KEYS = new Set([
-  'ArrowLeft',
-  'ArrowRight',
-  'ArrowUp',
-  'ArrowDown',
-  'Home',
-  'End',
-]);
-
 type TabsTriggerProps = React.ComponentProps<'button'> & { value: string };
 
 function TabsTrigger({ className, onClick, onKeyDown, value, ...props }: TabsTriggerProps) {
@@ -87,38 +78,7 @@ function TabsTrigger({ className, onClick, onKeyDown, value, ...props }: TabsTri
       }}
       onKeyDown={(event) => {
         onKeyDown?.(event);
-        if (
-          event.defaultPrevented ||
-          event.altKey ||
-          event.ctrlKey ||
-          event.metaKey ||
-          event.shiftKey ||
-          event.nativeEvent.isComposing ||
-          !TAB_NAVIGATION_KEYS.has(event.key)
-        )
-          return;
-
-        const tablist = event.currentTarget.closest('[role="tablist"]');
-        const triggers = Array.from(
-          tablist?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [],
-        ).filter((trigger) => !trigger.disabled);
-        const currentIndex = triggers.indexOf(event.currentTarget);
-        if (currentIndex === -1) return;
-
-        event.preventDefault();
-        let nextIndex: number;
-        if (event.key === 'Home') {
-          nextIndex = 0;
-        } else if (event.key === 'End') {
-          nextIndex = triggers.length - 1;
-        } else {
-          const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
-          nextIndex = (currentIndex + direction + triggers.length) % triggers.length;
-        }
-        const next = triggers[nextIndex];
-        // `.click()` reuses the trigger's activation path so key and pointer can't diverge.
-        next?.focus();
-        next?.click();
+        handleRovingGroupKeyDown(event, 'tab');
       }}
       {...props}
     />

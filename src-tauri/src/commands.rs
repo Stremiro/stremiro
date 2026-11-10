@@ -242,7 +242,8 @@ const WATCH_STATUS_INDEX_KEY: &str = "watch_status_index";
 const WATCH_STATUS_ITEM_PREFIX: &str = "watch_status:";
 const MAX_SEARCH_QUERY_CHARS: usize = 120;
 /// Char bounds for media identity fields crossing IPC into durable state.
-pub(crate) const MEDIA_ID_MAX_CHARS: usize = 256;
+/// 1 KiB covers addons that embed encoded payloads in ids while staying bounded.
+pub(crate) const MEDIA_ID_MAX_CHARS: usize = 1_024;
 pub(crate) const MEDIA_TITLE_MAX_CHARS: usize = 512;
 const SETTINGS_STORE_FILE: &str = "settings.json";
 const LIBRARY_STORE_FILE: &str = "library.json";

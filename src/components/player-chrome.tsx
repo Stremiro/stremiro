@@ -10,7 +10,7 @@ import {
   SkipBack,
   SkipForward,
 } from 'lucide-react';
-import { memo, type ReactNode, type Ref, useId } from 'react';
+import { type ReactNode, type Ref, useId } from 'react';
 import {
   CHROME_CORNER_BUTTON_CLASS,
   CHROME_ICON_BUTTON_CLASS,
@@ -39,7 +39,7 @@ import { cn, formatSeasonEpisode } from '@/lib/utils';
 // Preset ladder shared by the popover and the speed hotkeys — one owner keeps them from drifting.
 export const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
-export const PlayerContextActions = memo(function PlayerContextActions({
+export function PlayerContextActions({
   canGoPrevious,
   canGoNext,
   canCopy,
@@ -114,7 +114,7 @@ export const PlayerContextActions = memo(function PlayerContextActions({
       ))}
     </ContextMenuContent>
   );
-});
+}
 
 interface PlayerTopChromeProps {
   chromeRef?: Ref<HTMLDivElement>;
@@ -133,7 +133,7 @@ interface PlayerTopChromeProps {
 }
 
 // Memoized — OSD and controls-visibility changes re-render the player; the static chrome must bail out.
-export const PlayerTopChrome = memo(function PlayerTopChrome({
+export function PlayerTopChrome({
   chromeRef,
   title,
   season,
@@ -156,7 +156,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
     <div
       ref={chromeRef}
       data-player-interactive
-      className='cursor-auto relative grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem] items-center'
+      className='cursor-auto relative grid grid-cols-[3rem_minmax(0,1fr)_3rem] items-center'
     >
       <button
         type='button'
@@ -166,7 +166,11 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
         onClick={() => void onBack().catch(() => undefined)}
         className={CHROME_CORNER_BUTTON_CLASS}
       >
-        <ArrowLeft className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
+        <ArrowLeft
+          aria-hidden='true'
+          className={CHROME_ICON_CLASS}
+          strokeWidth={CHROME_ICON_STROKE}
+        />
       </button>
       <div className='min-w-0 px-3 text-center [text-shadow:0_0_2px_rgba(0,0,0,0.9),0_1px_4px_rgba(0,0,0,0.8),0_4px_16px_rgba(0,0,0,0.45)]'>
         <h1 className='truncate text-center text-[16px] leading-6 font-semibold tracking-[-0.015em] text-white'>
@@ -221,14 +225,22 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
         )}
       >
         {isFullscreen ? (
-          <Minimize className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
+          <Minimize
+            aria-hidden='true'
+            className={CHROME_ICON_CLASS}
+            strokeWidth={CHROME_ICON_STROKE}
+          />
         ) : (
-          <Maximize className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
+          <Maximize
+            aria-hidden='true'
+            className={CHROME_ICON_CLASS}
+            strokeWidth={CHROME_ICON_STROKE}
+          />
         )}
       </button>
     </div>
   );
-});
+}
 
 interface PlayerControlsRowProps {
   clock: PlaybackClock;
@@ -283,7 +295,7 @@ function SeekTenIcon({ forward }: { forward: boolean }) {
 }
 
 // Memoized like the sibling selectors/panel — primitive/stable props let the controls row skip playback ticks.
-export const PlayerControlsRow = memo(function PlayerControlsRow({
+export function PlayerControlsRow({
   clock,
   duration,
   active,
@@ -498,4 +510,4 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
       </div>
     </div>
   );
-});
+}

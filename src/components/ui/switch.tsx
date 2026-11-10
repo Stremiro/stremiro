@@ -33,7 +33,7 @@ export function Switch({
         if (!pending) onChange();
       }}
       className={cn(
-        'inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-[7px] border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
+        'inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
         checked
           ? 'border-transparent bg-(--accent-act) text-(--on-accent-act)'
           : 'border-white/15 bg-white/[0.04] text-transparent hover:border-white/25 hover:bg-white/[0.08]',
@@ -46,7 +46,7 @@ export function Switch({
         aria-hidden='true'
         strokeWidth={3}
         className={cn(
-          'h-3.5 w-3.5 transition-[opacity,scale] duration-150 motion-reduce:transition-none',
+          'h-4 w-4 transition-[opacity,scale] duration-150 motion-reduce:transition-none',
           checked ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
         )}
       />

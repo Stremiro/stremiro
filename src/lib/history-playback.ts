@@ -115,7 +115,7 @@ export function watchProgressMediaItem(item: WatchProgress): MediaItem {
   return {
     id: item.id,
     title: item.title,
-    type: item.type_ as MediaItem['type'],
+    type: item.type_,
     poster: item.poster,
   };
 }

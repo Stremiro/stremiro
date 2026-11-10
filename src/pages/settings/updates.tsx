@@ -71,7 +71,7 @@ function AppChangelog({
       className={cn('overflow-hidden', SETTINGS_INSET_SURFACE_CLASS)}
     >
       {pendingUpdate && currentVersion ? (
-        <div className='flex justify-end px-4 pt-3'>
+        <div className='flex justify-end px-5 pt-3.5'>
           <SegmentedControl
             compact
             label='Release version'
@@ -93,8 +93,8 @@ function AppChangelog({
           />
         </div>
       ) : null}
-      <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-4 py-3'>
-        <p className='text-[13px] font-semibold text-white'>
+      <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-5 py-3'>
+        <p className='text-[14px] font-semibold text-white'>
           What's new{version ? ' in' : ''}
           {version ? (
             <span
@@ -108,13 +108,13 @@ function AppChangelog({
           ) : null}
         </p>
         {releaseDate ? (
-          <p className='text-[12px] tabular-nums text-zinc-500'>{releaseDate}</p>
+          <p className='text-[13px] tabular-nums text-zinc-500'>{releaseDate}</p>
         ) : null}
         {version ? (
           <button
             type='button'
             onClick={handleOpenRelease}
-            className='ml-auto inline-flex items-center gap-1 rounded-sm text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+            className='ml-auto inline-flex items-center gap-1 rounded-sm text-[13px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
           >
             View on GitHub
             <ArrowUpRight className='h-3.5 w-3.5' />
@@ -124,10 +124,10 @@ function AppChangelog({
       <div
         data-selectable='true'
         aria-busy={isLoading}
-        className='max-h-64 overflow-y-auto overscroll-contain p-4'
+        className='max-h-64 overflow-y-auto overscroll-contain scrollbar-hide px-5 py-4'
       >
         {!version ? (
-          <p className='text-[13px] leading-relaxed text-zinc-400'>
+          <p className='text-[14px] leading-relaxed text-zinc-400'>
             {isTauriDesktopRuntime()
               ? 'Release notes appear once the installed version is known.'
               : 'Release notes are available in the desktop app.'}
@@ -158,7 +158,7 @@ function AppChangelog({
             ))}
           </div>
         ) : !showNewRelease && !release ? (
-          <p className='text-[13px] leading-relaxed text-zinc-400'>
+          <p className='text-[14px] leading-relaxed text-zinc-400'>
             No GitHub release was found for this version.
           </p>
         ) : (
@@ -242,6 +242,7 @@ export function UpdatesSection() {
         <SettingsBody className='space-y-4'>
           <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
           <SettingsRow
+            icon={RefreshCw}
             label='Check for updates automatically'
             description='After launch and every six hours. You choose when to install.'
           >
@@ -252,7 +253,7 @@ export function UpdatesSection() {
               onChange={() => updatePreferences({ automaticUpdateChecks: !automaticUpdateChecks })}
             />
           </SettingsRow>
-          <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-zinc-400'>
+          <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] text-zinc-400'>
             <span>
               Installed{' '}
               <span className='font-semibold tabular-nums text-zinc-100'>
@@ -282,7 +283,7 @@ export function UpdatesSection() {
                 className='h-1.5'
                 barClassName='bg-emerald-300'
               />
-              <p className='text-[12px] tabular-nums text-zinc-500'>
+              <p className='text-[13px] tabular-nums text-zinc-500'>
                 {formatAppUpdateProgress(updateState.installProgress)}
               </p>
             </div>
@@ -290,12 +291,12 @@ export function UpdatesSection() {
 
           {updateState.errorMessage ? (
             <div className='rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3'>
-              <p className='text-[12px] font-medium text-red-300'>
+              <p className='text-[13px] font-medium text-red-300'>
                 {updateState.errorOperation === 'install'
                   ? 'Update install failed'
                   : 'Update check failed'}
               </p>
-              <p className='mt-1 text-[12px] leading-relaxed text-red-200/80'>
+              <p className='mt-1 text-[13px] leading-relaxed text-red-200/80'>
                 {updateState.errorMessage}
               </p>
             </div>
@@ -317,7 +318,7 @@ export function UpdatesSection() {
                 onClick={handleInstall}
                 aria-disabled={isInstalling || isChecking || undefined}
                 aria-busy={isInstalling || undefined}
-                className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-default aria-disabled:opacity-50'
+                className='h-10 gap-2 rounded-lg bg-white px-4 text-[14px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-default aria-disabled:opacity-50'
               >
                 {isInstalling ? (
                   <Loader2
@@ -338,7 +339,7 @@ export function UpdatesSection() {
               aria-disabled={isChecking || isInstalling || undefined}
               aria-busy={isChecking || undefined}
               className={cn(
-                'h-9 gap-2 px-3.5 text-[13px] aria-disabled:cursor-default aria-disabled:opacity-50',
+                'h-10 gap-2 px-3.5 text-[14px] aria-disabled:cursor-default aria-disabled:opacity-50',
                 SETTINGS_OUTLINE_BUTTON_CLASS,
               )}
             >
@@ -354,7 +355,7 @@ export function UpdatesSection() {
             </Button>
           </div>
 
-          {statusNote ? <p className='text-[13px] text-zinc-400'>{statusNote}</p> : null}
+          {statusNote ? <p className='text-[14px] text-zinc-400'>{statusNote}</p> : null}
         </SettingsBody>
       </SettingsCard>
     </SettingsGroup>

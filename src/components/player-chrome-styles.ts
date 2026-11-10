@@ -12,9 +12,9 @@ export const CHROME_EXIT_TIMING_CLASS = 'duration-[420ms] ease-[cubic-bezier(0.4
 export const CHROME_PILL_CLASS =
   'flex min-h-12 shrink-0 items-center gap-0.5 rounded-xl border border-white/[0.08] bg-zinc-950/72 p-1 shadow-[inset_0_1px_0_rgb(255_255_255/0.07)] backdrop-blur-xl';
 
-/** Title-row controls. Same hit size as the transport icons, with a surface that reads on the picture. */
+/** Title-row controls: a single-button version of the transport pill so both rows share one surface. */
 export const CHROME_CORNER_BUTTON_CLASS =
-  'flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border border-white/[0.08] bg-black/30 text-white/85 transition-colors duration-150 hover:border-white/15 hover:bg-black/55 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 active:bg-black/70 motion-reduce:transition-none';
+  'flex h-12 w-12 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-white/[0.08] bg-zinc-950/72 text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.07)] backdrop-blur-xl transition-colors duration-150 hover:bg-zinc-900/85 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none motion-reduce:active:scale-100';
 
 export const CHROME_SKIP_BUTTON_CLASS =
   'border border-white/[0.12] bg-zinc-950/80 text-white/95 shadow-[0_10px_24px_-14px_rgb(0_0_0/0.8),inset_0_1px_0_rgb(255_255_255/0.08)] backdrop-blur-md transition-colors duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-white/20 hover:bg-zinc-900/90 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-skip)/60 motion-reduce:transition-none';

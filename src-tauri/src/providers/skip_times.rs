@@ -11,6 +11,9 @@ pub(crate) struct SkipSegment {
     pub type_: &'static str,
     pub start_time: f64,
     pub end_time: f64,
+    /// Edge-anchored from an out-of-range cut: offered as a manual skip, never auto-skipped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uncertain: bool,
 }
 
 /// SkipDB lookup payload: the submitted segments for the title or episode.
@@ -29,6 +32,10 @@ const MIN_INTRO_ESTIMATE_SECS: f64 = 5.0;
 const MAX_INTRO_SECS: f64 = 300.0;
 /// The press lands a moment into the intro; stopping short never skips story.
 const INTRO_ESTIMATE_LEAD_SECS: f64 = 3.0;
+/// An opening segment this close to 0 is pinned to the stream start, whatever the cut length.
+const OUT_OF_RANGE_START_ANCHOR_MS: f64 = 5_000.0;
+/// SkipDB's own outro snap: an end this close to the stored duration runs to the stream end.
+const OUT_OF_RANGE_END_ANCHOR_MS: f64 = 10_000.0;
 
 fn normalize_skip_time(value: f64) -> Option<f64> {
     if !value.is_finite() {
@@ -281,7 +288,10 @@ fn collect_skip_db_segments(
         // This episode's own intro outranks the season median: its length survives an
         // out-of-range cut, and the 0/0 "confirmed none" sentinel measures zero.
         if segment_type == "intro" {
-            if let Some(end_ms) = entry.end_ms {
+            if let Some(end_ms) = entry
+                .end_ms
+                .filter(|end| entry.start_ms >= 0.0 && *end >= entry.start_ms)
+            {
                 intro_length_secs = Some((end_ms - entry.start_ms) / 1000.0);
             }
         }
@@ -294,6 +304,7 @@ fn collect_skip_db_segments(
         .filter(|length| *length <= MAX_INTRO_SECS)
         .map(|length| (length - INTRO_ESTIMATE_LEAD_SECS).floor())
         .filter(|secs| *secs >= MIN_INTRO_ESTIMATE_SECS)
+        .filter(|secs| duration_secs.is_none_or(|duration| *secs < duration))
         .filter(|_| !segments.iter().any(|segment| segment.type_ == "intro"));
     SkipTimesResult {
         segments,
@@ -333,13 +344,15 @@ struct SkipDbSegmentEntry {
     /// `exact|shifted|agnostic|out-of-range`; absent on legacy rows — treat missing as usable.
     #[serde(default, rename = "match")]
     match_: Option<String>,
+    /// Requested minus stored duration; locates the stored cut's end for an out-of-range match.
+    #[serde(default)]
+    offset_ms: Option<f64>,
 }
 
 impl SkipDbSegmentEntry {
     fn into_segment(self, type_: &'static str, duration_secs: Option<f64>) -> Option<SkipSegment> {
-        // An out-of-range match differs too much to shift — its timestamps would land on the wrong scene.
         if self.match_.as_deref() == Some("out-of-range") {
-            return None;
+            return self.into_edge_anchored_segment(type_, duration_secs?);
         }
         let end_time = match self.end_ms {
             Some(end_ms) => end_ms / 1000.0,
@@ -350,6 +363,46 @@ impl SkipDbSegmentEntry {
             type_,
             start_time: self.start_ms / 1000.0,
             end_time,
+            uncertain: false,
+        })
+    }
+
+    /// An out-of-range cut differs too much to shift, so its mid-stream timestamps would land on
+    /// the wrong scene. Segments pinned to a stream edge survive the length difference: openings
+    /// at 0 stay put, and closings that end the stored cut re-anchor to this stream's end.
+    fn into_edge_anchored_segment(
+        self,
+        type_: &'static str,
+        duration_secs: f64,
+    ) -> Option<SkipSegment> {
+        let (start_ms, end_ms) = match type_ {
+            "intro" | "recap" if (0.0..=OUT_OF_RANGE_START_ANCHOR_MS).contains(&self.start_ms) => {
+                let end_ms = self.end_ms.filter(|end| *end < duration_secs * 1000.0)?;
+                (self.start_ms, end_ms)
+            }
+            "outro" | "preview" => {
+                let offset_ms = self.offset_ms.filter(|offset| offset.is_finite())?;
+                let stored_end_ms = duration_secs * 1000.0 - offset_ms;
+                let end_ms = self.end_ms.unwrap_or(stored_end_ms);
+                if !(self.start_ms >= 0.0
+                    && end_ms > self.start_ms
+                    && (stored_end_ms - end_ms).abs() <= OUT_OF_RANGE_END_ANCHOR_MS)
+                {
+                    return None;
+                }
+                let shifted_start_ms = self.start_ms + offset_ms;
+                if shifted_start_ms <= 0.0 {
+                    return None;
+                }
+                (shifted_start_ms, duration_secs * 1000.0)
+            }
+            _ => return None,
+        };
+        Some(SkipSegment {
+            type_,
+            start_time: start_ms / 1000.0,
+            end_time: end_ms / 1000.0,
+            uncertain: true,
         })
     }
 }

@@ -1,9 +1,9 @@
 use super::library_commands::LibraryWriteError;
 use super::store_helpers::{
     library_item_key, load_library_index, load_status_added_ids, load_watch_status_index,
-    load_watch_statuses_map, mark_status_added, normalize_library_item, normalize_watch_status,
-    persist_index_map, read_watch_status_snapshot, remove_index_ids, retain_status_added_ids,
-    watch_status_item_key, LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
+    load_watch_statuses_map, mark_status_added, normalize_watch_status, persist_index_map,
+    read_watch_status_snapshot, remove_index_ids, retain_status_added_ids, watch_status_item_key,
+    LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::{
     normalize_media_id, run_typed_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
@@ -92,17 +92,22 @@ pub(super) fn write_watch_status(
             return Ok(None);
         }
         library_store.save()?;
-        return Ok(library_index
-            .contains(&item_id)
-            .then(|| {
-                library_store
-                    .get_typed(library_item_key(&item_id))
-                    .and_then(normalize_library_item)
-                    .filter(|item| item.id == item_id)
-            })
-            .flatten());
+        return match super::library_commands::resolve_library_items(library_store, vec![item_id]) {
+            Ok(mut items) => Ok(items.pop()),
+            Err(LibraryWriteError::InvalidItem(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        };
     };
 
+    let mut aliases = Vec::new();
+    index.retain(|id| {
+        if id != &item_id && id.trim() == item_id {
+            aliases.push(id.clone());
+            false
+        } else {
+            true
+        }
+    });
     if let Err(position) = index.binary_search(&item_id) {
         if index.len() >= MAX_WATCH_STATUS_ITEMS {
             return Err(WatchStatusError::new(
@@ -122,6 +127,9 @@ pub(super) fn write_watch_status(
         mark_status_added(library_store, &item_id);
     }
     library_store.save()?;
+    for alias in aliases {
+        store.delete(watch_status_item_key(&alias));
+    }
     store.set(watch_status_item_key(&item_id), json!(canonical));
     store.set(WATCH_STATUS_INDEX_KEY, json!(index));
     store.save()?;
@@ -232,12 +240,11 @@ pub async fn get_all_watch_statuses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{test_media_item, test_store};
+    use crate::test_helpers::{test_media_item, test_store, test_store_pair};
 
     #[test]
     fn clearing_a_status_removes_only_titles_the_status_added() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         let added = test_media_item("added", "movie");
         let mut saved = test_media_item("saved", "movie");
         saved.poster = Some("https://example.com/poster.jpg".into());
@@ -272,6 +279,72 @@ mod tests {
         assert!(library.store.get(library_item_key("added")).is_none());
         assert!(load_status_added_ids(&library.store).is_empty());
         assert_eq!(statuses.store.get(WATCH_STATUS_INDEX_KEY), Some(json!([])));
+    }
+
+    #[test]
+    fn clearing_status_returns_alias_backed_saved_library_item_without_repair() {
+        let (statuses, library) = test_store_pair();
+        let mut saved = test_media_item("saved", "movie");
+        saved.poster = Some("https://example.com/saved.jpg".into());
+        library.store.set(LIBRARY_INDEX_KEY, json!(["alias"]));
+        library.store.set(library_item_key("alias"), json!(saved));
+        library.store.save().unwrap();
+        let before = std::fs::read(&library.path).unwrap();
+        let actual =
+            write_watch_status(&statuses.store, &library.store, saved.clone(), None).unwrap();
+        assert_eq!(json!(actual), json!(saved));
+        assert_eq!(std::fs::read(&library.path).unwrap(), before);
+        assert_eq!(library.store.save_count(), 1);
+        assert!(write_watch_status(
+            &statuses.store,
+            &library.store,
+            test_media_item("missing", "movie"),
+            None
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn setting_status_replaces_selected_aliases_before_capacity_checks() {
+        for full in [false, true] {
+            let (statuses, library) = test_store_pair();
+            let mut index: Vec<String> = if full {
+                (1..MAX_WATCH_STATUS_ITEMS)
+                    .map(|id| format!("id{id}"))
+                    .collect()
+            } else {
+                vec!["id0".into(), "other".into()]
+            };
+            index.push("id0 ".into());
+            statuses.store.set(WATCH_STATUS_INDEX_KEY, json!(index));
+            statuses
+                .store
+                .set(watch_status_item_key("id0 "), json!("dropped"));
+            statuses
+                .store
+                .set(watch_status_item_key("other"), json!("watching"));
+            write_watch_status(
+                &statuses.store,
+                &library.store,
+                test_media_item("id0", "movie"),
+                Some("watched".into()),
+            )
+            .unwrap();
+            assert!(statuses.store.get(watch_status_item_key("id0 ")).is_none());
+            assert_eq!(
+                read_watch_status_snapshot(&statuses.store).unwrap().items["id0"],
+                "watched"
+            );
+            assert_eq!(
+                statuses.store.get(watch_status_item_key("other")),
+                Some(json!("watching"))
+            );
+            assert_eq!(
+                load_watch_status_index(&statuses.store).unwrap().len(),
+                if full { MAX_WATCH_STATUS_ITEMS } else { 2 }
+            );
+        }
     }
 
     #[test]
@@ -359,8 +432,7 @@ mod tests {
 
     #[test]
     fn bulk_status_set_deduplicates_and_saves_pending_library_changes_once() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         let existing = test_media_item("a", "movie");
         library.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
         library.store.set(library_item_key("a"), json!(existing));
@@ -417,8 +489,7 @@ mod tests {
 
     #[test]
     fn bulk_status_clear_keeps_library_intact_and_counts_removed_entries() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         library.store.set(LIBRARY_INDEX_KEY, json!(["a", "b"]));
         for id in ["a", "b"] {
             library
@@ -492,8 +563,7 @@ mod tests {
 
     #[test]
     fn bulk_status_invalid_input_fails_without_partial_writes() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         for (status, ids) in [
             ("invalid", vec!["a".into()]),
             ("watched", vec!["a".into(), "".into()]),
@@ -521,8 +591,7 @@ mod tests {
 
     #[test]
     fn bulk_status_duplicate_ids_count_once_at_library_capacity() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         let ids: Vec<String> = (0..super::super::library_commands::MAX_LIBRARY_ITEMS)
             .map(|index| format!("id{index}"))
             .collect();
@@ -544,8 +613,7 @@ mod tests {
 
     #[test]
     fn bulk_status_capacity_failure_does_not_read_repair_or_write_either_store() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         let mut ids: Vec<String> = (0..MAX_WATCH_STATUS_ITEMS)
             .map(|index| format!("id{index}"))
             .collect();
@@ -584,8 +652,7 @@ mod tests {
 
     #[test]
     fn bulk_status_resolves_normalized_ids_and_skips_stale_selection_without_repairs() {
-        let statuses = test_store();
-        let library = test_store();
+        let (statuses, library) = test_store_pair();
         let mut item = test_media_item(" a ", "Series");
         item.title = " Normalized title ".into();
         library

@@ -64,16 +64,26 @@ const getEpisodeNavigation = async <E extends EpisodeNavigationRequest['episodes
 const getUnairedEpisodeIndices = (request: UnairedEpisodesRequest) =>
   safeInvoke<number[]>('get_unaired_episode_indices', { request });
 
-const searchEpisodes = (episodes: Episode[], query: string) =>
-  safeInvoke<number[]>('search_episodes', {
-    query,
-    episodes: episodes.map(({ season, episode, title, overview }) => ({
+// `episodes` is query-shared and identity-keyed upstream, so debounced keystrokes
+// resend an identical strip — cache it on the array itself.
+const searchedEpisodePayloads = new WeakMap<
+  readonly Episode[],
+  Pick<Episode, 'season' | 'episode' | 'title' | 'overview'>[]
+>();
+
+const searchEpisodes = (episodes: Episode[], query: string) => {
+  let stripped = searchedEpisodePayloads.get(episodes);
+  if (!stripped) {
+    stripped = episodes.map(({ season, episode, title, overview }) => ({
       season,
       episode,
       title,
       overview,
-    })),
-  });
+    }));
+    searchedEpisodePayloads.set(episodes, stripped);
+  }
+  return safeInvoke<number[]>('search_episodes', { query, episodes: stripped });
+};
 
 const searchTitles = (titles: string[], query: string) =>
   safeInvoke<number[]>('search_titles', { titles, query });

@@ -1,4 +1,17 @@
-import { Film, Paintbrush, Palette, Play, RotateCcw } from 'lucide-react';
+import {
+  FastForward,
+  Film,
+  Gauge,
+  Image,
+  MousePointerClick,
+  MoveHorizontal,
+  Navigation,
+  Paintbrush,
+  Palette,
+  Play,
+  RotateCcw,
+  type LucideIcon,
+} from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { AccentControls, resolveAccentPreviewColor } from '@/components/accent-controls';
@@ -25,36 +38,43 @@ import {
 
 export const TINT_TARGETS: ReadonlyArray<{
   field: keyof AccentTargets;
+  icon: LucideIcon;
   label: string;
   description: string;
 }> = [
   {
     field: 'navigation',
+    icon: Navigation,
     label: 'Navigation & selection',
     description: 'Sidebar, tabs, filters and selected states.',
   },
   {
     field: 'actions',
+    icon: MousePointerClick,
     label: 'Buttons & badges',
     description: 'Accent buttons, chips, switches and text selection.',
   },
   {
     field: 'skip',
+    icon: FastForward,
     label: 'Skip button',
     description: 'Skip intro and recap pill in the player.',
   },
   {
     field: 'progress',
+    icon: Gauge,
     label: 'Progress bars',
     description: 'Continue-watching and episode progress.',
   },
   {
     field: 'seekbar',
+    icon: MoveHorizontal,
     label: 'Player seekbar',
     description: 'Played bar and playhead in the player. Off stays white.',
   },
   {
     field: 'artwork',
+    icon: Image,
     label: 'Artwork tints',
     description: 'Hero and backdrop gradients.',
   },
@@ -108,6 +128,7 @@ export function AppearanceSettings() {
   const { profile, isHydrating, profilePreferencesQuery, updateProfile } = useLocalProfile();
   const [draftAccentColor, setDraftAccentColor] = useState<string>();
   const [draftIntensity, setDraftIntensity] = useState<number>();
+  const accentDraftGenerationRef = useRef(0);
   const mountedRef = useMountedRef();
   const profileRef = useRef(profile);
   useLayoutEffect(() => {
@@ -128,15 +149,21 @@ export function AppearanceSettings() {
     void updateProfile(updates).catch((error: unknown) => toast.error(getErrorMessage(error)));
   };
 
+  const changeAccentColor = (color: string) => {
+    accentDraftGenerationRef.current += 1;
+    setDraftAccentColor(color);
+  };
+
   const commitAccentColor = async (color: string) => {
-    if (isHydrating) return;
+    if (isHydrating || color !== draftAccentColor) return;
+    const generation = accentDraftGenerationRef.current;
     await updateProfile({ accentColor: color })
       .catch((error: unknown) => {
         toast.error(getErrorMessage(error));
         throw error;
       })
       .finally(() => {
-        if (mountedRef.current) {
+        if (mountedRef.current && generation === accentDraftGenerationRef.current) {
           setDraftAccentColor((draft) => (draft === color ? undefined : draft));
         }
       });
@@ -147,14 +174,16 @@ export function AppearanceSettings() {
   };
 
   const appearanceChanged =
-    profile.accentColor.toLowerCase() !== DEFAULT_PROFILE_ACCENT.accentColor ||
-    profile.accentIntensity !== DEFAULT_PROFILE_ACCENT.accentIntensity ||
+    (draftAccentColor ?? profile.accentColor).toLowerCase() !==
+      DEFAULT_PROFILE_ACCENT.accentColor ||
+    (draftIntensity ?? profile.accentIntensity) !== DEFAULT_PROFILE_ACCENT.accentIntensity ||
     TINT_TARGETS.some(
       ({ field }) => profile.accentTargets[field] !== DEFAULT_PROFILE_ACCENT.accentTargets[field],
     );
 
   const resetAppearance = () => {
     if (isHydrating || !appearanceChanged) return;
+    accentDraftGenerationRef.current += 1;
     setDraftAccentColor(undefined);
     setDraftIntensity(undefined);
     saveProfile(DEFAULT_PROFILE_ACCENT);
@@ -200,7 +229,7 @@ export function AppearanceSettings() {
                   committedColor={profile.accentColor}
                   intensity={draftIntensity ?? profile.accentIntensity}
                   committedIntensity={profile.accentIntensity}
-                  onAccentColorChange={setDraftAccentColor}
+                  onAccentColorChange={changeAccentColor}
                   onAccentColorCommit={commitAccentColor}
                   onIntensityChange={setDraftIntensity}
                   onIntensityCommit={(value) => {
@@ -223,6 +252,7 @@ export function AppearanceSettings() {
               {TINT_TARGETS.map((target) => (
                 <SettingsRow
                   key={target.field}
+                  icon={target.icon}
                   label={target.label}
                   description={target.description}
                 >

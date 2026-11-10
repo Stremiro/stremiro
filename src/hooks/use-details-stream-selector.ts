@@ -13,8 +13,9 @@ import {
   playableResumePosition,
 } from '@/lib/history-playback';
 import { currentPathWithSearch, navigateApp, takeDetailsReturnState } from '@/lib/navigation';
+import { type PlayerRouteMediaType, resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
-import { getEpisodeTitle } from '@/lib/utils';
+import { getEpisodeTitle, isSeriesLikeMediaType } from '@/lib/utils';
 
 // Stream-selector state for the details page. The player's Back hands over a
 // "reopen selector" payload — inline on a replace, or via the path-keyed stash
@@ -49,8 +50,10 @@ export function useDetailsStreamSelector({
   const rawDetailsFrom = (locationState as DetailsHistoryRouteState | undefined)?.from;
   const detailsOriginFrom = typeof rawDetailsFrom === 'string' ? rawDetailsFrom : undefined;
 
-  const streamSelectorType: 'movie' | 'series' | 'anime' =
-    item?.type === 'movie' ? 'movie' : baseRouteType === 'anime' ? 'anime' : 'series';
+  const streamSelectorType: PlayerRouteMediaType = resolvePlayerRouteMediaType(
+    // Rust-derived anime classification beats a meta payload's generic 'series'.
+    item?.isAnime ? 'anime' : item?.type || baseRouteType,
+  );
 
   // One builder for the fields every details-launched target shares.
   const buildBaseTarget = (): StreamSelectorTarget => ({
@@ -123,7 +126,7 @@ export function useDetailsStreamSelector({
 
       const startTime = playableResumePosition(undefined, state.reopenStartTime);
 
-      if (item.type === 'movie') {
+      if (!isSeriesLikeMediaType(item.type)) {
         handleWatchMovie(startTime);
         return true;
       }

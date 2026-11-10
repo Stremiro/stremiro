@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { type LocalProfile, type LocalProfileUpdate } from '@/hooks/use-local-profile';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { cn, getAccentTextColor, HEX_COLOR_PATTERN, nonBlank } from '@/lib/utils';
+import { cn, getAccentTextColor, getErrorMessage, HEX_COLOR_PATTERN, nonBlank } from '@/lib/utils';
 
 export function ProfileSettingsPopover({
   profile,
@@ -70,11 +70,12 @@ export function ProfileSettingsPopover({
         accentColor: previewAccentColor,
         accentIntensity: previewIntensity,
       });
-      toast.success('Profile saved');
-      if (mountedRef.current && generation === openingGenerationRef.current) setOpen(false);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to save profile');
+      toast.error(getErrorMessage(error));
+      return;
     }
+    toast.success('Profile saved');
+    if (mountedRef.current && generation === openingGenerationRef.current) setOpen(false);
   };
 
   const active = previewAccentColor;

@@ -36,6 +36,10 @@
     "no-underscore-dangle": ["warn", { "allow": ["type_"] }],
     // The global stylesheet is a deliberate side-effect import in main.tsx.
     "import/no-unassigned-import": ["warn", { "allow": ["**/*.css"] }],
+    // Zero violations today — guards against split import blocks drifting back in.
+    "import/no-duplicates": "warn",
+    // Zero violations today — ts-ignore/ts-expect-error must not sneak in.
+    "typescript/ban-ts-comment": "warn",
     // Deliberate ARIA roles on custom controls: role=group is the correct APG
     // pattern for segmented button groups, role=list/listitem wraps
     // virtualized rows, and portaled slider/dialog/progressbar surfaces can't

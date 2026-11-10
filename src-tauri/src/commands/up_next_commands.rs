@@ -82,8 +82,8 @@ pub(crate) fn build_up_next_entries(
             });
             source.season = Some(next.season);
             source.episode = Some(next.episode);
-            source.absolute_season = source.season;
-            source.absolute_episode = source.episode;
+            source.absolute_season = Some(next.season);
+            source.absolute_episode = Some(next.episode);
             source.position = 0.0;
             source.duration = 0.0;
             source.is_watched = false;

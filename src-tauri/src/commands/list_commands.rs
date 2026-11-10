@@ -169,12 +169,13 @@ fn add_list_items(
     list.item_ids.extend(new_ids);
     // Library resolution already supplies unique, validated items.
     for item in items {
+        let key = list_item_store_key(list_id, &item.id);
         let existing = store
-            .get_typed(list_item_store_key(list_id, &item.id))
+            .get_typed(&key)
             .and_then(normalize_library_item)
             .filter(|existing| existing.id == item.id);
         let item = merge_library_item(existing.as_ref(), item);
-        store.set(list_item_store_key(list_id, &item.id), json!(item));
+        store.set(key, json!(item));
     }
     store.set(list_meta_key(list_id), json!(list));
     store.save()?;
@@ -293,6 +294,9 @@ fn restore_list_entries(
     }
     let known: HashSet<&str> = list.item_ids.iter().map(String::as_str).collect();
     prepared.retain(|entry| !known.contains(entry.item.id.as_str()));
+    if prepared.is_empty() {
+        return Ok(());
+    }
     if list.item_ids.len() + prepared.len() > MAX_LIST_ITEMS {
         return Err(ListError::new(ListErrorKind::ListFull, "List is full."));
     }
@@ -746,6 +750,16 @@ mod tests {
         );
         fixture.store.save().unwrap();
         assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
+
+        seed_list(
+            &fixture.store,
+            (0..MAX_LIST_ITEMS + 1)
+                .map(|index| format!("id{index}"))
+                .collect(),
+        );
+        let saves = fixture.store.save_count();
+        restore_list_entries(&fixture.store, "list_a", vec![entry("id0", 0)]).unwrap();
+        assert_eq!(fixture.store.save_count(), saves);
     }
 
     #[test]

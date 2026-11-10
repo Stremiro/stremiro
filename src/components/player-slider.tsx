@@ -1,7 +1,13 @@
 import * as SliderPrimitive from '@radix-ui/react-slider';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { chapterCutMask } from '@/lib/player-chapter-cuts';
 import { clamp, cn } from '@/lib/utils';
+
+// Loud-end warmth eases in from mid-track instead of a hard band at 80%.
+const VOLUME_HEADROOM_STYLE = {
+  background:
+    'linear-gradient(to right, transparent 50%, rgb(251 191 36 / 0.1) 68%, rgb(251 146 60 / 0.26) 84%, rgb(248 113 113 / 0.42) 100%)',
+};
 
 export interface PlayerSliderMark {
   start: number;
@@ -38,6 +44,8 @@ export function PlayerSlider({
   ...props
 }: PlayerSliderProps) {
   const rootRef = useRef<HTMLSpanElement>(null);
+  const aimRafRef = useRef<number | null>(null);
+  const pendingAimXRef = useRef<number | null>(null);
   const [keyboardFocused, setKeyboardFocused] = useState(false);
   const [aimPct, setAimPct] = useState<number | null>(null);
   if (!active && keyboardFocused) setKeyboardFocused(false);
@@ -61,13 +69,41 @@ export function PlayerSlider({
     setAimPct(next);
     onAimChange?.(Math.round(next * max));
   };
+  // Pointermove can outpace frames — coalesce the layout read + state update to one per rAF.
+  const scheduleAimFromPointer = (clientX: number) => {
+    pendingAimXRef.current = clientX;
+    if (aimRafRef.current !== null) return;
+    aimRafRef.current = window.requestAnimationFrame(() => {
+      aimRafRef.current = null;
+      const pendingX = pendingAimXRef.current;
+      pendingAimXRef.current = null;
+      if (pendingX === null) return;
+      aimFromPointer(pendingX);
+    });
+  };
+  const cancelPendingAim = () => {
+    if (aimRafRef.current !== null) {
+      window.cancelAnimationFrame(aimRafRef.current);
+      aimRafRef.current = null;
+    }
+    pendingAimXRef.current = null;
+  };
   const clearAim = () => {
+    // Cancel the queued frame too — a pending rAF would resurrect aim after the pointer left.
+    cancelPendingAim();
     setAimPct(null);
     if (variant !== 'pill') onAimChange?.(null);
   };
+  useEffect(
+    () => () => {
+      if (aimRafRef.current !== null) window.cancelAnimationFrame(aimRafRef.current);
+    },
+    [],
+  );
   // Pointer capture can swallow a leave that ends outside — recheck the rect on release.
   const settleAim = (event: React.PointerEvent) => {
     if (variant === 'pill') return;
+    cancelPendingAim();
     const rect = rootRef.current?.getBoundingClientRect();
     if (
       rect &&
@@ -99,11 +135,12 @@ export function PlayerSlider({
           event.preventDefault();
           return;
         }
+        cancelPendingAim();
         aimFromPointer(event.clientX);
         onPointerDown?.(event);
       }}
       onPointerMove={(event) => {
-        aimFromPointer(event.clientX);
+        scheduleAimFromPointer(event.clientX);
         onPointerMove?.(event);
       }}
       onPointerLeave={(event) => {
@@ -170,6 +207,13 @@ export function PlayerSlider({
             );
           })}
         </div>
+        {variant === 'bar' && (
+          <span
+            aria-hidden='true'
+            className='pointer-events-none absolute inset-0'
+            style={VOLUME_HEADROOM_STYLE}
+          />
+        )}
         {variant !== 'pill' && markerPct !== null && !props.disabled && (
           <span
             aria-hidden='true'

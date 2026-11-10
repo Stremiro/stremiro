@@ -6,7 +6,17 @@ import { createObjectIdentity } from '@/lib/utils';
 export const ITEM_SEARCH_DEBOUNCE_MS = 180;
 const getItemListId = createObjectIdentity();
 
-export function useItemSearch<T>(
+// `items` is identity-keyed by `getItemListId`, so a stable array re-submits an
+// identical title list per keystroke — cache the strip on the array itself.
+const searchedTitleLists = new WeakMap<readonly { title: string }[], string[]>();
+
+function itemTitles(items: readonly { title: string }[]): string[] {
+  let titles = searchedTitleLists.get(items);
+  if (!titles) searchedTitleLists.set(items, (titles = items.map((item) => item.title)));
+  return titles;
+}
+
+function useItemSearch<T>(
   items: T[],
   query: string,
   enabled: boolean,
@@ -22,7 +32,10 @@ export function useItemSearch<T>(
     queryKey: [searchKey, listId, requestedSearch],
     queryFn: async () => {
       const indices = await searchIndices(items, requestedSearch);
-      return { query: requestedSearch, items: indices.map((index) => items[index]) };
+      return {
+        query: requestedSearch,
+        items: indices.map((index) => items[index]).filter((item): item is T => item !== undefined),
+      };
     },
     enabled: requestedSearch.length > 0,
     placeholderData: (previousData, previousQuery) => {
@@ -69,10 +82,7 @@ export function useTitleSearch<T extends { title: string }>(
     enabled,
     'title-search',
     (submittedItems, submittedQuery) =>
-      api.searchTitles(
-        submittedItems.map((item) => item.title),
-        submittedQuery,
-      ),
+      api.searchTitles(itemTitles(submittedItems), submittedQuery),
     (item) => item.title,
   );
 }

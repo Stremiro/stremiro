@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AppWindow, Power } from 'lucide-react';
+import {
+  AppWindow,
+  House,
+  Minimize2,
+  PanelBottom,
+  PanelBottomClose,
+  Power,
+  Rocket,
+} from 'lucide-react';
+import { useId } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
@@ -28,6 +37,7 @@ export const START_PAGES = [
 
 export function GeneralSettings() {
   const queryClient = useQueryClient();
+  const descriptionId = useId();
   const { preferences, isHydrating, preferencesQuery, updatePreferences } = useAppUiPreferences(
     ({ closeToTray, minimizeToTray, startMinimized, startupPage }) => ({
       closeToTray,
@@ -73,10 +83,22 @@ export function GeneralSettings() {
       ]);
     },
   });
+  const hideMutation = useMutation({
+    mutationFn: async () => {
+      await flushPendingAppWrites();
+      await api.hideMainWindowToTray();
+    },
+    onError: (error) =>
+      notifyAction('Could not hide to tray', {
+        detail: getErrorMessage(error),
+        tone: 'error',
+      }),
+  });
 
   const launchPending = launchQuery.isLoading || launchMutation.isPending;
   const launchEnabled = launchQuery.data === true;
-  const canStartMinimized = launchEnabled || preferences.closeToTray || preferences.minimizeToTray;
+  const trayEnabled = preferences.closeToTray || preferences.minimizeToTray;
+  const canStartMinimized = launchEnabled || trayEnabled;
   const startPageLabel =
     START_PAGES.find((option) => option.value === preferences.startupPage)?.label ?? 'Home';
 
@@ -96,7 +118,7 @@ export function GeneralSettings() {
                 query={launchQuery}
                 message='Could not read your login item setting.'
               />
-              <SettingsRow label='Start page' description='Where Stremiro opens.'>
+              <SettingsRow icon={House} label='Start page' description='Where Stremiro opens.'>
                 <SettingsSelect
                   ariaLabel='Start page'
                   valueLabel={startPageLabel}
@@ -106,9 +128,15 @@ export function GeneralSettings() {
                   onChange={(startupPage) => updatePreferences({ startupPage })}
                 />
               </SettingsRow>
-              <SettingsRow label='Launch at login' description='Open Stremiro when you sign in.'>
+              <SettingsRow
+                icon={Rocket}
+                label='Launch at login'
+                description='Open Stremiro when you sign in.'
+                descriptionId={`${descriptionId}-login`}
+              >
                 <SettingsSwitch
                   ariaLabel='Launch at login'
+                  ariaDescribedBy={`${descriptionId}-login`}
                   checked={launchEnabled}
                   disabled={launchQuery.data === undefined}
                   pending={launchPending}
@@ -116,15 +144,20 @@ export function GeneralSettings() {
                 />
               </SettingsRow>
               <SettingsRow
+                icon={Minimize2}
                 label='Start minimized'
+                descriptionId={`${descriptionId}-startup`}
                 description={
-                  canStartMinimized
-                    ? 'Login launches start in the system tray. Manual launches stay visible.'
-                    : 'Needs Launch at login or a tray option.'
+                  launchEnabled
+                    ? 'Start in the tray at login. Manual launches stay visible.'
+                    : trayEnabled
+                      ? 'Applies to login launches. Turn on Launch at login to use it.'
+                      : 'Enable Launch at login or a tray option first.'
                 }
               >
                 <SettingsSwitch
                   ariaLabel='Start minimized'
+                  ariaDescribedBy={`${descriptionId}-startup`}
                   checked={preferences.startMinimized}
                   disabled={isHydrating || (!canStartMinimized && !preferences.startMinimized)}
                   pending={launchMutation.isPending}
@@ -139,25 +172,19 @@ export function GeneralSettings() {
         <SettingsGroup>
           <SettingsGroupHeader
             icon={AppWindow}
-            title='Window'
-            description='Keep the app running in the system tray.'
+            title='System tray'
+            description='Click the tray icon to reopen. Use its menu to quit.'
             action={
-              preferences.closeToTray || preferences.minimizeToTray ? (
+              trayEnabled ? (
                 <Button
                   variant='ghost'
                   size='sm'
-                  disabled={isHydrating}
+                  disabled={isHydrating || launchMutation.isPending || hideMutation.isPending}
+                  aria-busy={hideMutation.isPending || undefined}
                   className='h-8 px-2.5 text-xs text-zinc-400 hover:bg-white/[0.04] hover:text-white'
-                  onClick={() =>
-                    void api.hideMainWindowToTray().catch((error) =>
-                      notifyAction('Could not hide window to tray', {
-                        detail: getErrorMessage(error),
-                        tone: 'error',
-                      }),
-                    )
-                  }
+                  onClick={() => hideMutation.mutate()}
                 >
-                  Hide to tray now
+                  Hide to tray
                 </Button>
               ) : undefined
             }
@@ -165,24 +192,32 @@ export function GeneralSettings() {
           <SettingsCard>
             <SettingsBody rows>
               <SettingsRow
+                icon={PanelBottomClose}
                 label='Close to tray'
-                description='Keep running in the tray when the window closes.'
+                description='Hide the window and pause playback instead of quitting.'
+                descriptionId={`${descriptionId}-close`}
               >
                 <SettingsSwitch
                   ariaLabel='Close to tray'
+                  ariaDescribedBy={`${descriptionId}-close`}
                   checked={preferences.closeToTray}
                   disabled={isHydrating}
+                  pending={launchMutation.isPending}
                   onChange={() => updatePreferences({ closeToTray: !preferences.closeToTray })}
                 />
               </SettingsRow>
               <SettingsRow
+                icon={PanelBottom}
                 label='Minimize to tray'
-                description='Hide to the tray instead of the taskbar.'
+                description='Hide from the taskbar. Playback keeps running.'
+                descriptionId={`${descriptionId}-minimize`}
               >
                 <SettingsSwitch
                   ariaLabel='Minimize to tray'
+                  ariaDescribedBy={`${descriptionId}-minimize`}
                   checked={preferences.minimizeToTray}
                   disabled={isHydrating}
+                  pending={launchMutation.isPending}
                   onChange={() =>
                     updatePreferences({ minimizeToTray: !preferences.minimizeToTray })
                   }

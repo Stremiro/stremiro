@@ -4,7 +4,6 @@ import {
   ArrowUp,
   CalendarArrowDown,
   CalendarArrowUp,
-  Check,
   CheckSquare,
   ChevronDown,
   ListPlus,
@@ -17,6 +16,7 @@ import {
 } from 'lucide-react';
 
 import { type RefObject, useCallback, useEffect, useId, useRef, useState } from 'react';
+import { CompactFloatingBar } from '@/components/compact-floating-bar';
 import { CreateListDialog, warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
@@ -25,8 +25,8 @@ import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
+  RadioDropdownItem,
 } from '@/components/ui/dropdown-menu';
 import { SearchInput } from '@/components/ui/search-input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -36,11 +36,12 @@ import { useListSummaries } from '@/hooks/use-media-library';
 import { useScrolledPastTitlebar } from '@/hooks/use-scroll-edge-indicators';
 import {
   type LibraryFilters,
+  type LibraryTypeFilter,
   WATCH_STATUS_LABELS,
   WATCH_STATUSES,
   type WatchStatus,
 } from '@/lib/api';
-import { cn, pluralize, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import { cn, pluralize } from '@/lib/utils';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 type LibrarySort = NonNullable<LibraryFilters['sort']>;
 type LibraryStatusFilter = WatchStatus | 'all' | 'none';
@@ -66,15 +67,15 @@ const FILTER_MENU_BUTTON_CLASS = cn(
   LIBRARY_FOCUS_RING_CLASS,
 );
 
-export const TYPE_OPTIONS: { value: 'all' | 'movie' | 'series'; label: string }[] = [
+export const TYPE_OPTIONS: { value: LibraryTypeFilter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'movie', label: 'Movies' },
   { value: 'series', label: 'Series' },
 ];
 
 interface LibraryToolbarProps {
-  typeFilter: 'all' | 'movie' | 'series';
-  onTypeFilterChange: (type: 'all' | 'movie' | 'series') => void;
+  typeFilter: LibraryTypeFilter;
+  onTypeFilterChange: (type: LibraryTypeFilter) => void;
   statusFilter: LibraryStatusFilter;
   onStatusFilterChange: (status: LibraryStatusFilter) => void;
   statusCounts: Record<WatchStatus | 'none', number>;
@@ -285,73 +286,60 @@ export function LibraryToolbar({
               selectionMode && 'border-white/[0.18] bg-white/[0.1] text-white',
             )}
           >
-            <CheckSquare className='h-3.5 w-3.5' />
+            <CheckSquare aria-hidden='true' className='h-3.5 w-3.5' />
             Select
           </Button>
         </div>
       </div>
-      <div
+      <CompactFloatingBar
         ref={compactToolbarRef}
-        role='region'
-        aria-label='Library controls'
-        aria-hidden={!showCompactToolbar || undefined}
-        inert={!showCompactToolbar}
-        className={cn(
-          'pointer-events-none fixed inset-x-0 top-8 z-40 transition-[opacity,translate] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-          showCompactToolbar ? 'translate-y-0 opacity-100' : '-translate-y-1.5 opacity-0',
-        )}
+        show={showCompactToolbar}
+        label='Library controls'
+        maxWidthClass='max-w-7xl'
+        className='gap-2 rounded-lg p-1'
       >
-        <div className={`mx-auto w-full max-w-7xl pt-2 ${SIDEBAR_PAGE_COLUMN_INSETS}`}>
-          <div
+        <button
+          type='button'
+          onClick={returnToFilters}
+          title='Back to library filters'
+          className={cn(
+            'flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-zinc-300 transition-colors duration-150 hover:bg-white/[0.05] hover:text-white motion-reduce:transition-none',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          <Search aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-zinc-500' />
+          <span className='truncate'>{search || 'Library filters'}</span>
+          <ArrowUp aria-hidden='true' className='h-3 w-3 shrink-0 text-zinc-500' />
+        </button>
+        {filterSummary && (
+          <span
+            title={filterSummary}
+            className='accent-lattice-soft hidden max-w-[40%] truncate rounded-md border px-2 py-1 text-[11px] sm:inline'
+          >
+            {filterSummary}
+          </span>
+        )}
+        <span className='shrink-0 text-[11px] tabular-nums text-zinc-400'>{countLabel}</span>
+        {hasFilters && (
+          <Button
+            size='icon'
+            variant='ghost'
+            aria-label='Reset library filters'
+            title='Reset library filters'
+            onClick={() => {
+              returnToFilters();
+              onReset();
+            }}
             className={cn(
-              'flex h-11 items-center gap-2 rounded-lg border border-white/[0.09] bg-zinc-950/85 p-1 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] backdrop-blur-md',
-              showCompactToolbar && 'pointer-events-auto',
+              'h-8 w-8 shrink-0 text-zinc-400 hover:text-white',
+              LIBRARY_FOCUS_RING_CLASS,
             )}
           >
-            <button
-              type='button'
-              onClick={returnToFilters}
-              title='Back to library filters'
-              className={cn(
-                'flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-zinc-300 transition-colors duration-150 hover:bg-white/[0.05] hover:text-white motion-reduce:transition-none',
-                LIBRARY_FOCUS_RING_CLASS,
-              )}
-            >
-              <Search aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-zinc-500' />
-              <span className='truncate'>{search || 'Library filters'}</span>
-              <ArrowUp aria-hidden='true' className='h-3 w-3 shrink-0 text-zinc-500' />
-            </button>
-            {filterSummary && (
-              <span
-                title={filterSummary}
-                className='accent-lattice-soft hidden max-w-[40%] truncate rounded-md border px-2 py-1 text-[11px] sm:inline'
-              >
-                {filterSummary}
-              </span>
-            )}
-            <span className='shrink-0 text-[11px] tabular-nums text-zinc-400'>{countLabel}</span>
-            {hasFilters && (
-              <Button
-                size='icon'
-                variant='ghost'
-                aria-label='Reset library filters'
-                title='Reset library filters'
-                onClick={() => {
-                  returnToFilters();
-                  onReset();
-                }}
-                className={cn(
-                  'h-8 w-8 shrink-0 text-zinc-400 hover:text-white',
-                  LIBRARY_FOCUS_RING_CLASS,
-                )}
-              >
-                <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
-              </Button>
-            )}
-            <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
-          </div>
-        </div>
-      </div>
+            <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
+          </Button>
+        )}
+        <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+      </CompactFloatingBar>
     </div>
   );
 }
@@ -366,19 +354,14 @@ function FilterMenuItem({
   children: React.ReactNode;
 }) {
   return (
-    <DropdownMenuItem
-      role='menuitemradio'
-      aria-checked={checked}
+    <RadioDropdownItem
+      checked={checked}
+      checkClassName='opacity-70'
       onSelect={onSelect}
-      className='gap-2 text-[12px] rounded-md cursor-pointer py-1.5'
+      className='gap-2 text-sm rounded-md cursor-pointer py-2'
     >
-      {checked ? (
-        <Check className='w-3.5 h-3.5 opacity-70 shrink-0' />
-      ) : (
-        <div className='w-3.5 shrink-0' />
-      )}
       {children}
-    </DropdownMenuItem>
+    </RadioDropdownItem>
   );
 }
 
@@ -445,9 +428,8 @@ export function useCollectionSelection(
       if (
         (event.key !== 'Escape' && !selectsAll) ||
         event.defaultPrevented ||
-        (focusedCollection &&
-          triggerRef.current &&
-          !focusedCollection.contains(triggerRef.current)) ||
+        !triggerRef.current ||
+        !focusedCollection?.contains(triggerRef.current) ||
         isEditableTarget(document.activeElement, RADIX_POPPER_CONTENT_SELECTOR) ||
         document.querySelector(`${RADIX_POPPER_CONTENT_SELECTOR}, ${OPEN_DIALOG_SELECTOR}`)
       )
@@ -470,7 +452,7 @@ export function useCollectionSelection(
         const next = new Set(current);
         if (anchor !== -1 && target !== -1) {
           for (let index = Math.min(anchor, target); index <= Math.max(anchor, target); index++)
-            next.add(visibleIds[index]);
+            next.add(visibleIds[index]!);
         } else if (next.has(id)) next.delete(id);
         else next.add(id);
         return next;
@@ -683,7 +665,7 @@ export function LibraryBulkActionBar({
             }}
             className={BULK_BUTTON_CLASS}
           >
-            <CheckSquare className='h-3.5 w-3.5' />
+            <CheckSquare aria-hidden='true' className='h-3.5 w-3.5' />
             Set Status
             <ChevronDown className='h-3 w-3 opacity-60' />
           </Button>

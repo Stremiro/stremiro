@@ -29,7 +29,7 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     // can't collide onto one key.
     let id = normalize_media_id(&item.id)?;
 
-    item.type_ = normalize_watch_progress_type(&item.type_)?.to_string();
+    item.type_ = normalize_watch_progress_type(&item.type_)?;
 
     item.id = id;
     // Field bounds + year normalization live in the shared media normalizer;
@@ -103,27 +103,54 @@ pub(super) fn persist_index_map<T: serde::Serialize>(
 
 /// Targeted removal for index+item domains: deletes the item rows of `ids` and
 /// drops them from the index without rewriting the rest of the domain. Stages
-/// only; returns how many item rows were deleted.
+/// only; returns how many distinct requested titles had item rows deleted.
 pub(super) fn remove_index_ids(
     store: &DurableStore,
     layout: IndexStoreLayout,
     mut index: Vec<String>,
     ids: &HashSet<&str>,
 ) -> usize {
-    let deleted = ids
-        .iter()
-        .filter(|id| store.delete((layout.item_key)(id)))
-        .count();
+    let indexed: HashSet<&str> = index.iter().map(String::as_str).collect();
+    let mut deleted = HashSet::with_capacity(ids.len());
+    for id in ids {
+        if !indexed.contains(id) && store.delete((layout.item_key)(id)) {
+            deleted.insert((*id).to_owned());
+        }
+    }
+    drop(indexed);
     let len = index.len();
-    index.retain(|id| !ids.contains(id.as_str()));
-    if deleted > 0 || index.len() != len {
+    let is_library = layout.index_key == LIBRARY_INDEX_KEY;
+    let mut kept = HashSet::with_capacity(if is_library { len } else { 0 });
+    index.retain(|stored_id| {
+        // Snapshot reads follow row identity, so removal must also handle aliases and swapped keys.
+        let identity = if is_library {
+            store.with_value((layout.item_key)(stored_id), |value| {
+                let value = value?;
+                normalize_media_id(value.get("id").or_else(|| value.get(0))?.as_str()?)
+            })
+        } else {
+            normalize_media_id(stored_id)
+        };
+        let id = identity.unwrap_or_else(|| stored_id.clone());
+        if ids.contains(id.as_str()) {
+            if store.delete((layout.item_key)(stored_id)) {
+                deleted.insert(id);
+            }
+            false
+        } else {
+            if is_library {
+                kept.insert(id);
+            }
+            true
+        }
+    });
+    if !deleted.is_empty() || index.len() != len {
         store.set(layout.index_key, json!(index));
     }
-    if layout.index_key == LIBRARY_INDEX_KEY {
-        let kept: HashSet<&str> = index.iter().map(String::as_str).collect();
+    if is_library {
         retain_status_added_ids(store, |id| kept.contains(id));
     }
-    deleted
+    deleted.len()
 }
 
 /// Shared prefix-sweep clear for index/item domains: deletes every key under

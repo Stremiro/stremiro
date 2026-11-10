@@ -1,5 +1,4 @@
 import { History } from 'lucide-react';
-import { memo } from 'react';
 import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressCard } from '@/components/watch-progress-card';
 import { useLocalDay } from '@/hooks/use-local-day';
@@ -65,7 +64,7 @@ export function ResumeSection() {
   );
 }
 
-const ResumeCard = memo(function ResumeCard({ entry }: { entry: ResumeRailEntry }) {
+function ResumeCard({ entry }: { entry: ResumeRailEntry }) {
   const { row: item, isNewEpisode } = entry;
   const isUpNext = isNewEpisode !== undefined;
   const { mutate: removeFromContinueWatching } = useRemoveFromContinueWatching({
@@ -88,4 +87,4 @@ const ResumeCard = memo(function ResumeCard({ entry }: { entry: ResumeRailEntry 
       }
     />
   );
-});
+}

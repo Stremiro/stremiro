@@ -10,7 +10,6 @@ import {
 } from 'lucide-react';
 import {
   useCallback,
-  memo,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -119,7 +118,7 @@ function snapAnchors(metrics: MiniPlayerMetrics): MiniPlayerPosition[] {
 }
 
 function defaultMiniPosition(metrics: MiniPlayerMetrics): MiniPlayerPosition {
-  return snapAnchors(metrics)[3];
+  return snapAnchors(metrics)[3]!;
 }
 
 function fitRectToAspect(rect: MiniVideoRect, aspect: number): MiniVideoRect {
@@ -204,7 +203,7 @@ function useMiniDisplayTime(
       : seekPreviewStore.getSnapshot,
   );
   const currentTime = useSyncExternalStore(
-    active || seekPreview !== null ? clock.subscribe : subscribeWhileHidden,
+    active && seekPreview === null ? clock.subscribe : subscribeWhileHidden,
     wholeSeconds ? () => Math.floor(clock.getSnapshot()) : clock.getSnapshot,
   );
   return Math.min(seekPreview ?? currentTime, duration > 0 ? duration : currentTime);
@@ -217,12 +216,7 @@ interface MiniPlayerTickProps {
   seekPreviewStore: SeekPreviewStore;
 }
 
-const MiniPlayerHairline = memo(function MiniPlayerHairline({
-  active,
-  clock,
-  duration,
-  seekPreviewStore,
-}: MiniPlayerTickProps) {
+function MiniPlayerHairline({ active, clock, duration, seekPreviewStore }: MiniPlayerTickProps) {
   const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
   const progressPct = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
   return (
@@ -238,14 +232,9 @@ const MiniPlayerHairline = memo(function MiniPlayerHairline({
       />
     </div>
   );
-});
+}
 
-const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
-  active,
-  clock,
-  duration,
-  seekPreviewStore,
-}: MiniPlayerTickProps) {
+function MiniPlayerTimeLabel({ active, clock, duration, seekPreviewStore }: MiniPlayerTickProps) {
   const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active, true);
   return (
     <span className='shrink-0 text-[11px] font-medium tabular-nums text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.8)]'>
@@ -253,7 +242,7 @@ const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
       {duration > 0 && <span className='font-normal text-white/65'> / {formatTime(duration)}</span>}
     </span>
   );
-});
+}
 
 const MINI_SKIP_MARK: Record<string, string> = {
   intro: 'bg-amber-200/90',
@@ -275,7 +264,7 @@ interface MiniPlayerSeekSliderProps extends MiniPlayerTickProps {
   skipSegments?: readonly SkipSegment[];
 }
 
-const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
+function MiniPlayerSeekSlider({
   active,
   clock,
   duration,
@@ -340,7 +329,7 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
       />
     </div>
   );
-});
+}
 
 interface MiniPlayerProps {
   title: string;
@@ -387,7 +376,7 @@ interface MiniPlayerProps {
   onBackToTitle: () => void;
 }
 
-export const MiniPlayer = memo(function MiniPlayer({
+export function MiniPlayer({
   title,
   episodeLabel,
   backdrop,
@@ -438,11 +427,11 @@ export const MiniPlayer = memo(function MiniPlayer({
     rootRef: frameRef,
     returnFocus: () => videoSurfaceRef.current,
   });
-  const releaseInteraction = useCallback(() => {
+  const releaseInteraction = () => {
     setHovered(false);
     setHasFocus(false);
-  }, []);
-  const releaseHover = useCallback(() => setHovered(false), []);
+  };
+  const releaseHover = () => setHovered(false);
   useWindowRelease(releaseInteraction, releaseHover);
   const [metrics, setMetrics] = useState<MiniPlayerMetrics>(computeMiniMetrics);
   const [renderPosition] = useState(() =>
@@ -798,7 +787,7 @@ export const MiniPlayer = memo(function MiniPlayer({
         // Magnetic corner snap: release near a corner and the frame glides in.
         const anchorIndex = findSnapAnchorIndex(position);
         if (anchorIndex !== null) {
-          animateTo(anchors[anchorIndex]);
+          animateTo(anchors[anchorIndex]!);
         } else {
           endMotion();
           onPositionChange(position);
@@ -1290,4 +1279,4 @@ export const MiniPlayer = memo(function MiniPlayer({
     </>,
     document.body,
   );
-});
+}

@@ -1,12 +1,12 @@
 import { keepPreviousData, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Check,
   ChevronDown,
   Clock3,
   Compass,
   Flame,
   History as HistoryIcon,
   Layers3,
+  Puzzle,
   RotateCcw,
   Search as SearchIcon,
   SearchX,
@@ -23,12 +23,18 @@ import {
   useState,
 } from 'react';
 import { Link, NavigationType, useNavigationType } from 'react-router';
+import { CompactFloatingBar } from '@/components/compact-floating-bar';
 import { GenreIcon } from '@/components/genre-icon';
+import { StatePanel } from '@/components/state-panel';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
+  RadioDropdownItem,
 } from '@/components/ui/dropdown-menu';
 import {
   MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX,
@@ -51,11 +57,12 @@ import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useScrolledPastTitlebar } from '@/hooks/use-scroll-edge-indicators';
 import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { getErrorMessage, isNoCapableAddonError, type MediaItem } from '@/lib/api';
+import { foldAsciiCase } from '@/lib/api-cache';
 import { isAppLinkText, openAppLinkText } from '@/lib/app-links';
-import { handleRadioGroupKeyDown, whenRowMounted } from '@/lib/dom';
+import { handleRovingGroupKeyDown, whenRowMounted } from '@/lib/dom';
 import { navigateBack } from '@/lib/navigation';
 import { prefetchSearchCatalog, searchCatalogQueryOptions } from '@/lib/search-catalog';
-import { sameSearchGenre, type SearchFeed, type SearchMediaType } from '@/lib/search-page-state';
+import { type SearchFeed, type SearchMediaType } from '@/lib/search-page-state';
 import {
   cn,
   ICON_CHIP_CLASS,
@@ -127,7 +134,7 @@ const estimateSearchItemHeight = (itemWidth: number) =>
 const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 motion-reduce:transition-none hover:enabled:not-aria-disabled:bg-white/[0.08] hover:enabled:not-aria-disabled:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 const SEARCH_FACET_BUTTON_CLASS =
-  'nav-switch-item group flex h-10 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium not-aria-disabled:hover:border-white/[0.18] not-aria-disabled:active:bg-white/[0.1] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+  'nav-switch-item group flex h-10 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium not-aria-disabled:hover:border-white/[0.18] not-aria-disabled:active:bg-white/[0.1] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
 const FACET_ICON_CLASS =
   'size-3.5 shrink-0 opacity-75 transition-opacity duration-150 group-not-aria-disabled:group-hover:opacity-100 group-data-[state=open]:opacity-100 motion-reduce:transition-none';
 const RECENT_SEARCH_ROW_BUTTON_CLASS =
@@ -153,23 +160,16 @@ function SearchPanel({
   titleRole?: string;
 }) {
   return (
-    <PageCard
-      role={role}
-      className='mx-auto mt-10 flex max-w-sm flex-col items-center justify-center gap-3 px-6 py-12 text-center'
-    >
-      {icon ? <span className={cn(ICON_CHIP_CLASS, 'size-10 rounded-xl')}>{icon}</span> : null}
-      <p
-        role={titleRole}
-        className='max-w-full [overflow-wrap:anywhere] text-[15px] font-semibold text-zinc-200'
-      >
-        {title}
-      </p>
-      {description ? (
-        <p className='w-full max-w-xs [overflow-wrap:anywhere] text-sm leading-relaxed text-zinc-400'>
-          {description}
-        </p>
-      ) : null}
-      {action}
+    <PageCard role={role} className='mx-auto mt-10 max-w-sm px-6 py-12'>
+      <StatePanel
+        role='presentation'
+        icon={icon}
+        iconClassName={cn(ICON_CHIP_CLASS, 'size-10 rounded-xl')}
+        title={title}
+        titleRole={titleRole}
+        description={description}
+        action={action}
+      />
     </PageCard>
   );
 }
@@ -259,7 +259,7 @@ function SearchResults({
   if (!isOnline && results.length === 0) {
     return (
       <SearchPanel
-        icon={<WifiOff className='h-5 w-5 text-zinc-400' />}
+        icon={<WifiOff aria-hidden='true' className='h-5 w-5 text-zinc-400' />}
         title="You're offline"
         description='Connect to the internet to browse and search.'
       />
@@ -348,7 +348,7 @@ function SearchResults({
   if (results.length === 0) {
     return (
       <SearchPanel
-        icon={<SearchX className='h-5 w-5 text-zinc-400' />}
+        icon={<SearchX aria-hidden='true' className='h-5 w-5 text-zinc-400' />}
         title={
           trimmedDebouncedQuery
             ? `No results for \u201c${trimmedDebouncedQuery}\u201d`
@@ -493,25 +493,26 @@ function FacetMenuItem({
   title?: string;
 }) {
   return (
-    <DropdownMenuItem
-      role='menuitemradio'
-      aria-checked={checked}
+    <RadioDropdownItem
+      checked={checked}
+      checkPosition='trailing'
+      checkClassName='text-(--accent-nav)'
       title={title}
       onSelect={() => {
         if (checked) return;
         onSelect();
         resetScroll();
       }}
-      className='flex min-h-9 items-center justify-between gap-2 px-2.5 text-[13px] text-zinc-300 aria-checked:font-medium aria-checked:text-white'
+      className='flex min-h-10 items-center justify-between gap-2 px-2.5 text-sm text-zinc-300 aria-checked:font-medium aria-checked:text-white'
     >
       {children}
-      {checked ? <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' /> : null}
-    </DropdownMenuItem>
+    </RadioDropdownItem>
   );
 }
 
 function includesGenre(options: readonly string[], genre: string) {
-  return options.some((option) => sameSearchGenre(option, genre));
+  const folded = foldAsciiCase(genre);
+  return options.some((option) => foldAsciiCase(option) === folded);
 }
 
 export function Search() {
@@ -579,18 +580,23 @@ export function Search() {
   const hasGenreError = queryNeedsRetry(browseGenresQuery);
   // `all` unions the movie and series genre sets.
   const genreOptions = browseGenres?.[activeType] ?? [];
+  const addonGenres = browseGenres?.addon ?? [];
   // A deep-linked genre the manifests don't enumerate still gets an entry.
   const menuGenres =
-    activeGenre && !includesGenre(genreOptions, activeGenre)
+    activeGenre &&
+    !includesGenre(genreOptions, activeGenre) &&
+    !(activeType === 'all' && includesGenre(addonGenres, activeGenre))
       ? [activeGenre, ...genreOptions]
       : genreOptions;
+  const activeGenreFolded = activeGenre === undefined ? undefined : foldAsciiCase(activeGenre);
 
   // A genre the next type's catalogs don't offer would strand an empty grid.
   const isGenreCompatible = (nextType: SearchMediaType) =>
     !activeGenre ||
     !browseGenres ||
     nextType === activeType ||
-    includesGenre(browseGenres[nextType], activeGenre);
+    includesGenre(browseGenres[nextType], activeGenre) ||
+    (nextType === 'all' && includesGenre(addonGenres, activeGenre));
 
   const selectType = (nextType: SearchMediaType) => {
     handleTypeChange(nextType, !isGenreCompatible(nextType));
@@ -681,6 +687,7 @@ export function Search() {
 
   const isRetryingInitialLoad = isFetched && isLoading;
   const isBrowsing = !trimmedQuery;
+  const HeadingIcon = isBrowsing ? Compass : SearchIcon;
   const isRefining = isTyping || isPlaceholderData;
   const showSkeleton = (isLoading || isRefining) && !isRetryingInitialLoad && results.length === 0;
   const isUpdating = isOnline && isFetching && !isFetchingNextPage;
@@ -695,7 +702,7 @@ export function Search() {
   }, [isUpdating]);
   const showUpdating = isUpdating && updatingRevealed;
   const activeFeedOption =
-    SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed) ?? SEARCH_FEED_OPTIONS[0];
+    SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed) ?? SEARCH_FEED_OPTIONS[0]!;
   const activeFeedLabel = activeFeedOption.label;
   const resultCountLabel = `${results.length}${hasNextPage ? '+' : ''} ${isBrowsing ? 'title' : 'result'}${results.length === 1 && !hasNextPage ? '' : 's'}`;
 
@@ -784,19 +791,11 @@ export function Search() {
         <div className='relative mx-auto w-full max-w-4xl'>
           <div className='mb-5 flex min-h-6 items-end justify-between gap-3'>
             <div className='flex min-w-0 items-center gap-3'>
-              {isBrowsing ? (
-                <Compass
-                  aria-hidden='true'
-                  className={cn(TITLE_ICON_CLASS, 'size-5.5')}
-                  strokeWidth={2}
-                />
-              ) : (
-                <SearchIcon
-                  aria-hidden='true'
-                  className={cn(TITLE_ICON_CLASS, 'size-5.5')}
-                  strokeWidth={2}
-                />
-              )}
+              <HeadingIcon
+                aria-hidden='true'
+                className={cn(TITLE_ICON_CLASS, 'size-5.5')}
+                strokeWidth={2}
+              />
               <h1 className='min-w-0 text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
                 {isBrowsing ? 'Discover' : 'Search'}
               </h1>
@@ -959,32 +958,14 @@ export function Search() {
               <section
                 data-key-capture
                 aria-label='Recent searches'
-                className='absolute inset-x-0 top-full z-30 mt-2 rounded-xl border border-white/[0.09] bg-zinc-950/90 py-1 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] backdrop-blur-md animate-in fade-in-0 slide-in-from-top-0.5 duration-150 ease-out motion-reduce:animate-none'
+                className='absolute inset-x-0 top-full z-30 mt-1.5 overflow-hidden rounded-xl border border-white/5 bg-zinc-950/80 shadow-2xl backdrop-blur-xl animate-surface-in motion-reduce:animate-none'
               >
-                <div className='flex items-center justify-between gap-2 px-3 pb-0.5 pt-1.5'>
-                  <span className='text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500'>
-                    Recent
-                  </span>
-                  <button
-                    type='button'
-                    aria-label='Clear recent searches'
-                    onMouseDown={keepSearchInputFocus}
-                    onKeyDown={dismissRecentOnEscape}
-                    onClick={() => {
-                      void clearRecentSearches();
-                      searchInputRef.current?.focus({ preventScroll: true });
-                    }}
-                    className='h-7 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 motion-reduce:transition-none'
-                  >
-                    Clear
-                  </button>
-                </div>
                 <ul
                   ref={recentListRef}
-                  className='max-h-[min(216px,38vh)] overflow-y-auto overscroll-contain p-1'
+                  className='max-h-[min(224px,36vh)] overflow-y-auto overscroll-contain scrollbar-hide p-1'
                 >
                   {recentSearches.map((entry, index) => (
-                    <li key={entry} className='group/recent flex items-center gap-1'>
+                    <li key={entry} className='group/recent flex items-center gap-0.5'>
                       <button
                         type='button'
                         onMouseDown={keepSearchInputFocus}
@@ -1010,7 +991,7 @@ export function Search() {
                         }}
                         className={cn(
                           RECENT_SEARCH_ROW_BUTTON_CLASS,
-                          'min-w-0 flex-1 gap-2.5 px-2.5 text-left text-[13px] text-zinc-300',
+                          'min-w-0 flex-1 gap-2 px-2 text-left text-[13px] text-zinc-300',
                         )}
                       >
                         <HistoryIcon
@@ -1031,14 +1012,28 @@ export function Search() {
                         }}
                         className={cn(
                           RECENT_SEARCH_ROW_BUTTON_CLASS,
-                          'size-8 shrink-0 justify-center opacity-0 transition-opacity duration-150 group-hover/recent:opacity-100 group-focus-within/recent:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none',
+                          'size-6 shrink-0 justify-center opacity-0 transition-opacity duration-150 group-hover/recent:opacity-100 group-focus-within/recent:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none',
                         )}
                       >
-                        <X aria-hidden='true' className='h-3.5 w-3.5' />
+                        <X aria-hidden='true' className='h-3 w-3' />
                       </button>
                     </li>
                   ))}
                 </ul>
+                <div className='border-t border-white/[0.06] p-1'>
+                  <button
+                    type='button'
+                    onMouseDown={keepSearchInputFocus}
+                    onKeyDown={dismissRecentOnEscape}
+                    onClick={() => {
+                      void clearRecentSearches();
+                      searchInputRef.current?.focus({ preventScroll: true });
+                    }}
+                    className='flex h-7 w-full items-center justify-center rounded-md px-2 text-[12px] font-medium text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 motion-reduce:transition-none'
+                  >
+                    Clear recent searches
+                  </button>
+                </div>
               </section>
             )}
           </div>
@@ -1065,7 +1060,7 @@ export function Search() {
                   role='radio'
                   aria-checked={activeType === option.id}
                   tabIndex={activeType === option.id ? 0 : -1}
-                  onKeyDown={handleRadioGroupKeyDown}
+                  onKeyDown={handleRovingGroupKeyDown}
                   onClick={() => selectType(option.id)}
                   onPointerEnter={() => prefetchType(option.id)}
                   onFocus={() => prefetchType(option.id)}
@@ -1114,18 +1109,12 @@ export function Search() {
                   </FacetMenuItem>
                   <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
                   {!isOnline && !browseGenres ? (
-                    <p
-                      role='status'
-                      className='px-2.5 py-2 text-[13px] leading-relaxed text-zinc-400'
-                    >
+                    <p role='status' className='px-2.5 py-2 text-sm leading-relaxed text-zinc-400'>
                       Connect to the internet to load genres.
                     </p>
                   ) : hasGenreError ? (
                     <>
-                      <p
-                        role='alert'
-                        className='px-2.5 pt-1 text-[13px] leading-relaxed text-zinc-300'
-                      >
+                      <p role='alert' className='px-2.5 pt-1 text-sm leading-relaxed text-zinc-300'>
                         Couldn't load genres.
                       </p>
                       <DropdownMenuItem
@@ -1136,7 +1125,7 @@ export function Search() {
                             void browseGenresQuery.refetch();
                           }
                         }}
-                        className='h-9 px-2.5 text-[13px] aria-disabled:opacity-50'
+                        className='h-9 px-2.5 text-sm aria-disabled:opacity-50'
                       >
                         {browseGenresQuery.isFetching ? 'Retrying…' : 'Retry'}
                       </DropdownMenuItem>
@@ -1151,10 +1140,51 @@ export function Search() {
                       </div>
                     </div>
                   ) : null}
+                  {activeType === 'all' && addonGenres.length > 0 && (
+                    <>
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger className='flex min-h-10 items-center gap-2.5 px-2.5 text-sm text-zinc-300'>
+                          <Puzzle aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
+                          <span>Addon genres</span>
+                          <span className='ml-auto mr-1 rounded-[5px] border border-white/[0.08] bg-white/[0.05] px-1.5 text-[11px] leading-4 tabular-nums text-zinc-500'>
+                            {addonGenres.length}
+                          </span>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent
+                          sideOffset={6}
+                          className='max-h-[min(18rem,var(--radix-dropdown-menu-content-available-height))] w-52 scrollbar-hide'
+                        >
+                          {addonGenres.map((genre) => (
+                            <FacetMenuItem
+                              key={genre}
+                              checked={
+                                activeGenreFolded !== undefined &&
+                                foldAsciiCase(genre) === activeGenreFolded
+                              }
+                              title={genre}
+                              onSelect={() => handleGenreChange(genre)}
+                            >
+                              <span className='flex min-w-0 items-center gap-2.5'>
+                                <Puzzle
+                                  aria-hidden='true'
+                                  className='h-4 w-4 shrink-0 text-zinc-500'
+                                />
+                                <span className='truncate'>{genre}</span>
+                              </span>
+                            </FacetMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                      <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
+                    </>
+                  )}
                   {menuGenres.map((genre) => (
                     <FacetMenuItem
                       key={genre}
-                      checked={sameSearchGenre(genre, activeGenre)}
+                      checked={
+                        activeGenreFolded !== undefined &&
+                        foldAsciiCase(genre) === activeGenreFolded
+                      }
                       title={genre}
                       onSelect={() => handleGenreChange(genre)}
                     >
@@ -1327,72 +1357,59 @@ export function Search() {
         </div>
       </div>
 
-      <div
+      <CompactFloatingBar
         ref={compactHeaderRef}
-        role='region'
-        aria-label='Search summary'
-        aria-hidden={!showCompactHeader || undefined}
-        inert={!showCompactHeader}
-        className={cn(
-          'pointer-events-none fixed inset-x-0 top-8 z-40 transition-[opacity,translate] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-          showCompactHeader ? 'translate-y-0 opacity-100' : '-translate-y-1.5 opacity-0',
-        )}
+        show={showCompactHeader}
+        label='Search summary'
+        maxWidthClass='max-w-[1800px]'
+        className='mx-auto w-full max-w-4xl gap-1 rounded-xl py-1 pl-1 pr-1.5'
       >
-        <div className={`mx-auto w-full max-w-[1800px] pt-2 ${SIDEBAR_PAGE_COLUMN_INSETS}`}>
-          <div
-            className={cn(
-              'mx-auto flex h-11 w-full max-w-4xl items-center gap-1 rounded-xl border border-white/[0.09] bg-zinc-950/85 py-1 pl-1 pr-1.5 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] backdrop-blur-md',
-              showCompactHeader && 'pointer-events-auto',
-            )}
-          >
-            <button
-              type='button'
-              aria-label={trimmedQuery ? `Edit search: ${trimmedQuery}` : 'Search titles'}
-              title='Back to search'
-              onClick={returnToSearch}
-              className='flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 text-left text-[13px] font-medium transition-colors duration-150 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
-            >
-              <SearchIcon aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
-              <span className={cn('truncate', trimmedQuery ? 'text-zinc-100' : 'text-zinc-400')}>
-                {trimmedQuery || 'Search movies, shows, anime...'}
-              </span>
-            </button>
-            <div className='flex min-w-0 max-w-[45%] items-center gap-1 overflow-x-auto scrollbar-hide'>
-              {compactFilters.map(({ id, label }) =>
-                label ? (
-                  <span
-                    key={id}
-                    title={label}
-                    className='accent-lattice-soft max-w-36 shrink-0 truncate rounded-[5px] border px-2 py-1 text-[13px] font-medium'
-                  >
-                    {label}
-                  </span>
-                ) : null,
-              )}
-            </div>
-            {(results.length > 0 || showUpdating) && (
+        <button
+          type='button'
+          aria-label={trimmedQuery ? `Edit search: ${trimmedQuery}` : 'Search titles'}
+          title='Back to search'
+          onClick={returnToSearch}
+          className='flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 text-left text-[13px] font-medium transition-colors duration-150 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
+        >
+          <SearchIcon aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
+          <span className={cn('truncate', trimmedQuery ? 'text-zinc-100' : 'text-zinc-400')}>
+            {trimmedQuery || 'Search movies, shows, anime...'}
+          </span>
+        </button>
+        <div className='flex min-w-0 max-w-[45%] items-center gap-1 overflow-x-auto scrollbar-hide'>
+          {compactFilters.map(({ id, label }) =>
+            label ? (
               <span
-                aria-hidden='true'
-                className='hidden shrink-0 px-2 text-[13px] tabular-nums text-zinc-400 sm:inline'
+                key={id}
+                title={label}
+                className='accent-lattice-soft max-w-36 shrink-0 truncate rounded-[5px] border px-2 py-1 text-[13px] font-medium'
               >
-                {isRefining || showUpdating ? 'Updating…' : resultCountLabel}
+                {label}
               </span>
-            )}
-            <span aria-hidden='true' className='mx-1 h-4 w-px shrink-0 bg-white/10' />
-            {hasActiveFilters && (
-              <button
-                type='button'
-                title='Reset all filters'
-                onClick={handleResetFilters}
-                className='flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
-              >
-                <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
-                Reset
-              </button>
-            )}
-          </div>
+            ) : null,
+          )}
         </div>
-      </div>
+        {(results.length > 0 || showUpdating) && (
+          <span
+            aria-hidden='true'
+            className='hidden shrink-0 px-2 text-[13px] tabular-nums text-zinc-400 sm:inline'
+          >
+            {isRefining || showUpdating ? 'Updating…' : resultCountLabel}
+          </span>
+        )}
+        <span aria-hidden='true' className='mx-1 h-4 w-px shrink-0 bg-white/10' />
+        {hasActiveFilters && (
+          <button
+            type='button'
+            title='Reset all filters'
+            onClick={handleResetFilters}
+            className='flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
+          >
+            <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
+            Reset
+          </button>
+        )}
+      </CompactFloatingBar>
       <ScrollToTop />
     </div>
   );

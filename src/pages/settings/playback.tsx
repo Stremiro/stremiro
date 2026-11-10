@@ -1,14 +1,24 @@
 import { useQuery } from '@tanstack/react-query';
 import {
+  AudioLines,
   Captions,
   Check,
   ChevronsUpDown,
   Clapperboard,
   Compass,
+  Download,
+  EyeOff,
+  FastForward,
+  Film,
+  KeyboardOff,
   Languages,
+  Moon,
   RotateCcw,
   Search,
+  SkipForward,
+  Timer,
   Volume2,
+  type LucideIcon,
 } from 'lucide-react';
 import { type KeyboardEvent, useId, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -65,9 +75,10 @@ const COUNTDOWN_SECONDS = [5, 8, 10, 15, 30];
 const CONTROLS_HIDE_SECONDS = [2, 3, 5, 8];
 
 const STEP_BUTTON_CLASS =
-  'flex size-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-white/[0.04] motion-reduce:transition-none';
+  'flex size-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-white/[0.04] motion-reduce:transition-none';
 
 function SecondsSelect({
+  icon,
   label,
   description,
   seconds,
@@ -75,6 +86,7 @@ function SecondsSelect({
   disabled,
   onChange,
 }: {
+  icon?: LucideIcon;
   label: string;
   description?: string;
   seconds: number;
@@ -83,7 +95,7 @@ function SecondsSelect({
   onChange: (seconds: number) => void;
 }) {
   return (
-    <SettingsRow label={label} description={description}>
+    <SettingsRow icon={icon} label={label} description={description}>
       <SettingsSelect
         ariaLabel={label}
         valueLabel={`${seconds} seconds`}
@@ -100,18 +112,20 @@ const isPrefixMatch = (choice: SupportedLanguage, needle: string) =>
   choice.code === needle || choice.label.toLowerCase().startsWith(needle);
 
 function LanguageSelector({
+  icon,
   label,
   value,
   kind,
   options,
-  loading,
+  status,
   onChange,
 }: {
+  icon?: LucideIcon;
   label: string;
   value: string;
   kind: 'audio' | 'subtitle';
   options: readonly SupportedLanguage[];
-  loading: boolean;
+  status: 'ready' | 'loading' | 'unavailable';
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -125,7 +139,12 @@ function LanguageSelector({
     ...options,
   ];
   const selected = choices.find((choice) => choice.code === value);
-  const valueLabel = loading ? 'Loading…' : (selected?.label ?? value);
+  const valueLabel =
+    status === 'loading'
+      ? 'Loading…'
+      : status === 'unavailable'
+        ? 'Unavailable'
+        : (selected?.label ?? value);
   const needle = query.trim().toLowerCase();
   const matches = needle
     ? choices
@@ -153,38 +172,38 @@ function LanguageSelector({
       moveActive((activeIndex + step + matches.length) % matches.length);
     } else if (event.key === 'Enter') {
       event.preventDefault();
-      if (matches.length > 0) pick(matches[activeIndex].code);
+      if (matches.length > 0) pick(matches[activeIndex]!.code);
     }
   };
 
   return (
-    <SettingsRow label={label}>
+    <SettingsRow icon={icon} label={label}>
       <Popover
         open={open}
         onOpenChange={(next) => {
           setOpen(next);
           setQuery('');
-          setActive(Math.max(0, choices.indexOf(selected ?? choices[0])));
+          setActive(Math.max(0, choices.indexOf(selected ?? choices[0]!)));
         }}
       >
         <PopoverTrigger asChild>
           <Button
             variant='outline'
             aria-label={`${label}: ${valueLabel}`}
-            disabled={loading}
+            disabled={status !== 'ready'}
             className={cn(
-              'h-9 w-52 min-w-0 max-w-full justify-between gap-2 px-3 text-[13px] shadow-none',
+              'h-10 w-56 min-w-0 max-w-full justify-between gap-2 px-3.5 text-[14px] shadow-none',
               SETTINGS_OUTLINE_BUTTON_CLASS,
             )}
           >
             <span className='truncate'>{valueLabel}</span>
             <span className='ml-auto flex shrink-0 items-center gap-2'>
-              {!loading && selected?.code && selected.code !== 'off' ? (
-                <span className='font-mono text-[10.5px] uppercase text-zinc-500'>
+              {status === 'ready' && selected?.code && selected.code !== 'off' ? (
+                <span className='font-mono text-[11px] uppercase text-zinc-500'>
                   {selected.code}
                 </span>
               ) : null}
-              <ChevronsUpDown aria-hidden='true' className='h-3.5 w-3.5 text-zinc-500' />
+              <ChevronsUpDown aria-hidden='true' className='h-4 w-4 text-zinc-500' />
             </span>
           </Button>
         </PopoverTrigger>
@@ -201,7 +220,7 @@ function LanguageSelector({
               aria-expanded='true'
               aria-controls={listId}
               aria-activedescendant={
-                matches.length > 0 ? `${listId}-${matches[activeIndex].code || 'auto'}` : undefined
+                matches.length > 0 ? `${listId}-${matches[activeIndex]!.code || 'auto'}` : undefined
               }
               aria-label={`Search ${label.toLowerCase()} languages`}
               placeholder='Search languages'
@@ -212,7 +231,7 @@ function LanguageSelector({
                 listRef.current?.scrollTo({ top: 0 });
               }}
               onKeyDown={handleListKey}
-              className='h-10 min-w-0 flex-1 bg-transparent text-[13px] text-zinc-100 outline-hidden placeholder:text-zinc-500'
+              className='h-10 min-w-0 flex-1 bg-transparent text-[14px] text-zinc-100 outline-hidden placeholder:text-zinc-500'
             />
           </div>
           <div
@@ -223,7 +242,7 @@ function LanguageSelector({
             className='max-h-72 overflow-y-auto overscroll-contain p-1'
           >
             {matches.length === 0 ? (
-              <p className='px-3 py-6 text-center text-[12.5px] text-zinc-500'>
+              <p className='px-3 py-6 text-center text-[13px] text-zinc-500'>
                 No languages match “{query.trim()}”
               </p>
             ) : (
@@ -244,7 +263,7 @@ function LanguageSelector({
                     onClick={() => pick(choice.code)}
                     onKeyDown={handleListKey}
                     className={cn(
-                      'flex h-8 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[13px] transition-colors duration-100',
+                      'flex h-9 cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[14px] transition-colors duration-100',
                       index === activeIndex ? 'bg-white/[0.07] text-white' : 'text-zinc-300',
                     )}
                   >
@@ -257,7 +276,7 @@ function LanguageSelector({
                     />
                     <span className='truncate'>{choice.label}</span>
                     {choice.code && choice.code !== 'off' ? (
-                      <span className='ml-auto shrink-0 font-mono text-[10.5px] uppercase text-zinc-500'>
+                      <span className='ml-auto shrink-0 font-mono text-[11px] uppercase text-zinc-500'>
                         {choice.code}
                       </span>
                     ) : null}
@@ -290,42 +309,45 @@ function PlaybackLanguageConfig() {
     );
   };
 
-  if (
+  const needsRetry =
     queryNeedsRetry(globalPlaybackLanguagePreferencesQuery) ||
-    queryNeedsRetry(languageOptionsQuery)
-  ) {
-    return (
-      <RetryBanner
-        message="Couldn't load playback languages."
-        isRetrying={
-          globalPlaybackLanguagePreferencesQuery.isFetching || languageOptionsQuery.isFetching
-        }
-        onRetry={() => {
-          void globalPlaybackLanguagePreferencesQuery.refetch();
-          void languageOptionsQuery.refetch();
-        }}
-      />
-    );
-  }
-
-  const loading =
-    globalPlaybackLanguagePreferences === undefined || languageOptionsQuery.data === undefined;
+    queryNeedsRetry(languageOptionsQuery);
+  const status =
+    globalPlaybackLanguagePreferences === undefined || languageOptionsQuery.data === undefined
+      ? needsRetry
+        ? 'unavailable'
+        : 'loading'
+      : 'ready';
   return (
     <>
+      {needsRetry && (
+        <RetryBanner
+          message="Couldn't load playback languages."
+          isRetrying={
+            globalPlaybackLanguagePreferencesQuery.isFetching || languageOptionsQuery.isFetching
+          }
+          onRetry={() => {
+            void globalPlaybackLanguagePreferencesQuery.refetch();
+            void languageOptionsQuery.refetch();
+          }}
+        />
+      )}
       <LanguageSelector
+        icon={Volume2}
         label='Audio'
         value={globalPlaybackLanguagePreferences?.preferredAudioLanguage ?? ''}
         kind='audio'
         options={options}
-        loading={loading}
+        status={status}
         onChange={(value) => handleLanguageChange('audio', value)}
       />
       <LanguageSelector
+        icon={Captions}
         label='Subtitles'
         value={globalPlaybackLanguagePreferences?.preferredSubtitleLanguage ?? ''}
         kind='subtitle'
         options={options}
-        loading={loading}
+        status={status}
         onChange={(value) => handleLanguageChange('sub', value)}
       />
     </>
@@ -333,6 +355,7 @@ function PlaybackLanguageConfig() {
 }
 
 function AppUiPreferenceToggle({
+  icon,
   appUiPreferences,
   field,
   label,
@@ -346,6 +369,7 @@ function AppUiPreferenceToggle({
     | 'trailerPreviews'
     | 'nightMode'
     | 'autoLoadAddonSubtitles';
+  icon?: LucideIcon;
   label: string;
   description: string;
 }) {
@@ -354,7 +378,7 @@ function AppUiPreferenceToggle({
   const descriptionId = useId();
 
   return (
-    <SettingsRow label={label} description={description} descriptionId={descriptionId}>
+    <SettingsRow icon={icon} label={label} description={description} descriptionId={descriptionId}>
       <SettingsSwitch
         ariaLabel={label}
         ariaDescribedBy={descriptionId}
@@ -423,6 +447,7 @@ export function PlaybackSettings() {
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}
                   field='autoLoadAddonSubtitles'
+                  icon={Download}
                   label='Load addon subtitles automatically'
                   description='Use a matching addon subtitle when the stream has none in your preferred language.'
                 />
@@ -440,10 +465,12 @@ export function PlaybackSettings() {
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}
                   field='nightMode'
+                  icon={Moon}
                   label='Night mode'
                   description='Boost quiet audio and smooth volume changes. Off keeps the original sound.'
                 />
                 <SettingsRow
+                  icon={AudioLines}
                   label='Audio sync'
                   description='Positive delays audio; negative plays it earlier.'
                 >
@@ -454,7 +481,7 @@ export function PlaybackSettings() {
                       updatePreferences={updatePreferences}
                       buttonClassName={STEP_BUTTON_CLASS}
                       resetClassName={cn(STEP_BUTTON_CLASS, 'ml-0.5')}
-                      outputClassName='w-12 shrink-0 text-center text-[13px] font-medium tabular-nums text-zinc-100'
+                      outputClassName='w-14 shrink-0 text-center text-[14px] font-medium tabular-nums text-zinc-100'
                       resetContent={<RotateCcw aria-hidden='true' className='size-3.5' />}
                       resetTitle='Reset audio sync'
                     />
@@ -470,12 +497,14 @@ export function PlaybackSettings() {
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}
                   field='spoilerProtection'
+                  icon={EyeOff}
                   label='Spoiler protection'
                   description='Blur unwatched episode thumbnails and descriptions.'
                 />
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}
                   field='trailerPreviews'
+                  icon={Film}
                   label='Trailer previews'
                   description='Play a muted trailer when hovering a title card.'
                 />
@@ -528,10 +557,12 @@ export function PlaybackSettings() {
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}
                   field='autoPlayNext'
+                  icon={SkipForward}
                   label='Auto-play next episode'
                   description='Start the next episode after the countdown.'
                 />
                 <SecondsSelect
+                  icon={Timer}
                   label='Next episode countdown'
                   description={
                     preferences.autoPlayNext
@@ -544,6 +575,7 @@ export function PlaybackSettings() {
                   onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
                 />
                 <SecondsSelect
+                  icon={KeyboardOff}
                   label='Hide controls after keyboard input'
                   description='After mouse movement, controls hide after 2.4 seconds of inactivity.'
                   seconds={preferences.controlsHideDelayMs / 1000}
@@ -554,6 +586,7 @@ export function PlaybackSettings() {
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}
                   field='autoSkipIntro'
+                  icon={FastForward}
                   label='Auto-skip intros & recaps'
                   description='Skip detected intros and recaps. Outros stay manual.'
                 />

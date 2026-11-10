@@ -724,7 +724,7 @@ impl ResumeStore {
                     .query_row(params![media_type, media_id], |row| row.get(0))
                     .map_err(|error| format!("Failed to read playback resume titles: {error}"))?;
                 if !exists {
-                    dismissal.media_type = media_type.to_string();
+                    dismissal.media_type = media_type;
                     dismissal.media_id = media_id;
                     new_title_dismissals.push(dismissal);
                 }
@@ -857,7 +857,7 @@ const CONTINUE_WATCHING_DISMISSALS_SQL: &str = "
 
 /// A dismissal `d` holds while its title has history and nothing newer than it.
 const EFFECTIVE_DISMISSAL: &str = "
-    IFNULL((
+    typeof(d.dismissed_through) = 'integer' AND IFNULL((
         SELECT MAX(w.last_watched) FROM watch_progress AS w
         WHERE w.media_type = d.media_type AND w.media_id = d.media_id
           AND typeof(w.last_watched) = 'integer'

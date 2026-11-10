@@ -1,5 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, Eraser, Loader2, type LucideIcon, Upload } from 'lucide-react';
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  Bookmark,
+  DatabaseBackup,
+  Download,
+  Eraser,
+  History,
+  Library,
+  List,
+  Loader2,
+  Search,
+  Upload,
+  type LucideIcon,
+} from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -34,9 +46,12 @@ import {
 } from './chrome';
 
 const CLEAR_CONFIRM_TIMEOUT_MS = 8_000;
+// Keep backup and destructive actions exclusive, even after leaving and reopening this section.
+const DATA_MUTATION_KEY = ['settingsDataOperation'] as const;
 
 interface DataCategory {
   key: 'history' | 'library' | 'lists' | 'searches' | 'statuses';
+  icon: LucideIcon;
   label: string;
   description: string;
   count: number | undefined;
@@ -49,30 +64,23 @@ interface DataCategory {
 
 function BackupRestore() {
   const queryClient = useQueryClient();
-  const [exporting, setExporting] = useState(false);
-  const [importing, setImporting] = useState(false);
+  const isWorking = useIsMutating({ mutationKey: DATA_MUTATION_KEY }) > 0;
   const [confirmImport, setConfirmImport] = useState(false);
   const cancelImportRef = useRef<HTMLButtonElement>(null);
-  const mountedRef = useMountedRef();
 
-  const handleExport = async () => {
-    setExporting(true);
-    await flushPendingAppWrites()
-      .then(() => api.exportAppDataToFile())
-      .then((exported) => {
-        if (exported) toast.success('Backup exported successfully');
-      })
-      .catch((err: unknown) => toast.error(`Export failed: ${getErrorMessage(err)}`))
-      .finally(() => {
-        if (mountedRef.current) setExporting(false);
-      });
-  };
+  const exportMutation = useMutation({
+    mutationKey: DATA_MUTATION_KEY,
+    mutationFn: async () => {
+      await flushPendingAppWrites();
+      if (await api.exportAppDataToFile()) toast.success('Backup exported successfully');
+    },
+    onError: (err: unknown) => toast.error(`Export failed: ${getErrorMessage(err)}`),
+  });
 
-  const handleImport = async () => {
-    setImporting(true);
-    setConfirmImport(false);
-    let result: ImportResult | null | undefined;
-    try {
+  const importMutation = useMutation({
+    mutationKey: DATA_MUTATION_KEY,
+    mutationFn: async () => {
+      let result: ImportResult | null | undefined;
       await flushPendingAppWrites();
       try {
         result = await api.importAppDataFromFile();
@@ -111,35 +119,44 @@ function BackupRestore() {
         result.settings_restored && 'settings restored',
       ].filter(Boolean);
       toast.success('Backup imported', { description: summary.join(' · ') });
-    } catch (err: unknown) {
-      toast.error(`Import failed: ${getBackupImportErrorMessage(err)}`);
-    } finally {
-      if (mountedRef.current) setImporting(false);
-    }
-  };
+    },
+    onError: (err: unknown) => toast.error(`Import failed: ${getBackupImportErrorMessage(err)}`),
+  });
 
   return (
     <SettingsBody className='flex flex-wrap items-center justify-between gap-x-5 gap-y-3'>
-      <div className='min-w-0 flex-1 basis-48'>
-        <p className='text-[14px] font-medium text-zinc-100'>Backup file</p>
-        <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>
-          Backups can contain addon keys, so keep them private.
-        </p>
+      <div className='flex min-w-0 flex-1 basis-48 items-center gap-3'>
+        <DatabaseBackup
+          aria-hidden='true'
+          className='size-[18px] shrink-0 text-zinc-400'
+          strokeWidth={1.75}
+        />
+        <div className='min-w-0'>
+          <p className='text-[16px] font-medium text-zinc-100'>Backup file</p>
+          <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>
+            Backups can contain addon keys, so keep them private.
+          </p>
+        </div>
       </div>
       <div className='flex shrink-0 items-center gap-2'>
         <BackupButton
           icon={Download}
-          busy={exporting}
-          disabled={exporting || importing || confirmImport}
-          onClick={() => void handleExport()}
+          busy={exportMutation.isPending}
+          disabled={isWorking}
+          onClick={() => {
+            if (!queryClient.isMutating({ mutationKey: DATA_MUTATION_KEY }))
+              exportMutation.mutate();
+          }}
         >
           Export
         </BackupButton>
         <BackupButton
           icon={Upload}
-          busy={importing}
-          disabled={exporting || importing || confirmImport}
-          onClick={() => setConfirmImport(true)}
+          busy={importMutation.isPending}
+          disabled={isWorking}
+          onClick={() => {
+            if (!isWorking) setConfirmImport(true);
+          }}
         >
           Import
         </BackupButton>
@@ -157,8 +174,13 @@ function BackupRestore() {
         description="Records, addons and per-title language picks merge with your existing data. Preferences, profile and appearance are replaced by the backup's. This cannot be undone."
         cancelProps={{ ref: cancelImportRef }}
         confirmProps={{}}
+        confirmDisabled={isWorking}
         confirmLabel='Import backup'
-        onConfirm={() => void handleImport()}
+        onConfirm={() => {
+          if (queryClient.isMutating({ mutationKey: DATA_MUTATION_KEY })) return;
+          setConfirmImport(false);
+          importMutation.mutate();
+        }}
       />
     </SettingsBody>
   );
@@ -184,7 +206,7 @@ function BackupButton({
       variant='outline'
       onClick={onClick}
       disabled={disabled}
-      className={cn('h-9 gap-2 px-3.5 text-[13px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
+      className={cn('h-10 gap-2 px-3.5 text-[14px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
     >
       {busy ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : <Icon className='h-3.5 w-3.5' />}
       {children}
@@ -194,6 +216,7 @@ function BackupButton({
 
 function DataManager() {
   const queryClient = useQueryClient();
+  const isWorking = useIsMutating({ mutationKey: DATA_MUTATION_KEY }) > 0;
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const mountedRef = useMountedRef();
 
@@ -207,6 +230,7 @@ function DataManager() {
   const recentSearchCount = recentSearchesHydrating ? undefined : recentSearches.length;
 
   const clearMutation = useMutation({
+    mutationKey: DATA_MUTATION_KEY,
     mutationFn: async (cat: DataCategory) => {
       await flushPendingAppWrites();
       await cat.clearFn();
@@ -254,6 +278,7 @@ function DataManager() {
   const categories: DataCategory[] = [
     {
       key: 'history',
+      icon: History,
       label: 'Watch history',
       description: 'Watched titles, resume progress and per-title track and source picks.',
       count: stats?.history_count,
@@ -271,6 +296,7 @@ function DataManager() {
     },
     {
       key: 'library',
+      icon: Library,
       label: 'Library',
       description: 'Saved movies and shows, with their watch statuses.',
       count: stats?.library_count,
@@ -281,6 +307,7 @@ function DataManager() {
     },
     {
       key: 'lists',
+      icon: List,
       label: 'Custom lists',
       description: 'Every custom list and its contents.',
       count: stats?.lists_count,
@@ -290,6 +317,7 @@ function DataManager() {
     },
     {
       key: 'statuses',
+      icon: Bookmark,
       label: 'Watch statuses',
       description: 'Watching, Watched, Plan to Watch and Dropped labels.',
       count: stats?.watch_statuses_count,
@@ -299,6 +327,7 @@ function DataManager() {
     },
     {
       key: 'searches',
+      icon: Search,
       label: 'Recent searches',
       description: 'Queries offered when the search field is empty.',
       count: recentSearchCount,
@@ -329,22 +358,29 @@ function DataManager() {
               data-clear-row={cat.key}
               className={SETTINGS_ROW_CLASS}
             >
-              <div className='min-w-0 flex-1 basis-32'>
-                <span className='flex flex-wrap items-baseline gap-x-2'>
-                  <h3
-                    data-clear-heading
-                    tabIndex={-1}
-                    className='text-[14px] font-medium leading-snug text-zinc-100 focus:outline-hidden'
-                  >
-                    {cat.label}
-                  </h3>
-                  <span className='text-[12px] tabular-nums text-zinc-500'>
-                    {cat.count === undefined
-                      ? '—'
-                      : pluralize(cat.count, cat.unitSingular, cat.unitPlural)}
+              <div className='flex min-w-0 flex-1 basis-32 items-center gap-3'>
+                <cat.icon
+                  aria-hidden='true'
+                  className='size-[18px] shrink-0 text-zinc-400'
+                  strokeWidth={1.75}
+                />
+                <div className='min-w-0'>
+                  <span className='flex flex-wrap items-baseline gap-x-2'>
+                    <h3
+                      data-clear-heading
+                      tabIndex={-1}
+                      className='text-[16px] font-medium leading-snug text-zinc-100 focus:outline-hidden'
+                    >
+                      {cat.label}
+                    </h3>
+                    <span className='text-[12px] tabular-nums text-zinc-500'>
+                      {cat.count === undefined
+                        ? '—'
+                        : pluralize(cat.count, cat.unitSingular, cat.unitPlural)}
+                    </span>
                   </span>
-                </span>
-                <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{cat.description}</p>
+                  <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{cat.description}</p>
+                </div>
               </div>
 
               <div className='flex max-w-full shrink-0 flex-wrap items-center gap-2'>
@@ -357,16 +393,19 @@ function DataManager() {
                       aria-label={`Cancel clearing ${cat.label.toLowerCase()}`}
                       onClick={() => setConfirmKey(null)}
                       disabled={clearMutation.isPending}
-                      className={cn('h-8 px-3 text-[12px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
+                      className={cn('h-9 px-3 text-[13px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
                     >
                       Cancel
                     </Button>
                     <Button
                       size='sm'
                       aria-label={`Clear permanently: ${cat.label.toLowerCase()}`}
-                      onClick={() => clearMutation.mutate(cat)}
-                      disabled={clearMutation.isPending || cat.count === undefined}
-                      className='h-8 rounded-lg border-0 bg-red-500 px-3 text-[12px] font-semibold text-white hover:bg-red-600'
+                      onClick={() => {
+                        if (!queryClient.isMutating({ mutationKey: DATA_MUTATION_KEY }))
+                          clearMutation.mutate(cat);
+                      }}
+                      disabled={isWorking || cat.count === undefined}
+                      className='h-9 rounded-lg border-0 bg-red-500 px-3 text-[13px] font-semibold text-white hover:bg-red-600'
                     >
                       {isPending && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
                       Clear permanently
@@ -379,9 +418,9 @@ function DataManager() {
                     data-clear-arm
                     aria-label={`Clear ${cat.label.toLowerCase()}`}
                     onClick={() => setConfirmKey(cat.key)}
-                    disabled={cat.count === undefined || isEmpty || clearMutation.isPending}
+                    disabled={cat.count === undefined || isEmpty || isWorking}
                     className={cn(
-                      'h-8 rounded-lg px-3 text-[12px] font-medium',
+                      'h-9 rounded-lg px-3 text-[13px] font-medium',
                       isEmpty
                         ? 'cursor-not-allowed opacity-30'
                         : 'border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-300',

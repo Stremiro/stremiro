@@ -568,8 +568,6 @@ export function Player() {
     enabled: isSeriesLike && isExpanded && showEpisodes,
   });
   const episodeProgress = titleWatchProgress?.episodeProgress;
-  const episodeProgressFor = (ep: Episode) =>
-    id ? episodeProgress?.[episodeProgressKey(id, ep.season, ep.episode)] : undefined;
   // The backend's resumable pick — the latest history row can be a finished episode, which must not badge "Resume".
   const episodeResumeTarget = {
     season: titleWatchProgress?.seriesResumeEntry?.absolute_season ?? undefined,
@@ -717,12 +715,23 @@ export function Player() {
   const introEstimateSecs = skipTimes?.intro_estimate_secs;
   const introEstimateKey = `${activeStreamUrl}:${resolvedAbsoluteSeason}:${resolvedAbsoluteEpisode}`;
   const [introEstimateUsedKey, setIntroEstimateUsedKey] = useState<string | null>(null);
+  const [introEstimatePendingKey, setIntroEstimatePendingKey] = useState<string | null>(null);
+  const introEstimatePendingRef = useRef<string | null>(null);
   const introEstimateOffered = useSyncExternalStore(clock.subscribe, () => {
-    if (!introEstimateSecs || introEstimateUsedKey === introEstimateKey || activeSkipSegment)
+    if (
+      !introEstimateSecs ||
+      introEstimateUsedKey === introEstimateKey ||
+      introEstimatePendingKey === introEstimateKey ||
+      activeSkipSegment
+    )
       return false;
     if (!isExpanded || (isPlaying && !showControls)) return false;
     const time = clock.getSnapshot();
-    return time > 0 && time < Math.min(INTRO_ESTIMATE_WINDOW_SECS, duration / 4);
+    return (
+      time > 0 &&
+      time < Math.min(INTRO_ESTIMATE_WINDOW_SECS, duration / 4) &&
+      time + introEstimateSecs < duration
+    );
   });
 
   // The frameless window hides document.title; it still feeds the OS taskbar tooltip.
@@ -1710,12 +1719,24 @@ export function Player() {
         ? {
             label: `Skip intro ~${introEstimateSecs}s`,
             onSkip: () => {
-              setIntroEstimateUsedKey(introEstimateKey);
+              if (introEstimatePendingRef.current === introEstimateKey) return;
+              introEstimatePendingRef.current = introEstimateKey;
+              setIntroEstimatePendingKey(introEstimateKey);
               void seek(
                 Math.min(duration, currentTimeRef.current + introEstimateSecs),
                 'user',
-                () => announce('Skipped intro', 'skip'),
-              ).catch(() => undefined);
+                () => {
+                  setIntroEstimateUsedKey(introEstimateKey);
+                  announce('Skipped intro', 'skip');
+                },
+              )
+                .catch(() => undefined)
+                .finally(() => {
+                  if (introEstimatePendingRef.current === introEstimateKey) {
+                    introEstimatePendingRef.current = null;
+                    setIntroEstimatePendingKey(null);
+                  }
+                });
             },
           }
         : null;
@@ -1736,6 +1757,7 @@ export function Player() {
       !autoSkipIntro ||
       !activeSkipAction ||
       !activeSkipSegment ||
+      activeSkipSegment.uncertain ||
       !hasActiveSkipSegmentStarted ||
       tailSegmentActive
     )
@@ -2152,7 +2174,9 @@ export function Player() {
       selectorEpisode,
       appUiPreferences.spoilerProtection,
       titleWatchProgress?.watchedEpisodeCeiling,
-      episodeProgressFor(selectorEpisode),
+      id
+        ? episodeProgress?.[episodeProgressKey(id, selectorEpisode.season, selectorEpisode.episode)]
+        : undefined,
       isSelectorForCurrentEpisode,
     ),
   );
@@ -2694,7 +2718,8 @@ export function Player() {
           currentSeason={resolvedAbsoluteSeason}
           currentEpisode={resolvedAbsoluteEpisode}
           backdrop={backdrop}
-          episodeProgressFor={episodeProgressFor}
+          mediaId={id}
+          episodeProgress={episodeProgress}
           watchedEpisodeCeiling={titleWatchProgress?.watchedEpisodeCeiling}
           resumeTarget={episodeResumeTarget}
           onEpisodeSelect={(ep) => openStreamSelectorForEpisode(ep, { pauseCurrentPlayback: true })}

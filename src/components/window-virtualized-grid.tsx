@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -53,8 +52,6 @@ export function WindowVirtualizedGrid<T>({
   gap = DEFAULT_GRID_GAP_PX,
   rowGap = gap,
 }: WindowVirtualizedGridProps<T>) {
-  // See WindowVirtualizedStack: compiler memoization would freeze virtual rows.
-  'use no memo';
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [metrics, setMetrics] = useState(() => ({
     columnCount: getColumnCount(typeof window === 'undefined' ? 1280 : window.innerWidth, 0),
@@ -96,7 +93,7 @@ export function WindowVirtualizedGrid<T>({
 
   const columnCount = metrics.columnCount;
   const rowCount = Math.ceil(items.length / columnCount);
-  const rows = useMemo(() => Array.from({ length: rowCount }, (_, index) => index), [rowCount]);
+  const rows = Array.from({ length: rowCount }, (_, index) => index);
   const estimatedItemWidth =
     metrics.containerWidth > 0
       ? (metrics.containerWidth - gap * (columnCount - 1)) / columnCount

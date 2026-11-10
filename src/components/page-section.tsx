@@ -8,7 +8,7 @@ export function PageCard({ children, className, ...props }: ComponentProps<'div'
     <div
       {...props}
       className={cn(
-        'relative min-w-0 overflow-hidden rounded-2xl border border-white/[0.07] bg-linear-to-b from-white/[0.04] to-white/[0.02] shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_30px_-18px_rgba(0,0,0,0.55)] transition-colors duration-300 hover:border-white/[0.1] motion-reduce:transition-none',
+        'relative min-w-0 overflow-hidden rounded-xl border border-white/[0.07] bg-linear-to-b from-white/[0.04] to-white/[0.02] shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_30px_-18px_rgba(0,0,0,0.55)] transition-colors duration-300 motion-reduce:transition-none',
         className,
       )}
     >
@@ -45,14 +45,14 @@ export function PageSectionHeader({
     <div className='flex flex-wrap items-start justify-between gap-3 px-1 pb-3'>
       <div className='flex min-w-0 flex-1 basis-48 items-start gap-3'>
         {Icon ? (
-          <span aria-hidden='true' className={cn(ICON_CHIP_CLASS, 'size-8 shrink-0 rounded-lg')}>
-            <Icon className='size-4 text-(--accent-nav)' strokeWidth={1.75} />
+          <span aria-hidden='true' className={cn(ICON_CHIP_CLASS, 'size-9 shrink-0 rounded-lg')}>
+            <Icon className='size-[17px] text-(--accent-nav)' strokeWidth={1.75} />
           </span>
         ) : null}
         <div className='min-w-0 flex-1 self-center'>
-          <h3 className='text-[15px] font-semibold tracking-tight text-white'>{title}</h3>
+          <h3 className='text-[17px] font-semibold tracking-tight text-white'>{title}</h3>
           {description ? (
-            <p className='mt-1 block max-w-[64ch] text-[13px] leading-normal text-zinc-400'>
+            <p className='mt-1 block max-w-[64ch] text-[14px] leading-normal text-zinc-400'>
               {description}
             </p>
           ) : null}

@@ -225,10 +225,25 @@ fn subtitle_lookup_preserves_scoped_ids_and_appends_only_complete_coordinates() 
 
 #[test]
 fn subtitle_lookup_preserves_composed_ipc_trimming() {
-    for (prefix, suffix, valid) in [
-        (" \t\u{feff}\u{a0}", "\u{2028}\u{feff}\r\n ", true),
-        ("\u{feff}\u{85}", "\u{85}\u{feff}", true),
-        ("\u{85}\u{feff}", "\u{feff}\u{85}", false),
+    for (prefix, suffix, expected) in [
+        (
+            " \t\u{feff}\u{a0}",
+            "\u{2028}\u{feff}\r\n ",
+            ("series", vec!["tt123:1:2"]),
+        ),
+        (
+            "\u{feff}\u{85}",
+            "\u{85}\u{feff}",
+            ("series", vec!["tt123:1:2"]),
+        ),
+        // `\u{feff}` is not Rust whitespace: it survives `trim`, so the wrapped
+        // value passes through as a bounded arbitrary addon type — movie-like,
+        // so no episode coordinates append to the id.
+        (
+            "\u{85}\u{feff}",
+            "\u{feff}\u{85}",
+            ("\u{feff}series\u{feff}", vec!["\u{feff}tt123\u{feff}"]),
+        ),
     ] {
         let media_type = format!("{prefix}SeRiEs{suffix}");
         let id = format!("{prefix}tt123{suffix}");
@@ -242,10 +257,15 @@ fn subtitle_lookup_preserves_composed_ipc_trimming() {
                 Some(2),
             )
         );
-        assert_eq!(actual.is_ok(), valid);
-        if valid {
-            assert_eq!(actual.unwrap(), ("series", vec!["tt123:1:2".to_string()]));
-        }
+        let expected = (
+            expected.0.to_string(),
+            expected
+                .1
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(actual.unwrap(), expected);
     }
 }
 

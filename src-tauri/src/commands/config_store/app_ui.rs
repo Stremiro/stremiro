@@ -326,7 +326,7 @@ pub(crate) fn normalize_subtitle_scale(value: Option<f64>) -> f64 {
 pub(super) fn normalize_last_location(location: Option<String>) -> Option<String> {
     location.filter(|value| {
         if !value.starts_with('/')
-            || value.chars().count() > 512
+            || value.chars().nth(512).is_some()
             || value.chars().any(char::is_control)
             || value.contains("//")
             || value.contains("..")

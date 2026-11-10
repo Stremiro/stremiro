@@ -1,6 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AppWindow, ArrowDownRight, GripHorizontal, Loader2 } from 'lucide-react';
-import { memo, useCallback, useState, useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
 import {
   CHROME_ENTER_TIMING_CLASS,
@@ -56,7 +56,7 @@ interface PlayerPipChromeProps {
   onControlsHover: (hovered: boolean) => void;
 }
 
-export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChromeProps) {
+export function PlayerPipChrome(props: PlayerPipChromeProps) {
   const mountedRef = useMountedRef();
   const { title, episodeLabel, visible, leaving, status, error, ended, onReturn } = props;
   const autoPlaySecondsLeft = useSyncExternalStore(
@@ -66,7 +66,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
   const keymap = usePlayerKeymap();
   const [snapping, setSnapping] = useState(false);
   const [focused, setFocused] = useState(false);
-  useWindowRelease(useCallback(() => setFocused(false), []));
+  useWindowRelease(() => setFocused(false));
   const chromeVisible =
     !leaving && (visible || !props.isPlaying || !!status || !!error || ended || focused);
   const leavingClass = cn(
@@ -286,4 +286,4 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
       </div>
     </>
   );
-});
+}

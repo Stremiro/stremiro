@@ -1,8 +1,8 @@
 import { expect, spyOn, test } from 'bun:test';
 import * as React from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
+import { captureWithClient, restoreSpies } from './render-helpers';
 
 import { usePlayerTrackController } from '../src/hooks/use-player-track-controller';
 import { api } from '../src/lib/api';
@@ -46,6 +46,7 @@ async function withController(
   run: (
     player: ReturnType<typeof usePlayerTrackController>,
     resetLoad: () => void,
+    savedTrack: () => unknown,
   ) => Promise<void>,
 ) {
   const client = new QueryClient();
@@ -56,9 +57,8 @@ async function withController(
   const save = spyOn(api, 'saveSelectedPlaybackLanguagePreference').mockResolvedValue({
     preferences: { preferredSubtitleLanguage: 'en' },
   });
-  const player = Promise.withResolvers<ReturnType<typeof usePlayerTrackController>>();
-  function Fixture() {
-    player.resolve(
+  try {
+    const player = captureWithClient(client, () =>
       usePlayerTrackController({
         mediaId: 'local',
         mediaType: 'movie',
@@ -69,31 +69,26 @@ async function withController(
         resetKey: 'track-transaction',
       }),
     );
-    return null;
-  }
-  try {
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <Fixture />
-      </QueryClientProvider>,
-    );
     // The controller's final effect resets native-load ownership; running its cleanup
     // and setup models a stream replacement without depending on a DOM renderer.
     const resetEffect = effects.at(-1);
     if (!resetEffect) throw new Error('Missing track ownership effect');
     let cleanup = resetEffect();
     try {
-      await run(await player.promise, () => {
-        if (typeof cleanup === 'function') cleanup();
-        cleanup = resetEffect();
-      });
+      await run(
+        player,
+        () => {
+          if (typeof cleanup === 'function') cleanup();
+          cleanup = resetEffect();
+        },
+        () => save.mock.calls.at(-1)?.[1],
+      );
     } finally {
       if (typeof cleanup === 'function') cleanup();
     }
   } finally {
     await flushPendingAppWrites();
-    captureEffects.mockRestore();
-    save.mockRestore();
+    restoreSpies(captureEffects, save);
     client.clear();
   }
 }
@@ -176,5 +171,73 @@ test.each(OPERATIONS)('%s preserves failure reporting and releases its gate', as
     });
   } finally {
     for (const spy of [change, add, notice]) spy.mockRestore();
+  }
+});
+
+test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed addon track', async () => {
+  const embedded = { id: 1, type: 'sub' as const, displayLabel: 'English' };
+  const tracks = spyOn(playerMpv, 'readPlayerTrackList').mockResolvedValue([embedded]);
+  const confirmed = [
+    embedded,
+    { ...embedded, id: 2, external: true, externalFilename: subtitle.url },
+    { ...embedded, id: 3, selected: true, external: true, externalFilename: subtitle.url },
+  ];
+  const add = spyOn(playerMpv, 'addSubtitleTrack').mockResolvedValue(confirmed);
+  const staleTracks =
+    Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+  const write = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+  const change = spyOn(playerMpv, 'changePlayerTrack').mockResolvedValue([embedded]);
+  const notice = spyOn(toast, 'error').mockReturnValue('track-error');
+  try {
+    await withController(async (player, _resetLoad, savedTrack) => {
+      await player.refreshTracks();
+      expect(await player.setTrack('sub', 'no', { persistPreference: true })).toBe(true);
+      expect(change).toHaveBeenCalledWith('sub', 'no');
+      expect(await player.selectAddonSubtitle(subtitle, { automatic: true })).toBe(false);
+      expect(add).not.toHaveBeenCalled();
+      tracks.mockImplementationOnce(() => staleTracks.promise);
+      const refresh = player.refreshTracks();
+      expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+      await flushPendingAppWrites();
+      expect(savedTrack()).toMatchObject({ id: 3 });
+      staleTracks.resolve([embedded]);
+      await refresh;
+      const repeatedSnapshot =
+        Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+      tracks.mockImplementationOnce(() => repeatedSnapshot.promise);
+      const repeatedRefresh = player.refreshTracks();
+      change.mockResolvedValue(confirmed);
+      expect(await player.setTrack('sub', 3)).toBe(true);
+      repeatedSnapshot.resolve([embedded]);
+      expect(await repeatedRefresh).toEqual(confirmed);
+      player.notifyObservedTrackSelection('audio', null);
+      player.notifyObservedTrackSelection('sub', 1);
+      const observedSnapshot =
+        Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+      tracks.mockImplementationOnce(() => observedSnapshot.promise);
+      const observedRefresh = player.refreshTracks();
+      expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 1 });
+      player.notifyObservedTrackSelection('sub', 3);
+      observedSnapshot.resolve([{ ...embedded, selected: true }]);
+      expect(await observedRefresh).toEqual(confirmed);
+      tracks.mockResolvedValueOnce(confirmed);
+      expect(await player.refreshTracks()).toEqual(confirmed);
+      expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 3 });
+      expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+      expect(change).toHaveBeenLastCalledWith('sub', 3);
+      tracks.mockRejectedValueOnce(new Error('Native read unavailable'));
+      expect(await player.refreshTracks()).toEqual(confirmed);
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(await player.cycleTrack('sub')).toBe(3);
+      expect(change).toHaveBeenLastCalledWith('sub', 'cycle');
+      change.mockRejectedValueOnce(new Error('Track unavailable'));
+      expect(await player.setTrack('sub', 2)).toBe(false);
+      expect(notice).toHaveBeenLastCalledWith('Failed to switch track');
+      expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+      expect(change).toHaveBeenLastCalledWith('sub', 3);
+    });
+  } finally {
+    await flushPendingAppWrites();
+    for (const spy of [tracks, add, write, change, notice]) spy.mockRestore();
   }
 });

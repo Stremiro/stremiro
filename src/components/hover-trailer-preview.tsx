@@ -179,6 +179,7 @@ export function HoverTrailerPreview({
       }
     };
     const observer = new IntersectionObserver(([entry]) => {
+      if (!entry) return;
       offscreenRef.current = !entry.isIntersecting;
       syncVisibility();
     });

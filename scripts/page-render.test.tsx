@@ -1,21 +1,28 @@
-import { expect, mock, spyOn, test } from 'bun:test';
+import { expect, mock, test } from 'bun:test';
+import {
+  captureWithClient,
+  markupWithClient,
+  queryClientFixture,
+  restoreSpies,
+  spyFixture,
+} from './render-helpers';
 import type { CloseRequestedEvent, Window as TauriWindow } from '@tauri-apps/api/window';
-import type {
-  ComponentProps,
-  ComponentType,
-  DependencyList,
-  EffectCallback,
-  KeyboardEvent,
-} from 'react';
+import type { ComponentProps, ComponentType, DependencyList, EffectCallback } from 'react';
 import type {
   CalendarSchedule,
   DetailsPrefetchBundle,
   EpisodesWatchedResult,
   MediaDetails,
+  MediaItem,
   StreamSelectorData,
   TitleCredits,
+  UserList,
 } from '../src/lib/api';
-import type { QueryObserverOptions } from '@tanstack/react-query';
+import type {
+  QueryClient,
+  QueryObserver as QueryObserverType,
+  QueryObserverOptions,
+} from '@tanstack/react-query';
 
 // Bun's navigator has no connectivity snapshot; render the pages as online.
 Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
@@ -55,8 +62,7 @@ mock.module('@radix-ui/react-dialog', () => ({
     renderDialogPortal ? children : <DialogPortal {...props}>{children}</DialogPortal>,
 }));
 
-const { QueryClient, QueryClientProvider, QueryObserver, onlineManager } =
-  await import('@tanstack/react-query');
+const { QueryObserver, onlineManager } = await import('@tanstack/react-query');
 const { renderToStaticMarkup } = await import('react-dom/server');
 const router = await import('react-router');
 const { MemoryRouter, Route, Routes } = router;
@@ -78,6 +84,7 @@ const {
   invalidateAddonCapabilityQueries,
   SEARCH_CATALOG_QUERY_KEY,
   streamSelectorQueryKey,
+  STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
   titleWatchProgressQueryKey,
 } = await import('../src/lib/query-invalidation');
 const { pendingDetailsPrefetch, prefetchDetailsRouteData } =
@@ -86,22 +93,24 @@ const { playerStreamRankingOptions } = await import('../src/lib/resolve-player-s
 const { buildStreamRankingCacheKey } = await import('../src/lib/stream-ranking-cache-key');
 
 const { StreamSelector } = await import('../src/components/stream-selector');
+const { StreamFilterToolbar, StreamListFilteredEmptyState } =
+  await import('../src/components/stream-selector-panel');
 const { AddTitlesDialog } = await import('../src/components/list/add-titles-dialog');
 const { SaveToCollectionPanel } = await import('../src/components/list/save-to-collection');
-const { DetailsSections, DetailsSectionTabs, NextAiringChip } =
-  await import('../src/components/details-sections');
+const { DetailsSections, NextAiringChip } = await import('../src/components/details-sections');
 const { useNearViewport } = await import('../src/hooks/use-near-viewport');
 const { useWindowRelease } = await import('../src/hooks/use-window-release');
 const { usePlayerKeymap, useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
-const { useMarkSeasonWatched, useMediaCollectionActions } =
+const { useBulkAddToList, useMarkSeasonWatched, useMediaCollectionActions } =
   await import('../src/hooks/use-media-library');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
 const tauriCore = await import('@tauri-apps/api/core');
 const { createPlaybackClock } = await import('../src/lib/player-clock');
 const { SettingsSelect } = await import('../src/pages/settings/chrome');
+const { SearchInput } = await import('../src/components/ui/search-input');
 const { RetryBanner } = await import('../src/components/retry-banner');
-const { Tabs, TabsTrigger } = await import('../src/components/ui/tabs');
+const { useCollectionSelection } = await import('../src/components/profile-library-controls');
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
 const { usePlayerAutoResolve } = await import('../src/hooks/use-player-auto-resolve');
@@ -109,12 +118,13 @@ const { getPlayerStreamLoadKey, usePlayerMpvLifecycle } =
   await import('../src/hooks/use-player-mpv-lifecycle');
 const mpvEvents = await import('tauri-plugin-libmpv-api');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
-const { usePlayerTrackController } = await import('../src/hooks/use-player-track-controller');
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
 const { useTitleSearch } = await import('../src/hooks/use-item-search');
 const { useSearchPageState } = await import('../src/hooks/use-search-page-state');
 const { searchCatalogQueryOptions } = await import('../src/lib/search-catalog');
 const { usePlayerAddonSubtitles } = await import('../src/hooks/use-player-addon-subtitles');
+const { useStreamSelectorController } = await import('../src/hooks/use-stream-selector-controller');
+const { DEFAULT_FILTERS } = await import('../src/lib/stream-selector-utils');
 const { useHistoryPlayback } = await import('../src/hooks/use-history-playback');
 const { useBrowseHotkeys } = await import('../src/hooks/use-browse-hotkeys');
 const appNavigation = await import('../src/lib/navigation');
@@ -122,6 +132,7 @@ const searchPageState = await import('../src/lib/search-page-state');
 const { claimPlaybackLaunch } = await import('../src/lib/player-navigation');
 const { toast } = await import('sonner');
 const { AppCloseManager } = await import('../src/components/app-close-manager');
+const { Sidebar } = await import('../src/components/sidebar');
 const appUpdater = await import('../src/lib/app-updater');
 const playerSession = await import('../src/lib/player-session');
 const playerPip = await import('../src/lib/player-pip');
@@ -139,13 +150,17 @@ function stubGlobal(name: string, value: unknown): () => void {
   };
 }
 
-// Runs the effects a render captured and collects their cleanups.
 function runEffects(effects: EffectCallback[] | null, cleanups: (() => void)[]) {
   capturedEffects = null;
   for (const effect of effects ?? []) {
     const cleanup = effect();
     if (cleanup) cleanups.push(cleanup);
   }
+}
+
+function cleanupEffects(cleanups: ReturnType<EffectCallback>[]) {
+  capturedEffects = null;
+  for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
 }
 
 // Resolves a hook's return value through `captured` during a server render.
@@ -161,8 +176,17 @@ function captureHook<T>(use: () => T): {
   return { Fixture, captured } as const;
 }
 
+const spyOn = spyFixture();
+function mockInitialState(from: unknown, to: unknown) {
+  const useState = react.useState;
+  return spyOn(react, 'useState').mockImplementation((initial: unknown) =>
+    useState(initial === from ? to : initial),
+  );
+}
+
+const createClient = queryClientFixture();
 const testClient = (retryOnMount = true) =>
-  new QueryClient({
+  createClient({
     defaultOptions: { queries: { retry: false, retryOnMount, gcTime: Infinity } },
   });
 
@@ -211,144 +235,156 @@ test.each([false, true])(
       expect(onPointerOut).not.toHaveBeenCalled();
       doc.dispatchEvent(Object.assign(new Event('pointerout'), { relatedTarget: null }));
       expect(onPointerOut).toHaveBeenCalledTimes(pointerExit ? 1 : 0);
-      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+      cleanupEffects(cleanups);
       cleanups.length = 0;
       appWindow.dispatchEvent(new Event('blur'));
       doc.dispatchEvent(new Event('visibilitychange'));
       expect(release).toHaveBeenCalledTimes(2);
     } finally {
-      capturedEffects = null;
-      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+      cleanupEffects(cleanups);
       restoreWindow();
       restoreDocument();
     }
   },
 );
 
-test.each([false, true])(
-  'Reload keys and tray close respect the player session (active=%s)',
-  async (active) => {
-    const target = new EventTarget();
-    const restoreWindow = stubGlobal('window', target);
-    let closeRequested: Parameters<TauriWindow['onCloseRequested']>[0] | undefined;
-    let quitRequested: (() => void) | undefined;
-    const disposeClose = mock(() => {});
-    const disposeQuit = mock(() => {});
-    const listenersReady = Promise.withResolvers<void>();
-    const appWindow = {
-      onCloseRequested: async (handler: typeof closeRequested) => {
-        closeRequested = handler;
-        await listenersReady.promise;
-        return disposeClose;
-      },
-      listen: async (_event: string, handler: () => void) => {
-        quitRequested = handler;
-        await listenersReady.promise;
-        return disposeQuit;
-      },
-      close: mock(async () => {}),
-    };
-    const trayPause = createSubscribableStore(false);
-    const context: ReturnType<typeof usePlayerSession> = {
-      session: active
-        ? { key: 'test', type: 'movie', id: 'tt1', playerPath: '/player/movie/tt1', state: {} }
-        : null,
-      presentation: 'mini',
-      trayPause,
-      launch: () => {},
-      close: () => {},
-      getMiniPosition: () => null,
-      setMiniPosition: () => {},
-    };
-    const saved = Promise.withResolvers<void>();
-    const spies = [
-      spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true),
-      spyOn(playerSession, 'usePlayerSession').mockReturnValue(context),
-      spyOn(tauriWindow, 'getCurrentWindow').mockReturnValue(appWindow),
-      spyOn(api, 'markFrontendQuitReady').mockResolvedValue(undefined),
-      spyOn(playerPip, 'waitForViewportTransition').mockResolvedValue(undefined),
-      spyOn(playerPip, 'isPlayerPip').mockReturnValue(false),
-    ];
-    const hide = spyOn(api, 'closeMainWindowToTray').mockResolvedValue(true);
-    const pause = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
-    const destroy = spyOn(playerMpv, 'mpvDestroy').mockResolvedValue(undefined);
-    const flush = spyOn(pendingWrites, 'flushPendingAppWrites').mockReturnValue(saved.promise);
-    const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
-    const cleanups: (() => void)[] = [];
-    let closing: void | Promise<void>;
-    try {
-      capturedEffects = [];
-      renderToStaticMarkup(<AppCloseManager />);
-      runEffects(capturedEffects, cleanups);
-      if (active) listenersReady.resolve();
-      await Bun.sleep(0);
-      for (const presentation of ['expanded', 'mini'] as const) {
-        context.presentation = presentation;
-        for (const keys of [
-          { key: 'r', ctrlKey: true },
-          { key: 'R', ctrlKey: true, shiftKey: true },
-          { key: 'F5' },
-          { key: 'F5', ctrlKey: true },
-        ]) {
-          const event = Object.assign(new Event('keydown', { cancelable: true }), keys);
-          target.dispatchEvent(event);
-          expect(event.defaultPrevented).toBe(active);
-        }
+test.each([
+  { active: false, saveFails: false },
+  { active: true, saveFails: false },
+  { active: true, saveFails: true },
+])('Reload keys and tray close respect the player session (%j)', async ({ active, saveFails }) => {
+  const target = new EventTarget();
+  const restoreWindow = stubGlobal('window', target);
+  let closeRequested: Parameters<TauriWindow['onCloseRequested']>[0] | undefined;
+  let quitRequested: (() => void) | undefined;
+  const disposeClose = mock(() => {});
+  const disposeQuit = mock(() => {});
+  const listenersReady = Promise.withResolvers<void>();
+  const appWindow = {
+    onCloseRequested: async (handler: typeof closeRequested) => {
+      closeRequested = handler;
+      await listenersReady.promise;
+      return disposeClose;
+    },
+    listen: async (_event: string, handler: () => void) => {
+      quitRequested = handler;
+      await listenersReady.promise;
+      return disposeQuit;
+    },
+    close: mock(async () => {}),
+  };
+  const trayPause = createSubscribableStore(false);
+  const context: ReturnType<typeof usePlayerSession> = {
+    session: active
+      ? { key: 'test', type: 'movie', id: 'tt1', playerPath: '/player/movie/tt1', state: {} }
+      : null,
+    presentation: 'mini',
+    trayPause,
+    launch: () => {},
+    close: () => {},
+    getMiniPosition: () => null,
+    setMiniPosition: () => {},
+  };
+  const saved = Promise.withResolvers<void>();
+  const spies = [
+    spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true),
+    spyOn(playerSession, 'usePlayerSession').mockReturnValue(context),
+    spyOn(tauriWindow, 'getCurrentWindow').mockReturnValue(appWindow),
+    spyOn(api, 'markFrontendQuitReady').mockResolvedValue(undefined),
+    spyOn(playerPip, 'waitForViewportTransition').mockResolvedValue(undefined),
+    spyOn(playerPip, 'isPlayerPip').mockReturnValue(false),
+  ];
+  const hide = spyOn(api, 'closeMainWindowToTray').mockResolvedValue(true);
+  const pause = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+  const destroy = spyOn(playerMpv, 'mpvDestroy').mockResolvedValue(undefined);
+  const flush = spyOn(pendingWrites, 'flushPendingAppWrites').mockReturnValue(saved.promise);
+  const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
+  const cleanups: (() => void)[] = [];
+  let closing: void | Promise<void>;
+  try {
+    capturedEffects = [];
+    renderToStaticMarkup(<AppCloseManager />);
+    runEffects(capturedEffects, cleanups);
+    if (active) listenersReady.resolve();
+    await Bun.sleep(0);
+    for (const presentation of ['expanded', 'mini'] as const) {
+      context.presentation = presentation;
+      for (const keys of [
+        { key: 'r', ctrlKey: true },
+        { key: 'R', ctrlKey: true, shiftKey: true },
+        { key: 'F5' },
+        { key: 'F5', ctrlKey: true },
+      ]) {
+        const event = Object.assign(new Event('keydown', { cancelable: true }), keys);
+        target.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(active);
       }
-      const ordinaryKey = Object.assign(new Event('keydown', { cancelable: true }), { key: 'r' });
-      target.dispatchEvent(ordinaryKey);
-      expect(ordinaryKey.defaultPrevented).toBe(false);
-      if (!active) return;
+    }
+    const ordinaryKey = Object.assign(new Event('keydown', { cancelable: true }), { key: 'r' });
+    target.dispatchEvent(ordinaryKey);
+    expect(ordinaryKey.defaultPrevented).toBe(false);
+    if (!active) return;
 
-      const veto = mock(() => {});
-      if (!closeRequested) throw new Error('Missing close listener');
-      closing = closeRequested({ preventDefault: veto } as CloseRequestedEvent);
-      await Bun.sleep(0);
-      expect(hide).toHaveBeenCalledTimes(1);
-      expect(veto).toHaveBeenCalledTimes(1);
-      expect(trayPause.getSnapshot()).toBe(true);
-      expect(pause).toHaveBeenCalledWith('pause', true);
-      expect(flush).toHaveBeenCalledTimes(1);
+    const veto = mock(() => {});
+    if (!closeRequested) throw new Error('Missing close listener');
+    closing = closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+    await Bun.sleep(0);
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(veto).toHaveBeenCalledTimes(1);
+    expect(trayPause.getSnapshot()).toBe(true);
+    expect(pause).toHaveBeenCalledWith('pause', true);
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+    const repeatVeto = mock(() => {});
+    await closeRequested({ preventDefault: repeatVeto } as CloseRequestedEvent);
+    expect(repeatVeto).toHaveBeenCalledTimes(1);
+    expect(flush).toHaveBeenCalledTimes(1);
+    quitRequested?.();
+    expect(appWindow.close).not.toHaveBeenCalled();
+    if (saveFails) saved.reject(new Error('Disk unavailable'));
+    else saved.resolve();
+    await closing;
+
+    if (saveFails) {
+      expect(appWindow.close).not.toHaveBeenCalled();
       expect(destroy).not.toHaveBeenCalled();
-      const repeatVeto = mock(() => {});
-      await closeRequested({ preventDefault: repeatVeto } as CloseRequestedEvent);
-      expect(repeatVeto).toHaveBeenCalledTimes(1);
-      expect(flush).toHaveBeenCalledTimes(1);
-      saved.resolve();
-      await closing;
-
-      quitRequested?.();
-      expect(appWindow.close).toHaveBeenCalledTimes(1);
-      await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
-      expect(hide).toHaveBeenCalledTimes(1);
-      expect(destroy).toHaveBeenCalledTimes(1);
-      expect(veto).toHaveBeenCalledTimes(1);
-
-      flush.mockRejectedValue(new Error('Disk unavailable'));
-      await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
-      expect(veto).toHaveBeenCalledTimes(2);
       expect(notice).toHaveBeenCalledWith('Could not save playback progress.', {
         description: 'Close again to quit anyway.',
       });
+      flush.mockResolvedValue(undefined);
       await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
-      expect(veto).toHaveBeenCalledTimes(2);
-    } finally {
-      saved.resolve();
-      await closing;
-      capturedEffects = null;
-      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
-      for (const spy of [...spies, hide, pause, destroy, flush, notice]) spy.mockRestore();
-      restoreWindow();
-      listenersReady.resolve();
-      await Bun.sleep(0);
-      expect(disposeClose).toHaveBeenCalledTimes(1);
-      expect(disposeQuit).toHaveBeenCalledTimes(1);
-      const reload = Object.assign(new Event('keydown', { cancelable: true }), { key: 'F5' });
-      target.dispatchEvent(reload);
-      expect(reload.defaultPrevented).toBe(false);
+      expect(destroy).toHaveBeenCalledTimes(1);
+      return;
     }
-  },
-);
+    expect(appWindow.close).toHaveBeenCalledTimes(1);
+    await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(veto).toHaveBeenCalledTimes(1);
+
+    flush.mockRejectedValue(new Error('Disk unavailable'));
+    await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+    expect(veto).toHaveBeenCalledTimes(2);
+    expect(notice).toHaveBeenCalledWith('Could not save playback progress.', {
+      description: 'Close again to quit anyway.',
+    });
+    await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+    expect(veto).toHaveBeenCalledTimes(2);
+  } finally {
+    saved.resolve();
+    await closing;
+    cleanupEffects(cleanups);
+    restoreSpies(...spies, hide, pause, destroy, flush, notice);
+    restoreWindow();
+    listenersReady.resolve();
+    await Bun.sleep(0);
+    expect(disposeClose).toHaveBeenCalledTimes(1);
+    expect(disposeQuit).toHaveBeenCalledTimes(1);
+    const reload = Object.assign(new Event('keydown', { cancelable: true }), { key: 'F5' });
+    target.dispatchEvent(reload);
+    expect(reload.defaultPrevented).toBe(false);
+  }
+});
 
 function BrowseHotkeysFixture() {
   useBrowseHotkeys();
@@ -504,32 +540,27 @@ test('Browse hotkeys map Alt sections/history and yield to owned contexts', asyn
     expect(fireKey({ key: 'escape' })).toBe(false);
     tooltipOpen = false;
   } finally {
-    capturedEffects = null;
-    for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
-    for (const spy of [navigateTo, back, forward, searchPath]) spy.mockRestore();
+    cleanupEffects(cleanups);
+    restoreSpies(navigateTo, back, forward, searchPath);
     for (const restore of restores) restore();
   }
 });
 
+const caseInsensitiveCatalogOptions = (query: string, genre: string) =>
+  searchCatalogQueryOptions({ query, genre, type: 'all', feed: 'popular' }, 2026);
+
 test('Case-only title and genre edits share the catalog cache', async () => {
-  const client = new QueryClient();
+  const client = createClient();
   const fetch = spyOn(api, 'querySearchCatalogPage').mockResolvedValue({
     items: [],
     exhausted: true,
     partial: false,
     continuation: { seenKeys: [] },
   });
-  try {
-    const options = (query: string, genre: string) =>
-      searchCatalogQueryOptions({ query, genre, type: 'all', feed: 'popular' }, 2026);
-    await client.prefetchInfiniteQuery(options('Dune', 'Drama'));
-    await client.prefetchInfiniteQuery(options('DUNE', 'DRAMA'));
-    await client.prefetchInfiniteQuery(options('dune', 'drama'));
-    expect(fetch).toHaveBeenCalledTimes(1);
-  } finally {
-    fetch.mockRestore();
-    client.clear();
-  }
+  await client.prefetchInfiniteQuery(caseInsensitiveCatalogOptions('Dune', 'Drama'));
+  await client.prefetchInfiniteQuery(caseInsensitiveCatalogOptions('DUNE', 'DRAMA'));
+  await client.prefetchInfiniteQuery(caseInsensitiveCatalogOptions('dune', 'drama'));
+  expect(fetch).toHaveBeenCalledTimes(1);
 });
 
 test.each([
@@ -545,7 +576,7 @@ test.each([
   async (action, draft, composing, expectedQuery) => {
     const params = new URLSearchParams('q=du&type=movie&genre=Action&feed=featured');
     const commit = mock((_next?: unknown) => {});
-    const readParams = spyOn(router, 'useSearchParams').mockReturnValue([params, commit]);
+    spyOn(router, 'useSearchParams').mockReturnValue([params, commit]);
     const controller = Promise.withResolvers<ReturnType<typeof useSearchPageState>>();
     function FilterFixture() {
       const current = useSearchPageState();
@@ -554,46 +585,42 @@ test.each([
       else controller.resolve(current);
       return null;
     }
-    try {
-      renderToStaticMarkup(
-        <MemoryRouter>
-          <FilterFixture />
-        </MemoryRouter>,
-      );
-      const state = await controller.promise;
-      switch (action) {
-        case 'genre':
-          state.handleGenreChange('Crime');
-          break;
-        case 'feed':
-          state.handleFeedChange('new');
-          break;
-        case 'clear':
-          state.clearGenre();
-          break;
-        case 'reset':
-          state.resetFilters();
-          break;
-        case 'type':
-          state.handleTypeChange('series');
-          break;
-      }
-      expect(commit).toHaveBeenCalledTimes(1);
-      const next = commit.mock.calls[0]?.[0] as URLSearchParams;
-      expect(next.get('q')).toBe(expectedQuery);
-      if (action === 'genre') expect(next.get('genre')).toBe('Crime');
-      if (action === 'feed') expect(next.get('feed')).toBe('new');
-      if (action === 'clear' || action === 'reset') expect(next.has('genre')).toBe(false);
-      if (action === 'reset') expect(next.has('type') || next.has('feed')).toBe(false);
-      if (action === 'type') expect(next.get('type')).toBe('series');
-    } finally {
-      readParams.mockRestore();
+    renderToStaticMarkup(
+      <MemoryRouter>
+        <FilterFixture />
+      </MemoryRouter>,
+    );
+    const state = await controller.promise;
+    switch (action) {
+      case 'genre':
+        state.handleGenreChange('Crime');
+        break;
+      case 'feed':
+        state.handleFeedChange('new');
+        break;
+      case 'clear':
+        state.clearGenre();
+        break;
+      case 'reset':
+        state.resetFilters();
+        break;
+      case 'type':
+        state.handleTypeChange('series');
+        break;
     }
+    expect(commit).toHaveBeenCalledTimes(1);
+    const next = commit.mock.calls[0]?.[0] as URLSearchParams;
+    expect(next.get('q')).toBe(expectedQuery);
+    if (action === 'genre') expect(next.get('genre')).toBe('Crime');
+    if (action === 'feed') expect(next.get('feed')).toBe('new');
+    if (action === 'clear' || action === 'reset') expect(next.has('genre')).toBe(false);
+    if (action === 'reset') expect(next.has('type') || next.has('feed')).toBe(false);
+    if (action === 'type') expect(next.get('type')).toBe('series');
   },
 );
 
 test('Reopening addon subtitles rechecks Rust before automatic selection', async () => {
-  const client = new QueryClient();
+  const client = createClient();
   const key = ['addonSubtitles', 'movie', 'tt1', null, null] as const;
   const cached = [
     {
@@ -615,14 +642,10 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
   }
   let unsubscribe: (() => void) | undefined;
   const cleanups: (() => void)[] = [];
-  const view = (
-    <QueryClientProvider client={client}>
-      <Subtitles />
-    </QueryClientProvider>
-  );
+  const render = () => markupWithClient(client, <Subtitles />);
   try {
     capturedEffects = [];
-    renderToStaticMarkup(view);
+    render();
     runEffects(capturedEffects, cleanups);
     expect(matchLanguage).not.toHaveBeenCalled();
     const query = client.getQueryCache().find({ queryKey: key })!;
@@ -632,7 +655,7 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     expect(fetch).toHaveBeenCalledTimes(1);
     menuOpen = true;
     capturedEffects = [];
-    renderToStaticMarkup(view);
+    render();
     runEffects(capturedEffects, cleanups);
     await query.promise;
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -641,21 +664,19 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     client.setDefaultOptions({ queries: { refetchOnMount: false } });
     client.setQueryData(key, cached);
     capturedEffects = [];
-    renderToStaticMarkup(view);
+    render();
     runEffects(capturedEffects, cleanups);
     expect(matchLanguage).toHaveBeenCalledTimes(1);
   } finally {
     capturedEffects = null;
     cleanups.forEach((cleanup) => cleanup());
     unsubscribe?.();
-    client.clear();
-    fetch.mockRestore();
-    matchLanguage.mockRestore();
+    restoreSpies(fetch, matchLanguage);
   }
 });
 
 test('Subtitle results stay available while mounted but leave the cache after playback', async () => {
-  const client = new QueryClient({ defaultOptions: { queries: { gcTime: 30 * 60_000 } } });
+  const client = createClient({ defaultOptions: { queries: { gcTime: 30 * 60_000 } } });
   const fetch = spyOn(api, 'getAddonSubtitles').mockResolvedValue([]);
   let episode = 1;
   const releases: (() => void)[] = [];
@@ -672,11 +693,7 @@ test('Subtitle results stay available while mounted but leave the cache after pl
   }
   try {
     for (; episode <= 24; episode++) {
-      renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <Fixture />
-        </QueryClientProvider>,
-      );
+      markupWithClient(client, <Fixture />);
       const key = ['addonSubtitles', 'series', 'tt1', 1, episode];
       const query = client.getQueryCache().find({ queryKey: key })!;
       const observer = new QueryObserver(client, query.options);
@@ -694,7 +711,6 @@ test('Subtitle results stay available while mounted but leave the cache after pl
     expect(client.getQueryCache().getAll()).toHaveLength(0);
   } finally {
     releases.forEach((release) => release());
-    client.clear();
     fetch.mockRestore();
   }
 });
@@ -706,25 +722,19 @@ test.each([
 ])(
   'Subtitle selections serialize rapid input and fence failures across stream resets (%j)',
   async ({ automatic, cancelled }) => {
-    const client = new QueryClient();
+    const client = createClient();
     const native = Promise.withResolvers<boolean>();
     const replacement = Promise.withResolvers<boolean>();
     const select = mock(() => native.promise);
-    const { Fixture, captured: controller } = captureHook(() =>
-      usePlayerAddonSubtitles(addonSubtitleArgs({ selectAddonSubtitle: select })),
-    );
     const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
     const cleanups: (() => void)[] = [];
     try {
       capturedEffects = [];
-      renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <Fixture />
-        </QueryClientProvider>,
+      const hook = captureWithClient(client, () =>
+        usePlayerAddonSubtitles(addonSubtitleArgs({ selectAddonSubtitle: select })),
       );
       const effects = capturedEffects;
       runEffects(effects, cleanups);
-      const hook = await controller.promise;
       const subtitle = {
         id: 'sub',
         selectionKey: 'sub',
@@ -765,7 +775,6 @@ test.each([
       capturedEffects = null;
       cleanups.forEach((cleanup) => cleanup());
       notice.mockRestore();
-      client.clear();
     }
   },
 );
@@ -779,7 +788,7 @@ test.each([
   const restoreWindow = stubGlobal('window', {
     location: { pathname: '/profile', search: '' },
   });
-  const client = new QueryClient();
+  const client = createClient();
   const lookup = Promise.withResolvers<Awaited<ReturnType<typeof api.getNextEpisodeRow>>>();
   const next = spyOn(api, 'getNextEpisodeRow').mockImplementation(() => lookup.promise);
   const info = spyOn(toast, 'info').mockImplementation(() => 'notice');
@@ -800,14 +809,11 @@ test.each([
     ),
   );
   try {
-    renderToStaticMarkup(
-      <MemoryRouter>
-        <QueryClientProvider client={client}>
-          <PlayerSessionProvider>
-            <History />
-          </PlayerSessionProvider>
-        </QueryClientProvider>
-      </MemoryRouter>,
+    markupWithClient(
+      client,
+      <PlayerSessionProvider>
+        <History />
+      </PlayerSessionProvider>,
     );
     const playback = await controller.promise;
     const pending = playback.playNext();
@@ -820,8 +826,7 @@ test.each([
     expect(error).toHaveBeenCalledTimes(!cancelled && failed ? 1 : 0);
   } finally {
     lookup.resolve(null);
-    for (const spy of [next, info, error]) spy.mockRestore();
-    client.clear();
+    restoreSpies(next, info, error);
     restoreWindow();
   }
 });
@@ -833,27 +838,19 @@ test.each([
 ])(
   'Collection search retains distinct snapshots only while searching (%j)',
   ({ query, enabled, expectedQueries }) => {
-    const client = new QueryClient();
+    const client = createClient();
     function Collection({ revision }: { revision: number }) {
       const items = [{ title: `Title ${revision}` }];
       const { filteredItems } = useTitleSearch(items, query, enabled);
       expect(filteredItems).toBe(items);
       return null;
     }
-    try {
-      for (let revision = 0; revision < 30; revision++) {
-        renderToStaticMarkup(
-          <QueryClientProvider client={client}>
-            <Collection revision={revision} />
-          </QueryClientProvider>,
-        );
-      }
-      expect(client.getQueryCache().findAll({ queryKey: ['title-search'] })).toHaveLength(
-        expectedQueries,
-      );
-    } finally {
-      client.clear();
+    for (let revision = 0; revision < 30; revision++) {
+      markupWithClient(client, <Collection revision={revision} />);
     }
+    expect(client.getQueryCache().findAll({ queryKey: ['title-search'] })).toHaveLength(
+      expectedQueries,
+    );
   },
 );
 
@@ -891,8 +888,7 @@ test('Volume and unmute share one native batch with no delayed unmute after a ne
   } finally {
     pending.resolve([]);
     await Promise.allSettled(writes);
-    batch.mockRestore();
-    single.mockRestore();
+    restoreSpies(batch, single);
     restoreWindow();
   }
 });
@@ -900,121 +896,19 @@ test('Volume and unmute share one native batch with no delayed unmute after a ne
 test('Track changes send a native intent and return its confirmed snapshot', async () => {
   const snapshot = [{ id: 2, type: 'audio' as const, displayLabel: 'English', selected: true }];
   const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue(snapshot);
-  try {
-    const changes = [
-      ['audio', 2],
-      ['sub', 'no'],
-      ['sub', 'cycle'],
-    ] as const;
-    await Promise.all(
-      changes.map(async ([kind, target]) => {
-        expect(await playerMpv.changePlayerTrack(kind, target)).toBe(snapshot);
-        expect(invoke).toHaveBeenCalledWith('player_mpv_change_track', { kind, target });
-      }),
-    );
-    invoke.mockRejectedValueOnce(new Error('Track unavailable'));
-    await expect(playerMpv.changePlayerTrack('audio', 3)).rejects.toThrow('Track unavailable');
-  } finally {
-    invoke.mockRestore();
-  }
-});
-
-test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed addon track', async () => {
-  const client = new QueryClient();
-  const embedded = { id: 1, type: 'sub' as const, displayLabel: 'English' };
-  const subtitle = {
-    id: 'external',
-    selectionKey: 'external',
-    url: 'https://example.com/sub.srt',
-    lang: 'en',
-    label: 'English',
-    mpvTitle: 'English',
-    sourceId: 'addon',
-    sourceName: 'Addon',
-  };
-  const tracks = spyOn(playerMpv, 'readPlayerTrackList').mockResolvedValue([embedded]);
-  const confirmed = [
-    embedded,
-    { ...embedded, id: 2, external: true, externalFilename: subtitle.url },
-    { ...embedded, id: 3, selected: true, external: true, externalFilename: subtitle.url },
-  ];
-  const add = spyOn(playerMpv, 'addSubtitleTrack').mockResolvedValue(confirmed);
-  const staleTracks =
-    Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
-  const write = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
-  const change = spyOn(playerMpv, 'changePlayerTrack').mockResolvedValue([embedded]);
-  const notice = spyOn(toast, 'error').mockReturnValue('track-error');
-  const save = spyOn(api, 'saveSelectedPlaybackLanguagePreference').mockResolvedValue({
-    preferences: { preferredSubtitleLanguage: 'off' },
-  });
-  const { Fixture: TrackFixture, captured: controller } = captureHook(() =>
-    usePlayerTrackController({
-      mediaId: 'local',
-      mediaType: 'movie',
-      activeStreamUrl: 'https://example.com/video',
-      hasPlaybackStarted: true,
-      isLoading: false,
-      isResolving: false,
-      resetKey: 'manual-off',
+  const changes = [
+    ['audio', 2],
+    ['sub', 'no'],
+    ['sub', 'cycle'],
+  ] as const;
+  await Promise.all(
+    changes.map(async ([kind, target]) => {
+      expect(await playerMpv.changePlayerTrack(kind, target)).toBe(snapshot);
+      expect(invoke).toHaveBeenCalledWith('player_mpv_change_track', { kind, target });
     }),
   );
-  try {
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <TrackFixture />
-      </QueryClientProvider>,
-    );
-    const player = await controller.promise;
-    await player.refreshTracks();
-    expect(await player.setTrack('sub', 'no', { persistPreference: true })).toBe(true);
-    expect(change).toHaveBeenCalledWith('sub', 'no');
-    expect(await player.selectAddonSubtitle(subtitle, { automatic: true })).toBe(false);
-    expect(add).not.toHaveBeenCalled();
-    tracks.mockImplementationOnce(() => staleTracks.promise);
-    const refresh = player.refreshTracks();
-    expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
-    await flushPendingAppWrites();
-    expect(save.mock.calls.at(-1)?.[1]?.id).toBe(3);
-    staleTracks.resolve([embedded]);
-    await refresh;
-    const repeatedSnapshot =
-      Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
-    tracks.mockImplementationOnce(() => repeatedSnapshot.promise);
-    const repeatedRefresh = player.refreshTracks();
-    change.mockResolvedValue(confirmed);
-    expect(await player.setTrack('sub', 3)).toBe(true);
-    repeatedSnapshot.resolve([embedded]);
-    expect(await repeatedRefresh).toEqual(confirmed);
-    player.notifyObservedTrackSelection('audio', null);
-    player.notifyObservedTrackSelection('sub', 1);
-    const observedSnapshot =
-      Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
-    tracks.mockImplementationOnce(() => observedSnapshot.promise);
-    const observedRefresh = player.refreshTracks();
-    expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 1 });
-    player.notifyObservedTrackSelection('sub', 3);
-    observedSnapshot.resolve([{ ...embedded, selected: true }]);
-    expect(await observedRefresh).toEqual(confirmed);
-    tracks.mockResolvedValueOnce(confirmed);
-    expect(await player.refreshTracks()).toEqual(confirmed);
-    expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 3 });
-    expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
-    expect(change).toHaveBeenLastCalledWith('sub', 3);
-    tracks.mockRejectedValueOnce(new Error('Native read unavailable'));
-    expect(await player.refreshTracks()).toEqual(confirmed);
-    expect(add).toHaveBeenCalledTimes(1);
-    expect(await player.cycleTrack('sub')).toBe(3);
-    expect(change).toHaveBeenLastCalledWith('sub', 'cycle');
-    change.mockRejectedValueOnce(new Error('Track unavailable'));
-    expect(await player.setTrack('sub', 2)).toBe(false);
-    expect(notice).toHaveBeenLastCalledWith('Failed to switch track');
-    expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
-    expect(change).toHaveBeenLastCalledWith('sub', 3);
-  } finally {
-    await flushPendingAppWrites();
-    for (const spy of [tracks, add, write, change, save, notice]) spy.mockRestore();
-    client.clear();
-  }
+  invoke.mockRejectedValueOnce(new Error('Track unavailable'));
+  await expect(playerMpv.changePlayerTrack('audio', 3)).rejects.toThrow('Track unavailable');
 });
 
 test.each([
@@ -1024,7 +918,7 @@ test.each([
 ] as const)(
   'Seek failure verdict includes IPC wait time (%s ms)',
   async (elapsed, failed, latched) => {
-    const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue({
+    spyOn(tauriCore, 'invoke').mockResolvedValue({
       timePos: 120,
       bufferedAhead: 0,
       nearCompletion: true,
@@ -1032,21 +926,16 @@ test.each([
       seekFailureWindowSecs: 0.25,
     });
     const now = spyOn(performance, 'now').mockReturnValue(0);
-    try {
-      const pending = playerMpv.readPlaybackPositionProbe(120, {
-        seconds: 117,
-        startedAt: 0,
-        failed: latched,
-      });
-      now.mockReturnValue(elapsed);
-      const probe = await pending;
-      expect(probe.seekFailed).toBe(failed);
-      expect(probe.nearCompletion).toBe(!failed);
-      expect(probe.nextEpisodePrefetchDue).toBe(!failed);
-    } finally {
-      invoke.mockRestore();
-      now.mockRestore();
-    }
+    const pending = playerMpv.readPlaybackPositionProbe(120, {
+      seconds: 117,
+      startedAt: 0,
+      failed: latched,
+    });
+    now.mockReturnValue(elapsed);
+    const probe = await pending;
+    expect(probe.seekFailed).toBe(failed);
+    expect(probe.nearCompletion).toBe(!failed);
+    expect(probe.nextEpisodePrefetchDue).toBe(!failed);
   },
 );
 
@@ -1054,6 +943,7 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
   const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
   const nativeCommand = spyOn(playerMpv, 'mpvCommand').mockResolvedValue();
   const onUserSeek = mock(() => {});
+  const onConfirmed = mock(() => {});
   const clock = createPlaybackClock();
   clock.publish(900);
   const durationRef = { current: 0 };
@@ -1067,48 +957,53 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
       triggerOsd: () => {},
     }),
   );
-  try {
-    renderToStaticMarkup(<SeekFixture />);
-    const seeking = await controller.promise;
-    const ignoredSeeks = (
-      [
-        [false, 3600],
-        [true, 0],
-        [false, 0],
-      ] as const
-    ).flatMap(([initialized, duration]) => {
-      mpvInitializedRef.current = initialized;
-      durationRef.current = duration;
-      return [seeking.seek(910), seeking.seekRelative(10)];
-    });
-    await Promise.all(ignoredSeeks);
-    expect(onUserSeek).not.toHaveBeenCalled();
-    expect(nativeSeek).not.toHaveBeenCalled();
-    expect(nativeCommand).not.toHaveBeenCalled();
-    expect(clock.getSnapshot()).toBe(900);
-    expect(seeking.isSeekPending()).toBe(false);
-    expect(seeking.getSeekTarget()).toBeNull();
-    mpvInitializedRef.current = true;
-    durationRef.current = 3600;
-    await Promise.all([
-      seeking.seekRelative(10),
-      seeking.seekRelative(10),
-      seeking.seekRelative(-10),
-    ]);
-    expect(nativeSeek.mock.calls).toEqual([[910], [920], [910]]);
-    expect(nativeCommand).not.toHaveBeenCalled();
-    await seeking.seek(950);
-    expect(nativeSeek).toHaveBeenCalledWith(950);
-    expect(onUserSeek).toHaveBeenCalledTimes(4);
-    expect(clock.getSnapshot()).toBe(950);
-    expect(seeking.observeTimeUpdate(950, performance.now())).toBe(false);
-    expect(seeking.isSeekPending()).toBe(false);
-    expect(seeking.getSeekTarget()?.seconds).toBe(950);
-    seeking.confirmSeek();
-    expect(seeking.getSeekTarget()).toBeNull();
-  } finally {
-    for (const spy of [nativeSeek, nativeCommand]) spy.mockRestore();
-  }
+  renderToStaticMarkup(<SeekFixture />);
+  const seeking = await controller.promise;
+  const ignoredSeeks = (
+    [
+      [false, 3600],
+      [true, 0],
+      [false, 0],
+    ] as const
+  ).flatMap(([initialized, duration]) => {
+    mpvInitializedRef.current = initialized;
+    durationRef.current = duration;
+    return [seeking.seek(910, 'user', onConfirmed), seeking.seekRelative(10)];
+  });
+  await Promise.all(ignoredSeeks);
+  expect(onUserSeek).not.toHaveBeenCalled();
+  expect(nativeSeek).not.toHaveBeenCalled();
+  expect(nativeCommand).not.toHaveBeenCalled();
+  expect(onConfirmed).not.toHaveBeenCalled();
+  expect(clock.getSnapshot()).toBe(900);
+  expect(seeking.isSeekPending()).toBe(false);
+  expect(seeking.getSeekTarget()).toBeNull();
+  mpvInitializedRef.current = true;
+  durationRef.current = 3600;
+  await Promise.all([
+    seeking.seekRelative(10),
+    seeking.seekRelative(10),
+    seeking.seekRelative(-10),
+  ]);
+  expect(nativeSeek.mock.calls).toEqual([[910], [920], [910]]);
+  expect(nativeCommand).not.toHaveBeenCalled();
+  await seeking.seek(950, 'user', onConfirmed);
+  expect(onConfirmed).toHaveBeenCalledTimes(1);
+  expect(nativeSeek).toHaveBeenCalledWith(950);
+  expect(onUserSeek).toHaveBeenCalledTimes(4);
+  expect(clock.getSnapshot()).toBe(950);
+  expect(seeking.observeTimeUpdate(950, performance.now())).toBe(false);
+  expect(seeking.isSeekPending()).toBe(false);
+  expect(seeking.getSeekTarget()?.seconds).toBe(950);
+  seeking.confirmSeek();
+  expect(seeking.getSeekTarget()).toBeNull();
+  nativeSeek.mockRejectedValueOnce(new Error('Seek rejected'));
+  await expect(seeking.seek(1000, 'user', onConfirmed)).rejects.toThrow('Seek rejected');
+  expect(onConfirmed).toHaveBeenCalledTimes(1);
+  expect(clock.getSnapshot()).toBe(950);
+  expect(seeking.isSeekPending()).toBe(false);
+  await seeking.seek(1000, 'user', onConfirmed);
+  expect(onConfirmed).toHaveBeenCalledTimes(2);
 });
 
 test('manual stream retry bypasses the cached URL and rejects a late resolve winner', async () => {
@@ -1179,11 +1074,9 @@ test('manual stream retry bypasses the cached URL and rejects a late resolve win
     expect(invoke.mock.calls.filter(([name]) => name === 'resolve_best_stream')).toHaveLength(3);
   } finally {
     late.resolve(initial);
-    capturedEffects = null;
-    for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+    cleanupEffects(cleanups);
     await Bun.sleep(0);
-    runtime.mockRestore();
-    invoke.mockRestore();
+    restoreSpies(runtime, invoke);
   }
 });
 
@@ -1199,7 +1092,7 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
     'document',
     Object.assign(new EventTarget(), { hidden: false }),
   );
-  const client = new QueryClient();
+  const client = createClient();
   client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
   let emit: Parameters<typeof mpvEvents.listenEvents>[0] | undefined;
   const listen = spyOn(mpvEvents, 'listenEvents').mockImplementation(async (callback) => {
@@ -1320,14 +1213,11 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
     emit?.({ event: 'property-change', name, data });
   try {
     capturedEffects = effects;
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <MemoryRouter>
-          <PlayerSessionProvider>
-            <Fixture />
-          </PlayerSessionProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
+    markupWithClient(
+      client,
+      <PlayerSessionProvider>
+        <Fixture />
+      </PlayerSessionProvider>,
     );
     capturedEffects = null;
     const seeking = await controller.promise;
@@ -1392,7 +1282,7 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
     for (const cleanup of cleanups.toReversed()) if (typeof cleanup === 'function') cleanup();
     if (forceShowTimeoutRef.current !== null) clearTimeout(forceShowTimeoutRef.current);
     await Bun.sleep(170);
-    for (const spy of [
+    restoreSpies(
       listen,
       command,
       init,
@@ -1403,9 +1293,7 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
       nativeSeek,
       probe,
       now,
-    ])
-      spy.mockRestore();
-    client.clear();
+    );
     restoreWindow();
     restoreDocument();
   }
@@ -1414,7 +1302,7 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
 test.each([null, 'watched'] as const)(
   'Season completion refreshes library relations and Undo restores status %s',
   async (previousStatus) => {
-    const client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
+    const client = createClient({ defaultOptions: { queries: { gcTime: Infinity } } });
     const item: MediaDetails = {
       id: 'season-library',
       title: 'One season',
@@ -1434,7 +1322,6 @@ test.each([null, 'watched'] as const)(
       return null;
     });
     const notice = spyOn(toast, 'success').mockReturnValue('season-notice');
-    const { Fixture, captured: controller } = captureHook(() => useMarkSeasonWatched({ item }));
     const keys = [
       ['library'],
       ['watch-statuses'],
@@ -1442,29 +1329,18 @@ test.each([null, 'watched'] as const)(
       ['lists'],
       ['list-summaries'],
     ];
-    try {
-      for (const key of keys) client.setQueryData(key, []);
-      renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <Fixture />
-        </QueryClientProvider>,
-      );
-      await (await controller.promise).mutateAsync({ episodes: item.episodes!, watched: true });
-      expect(mark).toHaveBeenCalledWith(item, item.episodes, true);
-      for (const key of keys) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
-      const action = notice.mock.calls[0]?.[1]?.action;
-      if (!action || typeof action !== 'object' || !('onClick' in action))
-        throw new Error('Missing season Undo');
-      action.onClick({});
-      await restored.promise;
-      expect(mark).toHaveBeenLastCalledWith(item, item.episodes, false);
-      expect(restoreStatus).toHaveBeenCalledWith(item, previousStatus);
-    } finally {
-      mark.mockRestore();
-      restoreStatus.mockRestore();
-      notice.mockRestore();
-      client.clear();
-    }
+    for (const key of keys) client.setQueryData(key, []);
+    const controller = captureWithClient(client, () => useMarkSeasonWatched({ item }));
+    await controller.mutateAsync({ episodes: item.episodes!, watched: true });
+    expect(mark).toHaveBeenCalledWith(item, item.episodes, true);
+    for (const key of keys) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    const action = notice.mock.calls[0]?.[1]?.action;
+    if (!action || typeof action !== 'object' || !('onClick' in action))
+      throw new Error('Missing season Undo');
+    action.onClick({});
+    await restored.promise;
+    expect(mark).toHaveBeenLastCalledWith(item, item.episodes, false);
+    expect(restoreStatus).toHaveBeenCalledWith(item, previousStatus);
   },
 );
 
@@ -1551,16 +1427,61 @@ test.each([false, true])(
       expect(pauseWrite).toHaveBeenCalledTimes(trayPaused ? 0 : 1);
       if (!trayPaused) expect(pauseWrite).toHaveBeenCalledWith('pause', false);
     } finally {
-      capturedEffects = null;
-      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
-      for (const spy of [nativeSeek, pauseWrite, now, invoke]) spy.mockRestore();
+      cleanupEffects(cleanups);
+      restoreSpies(nativeSeek, pauseWrite, now, invoke);
       restoreWindow();
     }
   },
 );
 
+test('Compiled preference writes persist the merged pending patch', async () => {
+  const { transformSync } = await import('@babel/core');
+  const { reactCompilerPreset } = await import('@vitejs/plugin-react');
+  const source = await Bun.file(
+    new URL('../src/hooks/use-app-ui-preferences.ts', import.meta.url),
+  ).text();
+  const javascript = new Bun.Transpiler({ loader: 'ts', target: 'browser' }).transformSync(source);
+  const compiled = transformSync(javascript, {
+    filename: 'src/hooks/use-app-ui-preferences.ts',
+    configFile: false,
+    babelrc: false,
+    presets: [reactCompilerPreset().preset],
+  })?.code;
+  if (!compiled) throw new Error('React Compiler produced no preference hook.');
+  const registration = 'registerPendingAppWriteFlusher(flushAppUiPreferenceWrites);';
+  if (!compiled.includes(registration)) throw new Error('Preference flusher registration missing.');
+  const code = compiled
+    .replace(registration, `export const unregisterCompiledFlusher = ${registration}`)
+    .replace(
+      /from\s+["']([^"']+)["']/g,
+      (_match, specifier: string) =>
+        `from ${JSON.stringify(import.meta.resolve(specifier.startsWith('@/') ? `../src/${specifier.slice(2)}` : specifier))}`,
+    );
+  const { useAppUiPreferences: useCompiledPreferences, unregisterCompiledFlusher } = await import(
+    `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
+  );
+  const client = createClient();
+  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
+  const savePreferences = spyOn(api, 'saveAppUiPreferences').mockImplementation(async (patch) => ({
+    ...DEFAULT_APP_UI_PREFERENCES,
+    ...patch,
+  }));
+  try {
+    const preferences = captureWithClient(client, useCompiledPreferences);
+    preferences.updatePreferences({ spoilerProtection: false });
+    await preferences.savePreferences({ trailerPreviews: false });
+    expect(savePreferences).toHaveBeenCalledWith({
+      spoilerProtection: false,
+      trailerPreviews: false,
+    });
+  } finally {
+    unregisterCompiledFlusher();
+    savePreferences.mockRestore();
+  }
+});
+
 test('Recent-search clear waits for a pending record and leaves cache and storage empty', async () => {
-  const client = new QueryClient();
+  const client = createClient();
   let persisted = { ...DEFAULT_APP_UI_PREFERENCES, recentSearches: ['old'] };
   client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, persisted);
   const started = Promise.withResolvers<void>();
@@ -1575,14 +1496,8 @@ test('Recent-search clear waits for a pending record and leaves cache and storag
     persisted = { ...persisted, ...patch };
     return persisted;
   });
-  const { Fixture: SearchHistory, captured: history } = captureHook(useRecentSearches);
   try {
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <SearchHistory />
-      </QueryClientProvider>,
-    );
-    const searches = await history.promise;
+    const searches = captureWithClient(client, useRecentSearches);
     searches.recordRecentSearch('pending');
     await started.promise;
     const cleared = searches.clearRecentSearches();
@@ -1595,9 +1510,7 @@ test('Recent-search clear waits for a pending record and leaves cache and storag
   } finally {
     record.resolve();
     await flushPendingAppWrites();
-    recordSearch.mockRestore();
-    savePreferences.mockRestore();
-    client.clear();
+    restoreSpies(recordSearch, savePreferences);
   }
 });
 
@@ -1606,13 +1519,7 @@ function renderPage(Page: ComponentType, route: string, client = testClient()) {
   client.setQueryData(homeTrendingQueryOptions.queryKey, []);
   renderDialogPortal = true;
   try {
-    return renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[route]}>
-          <Page />
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
+    return markupWithClient(client, <Page />, route);
   } finally {
     renderDialogPortal = false;
     client.clear();
@@ -1621,30 +1528,19 @@ function renderPage(Page: ComponentType, route: string, client = testClient()) {
 
 // Details renders through its route so nested player-session context resolves like the app's.
 function renderDetails(client: QueryClient, route: string) {
-  return renderToStaticMarkup(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <PlayerSessionProvider>
-          <Routes>
-            <Route path='/details/:type/:id' element={<Details />} />
-          </Routes>
-        </PlayerSessionProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
+  return markupWithClient(
+    client,
+    <PlayerSessionProvider>
+      <Routes>
+        <Route path='/details/:type/:id' element={<Details />} />
+      </Routes>
+    </PlayerSessionProvider>,
+    route,
   );
 }
 
-test.each(['/search', '/search?q=matrix', '/search?type=anime&genre=Action'])(
-  'Search renders its own tooltip provider at %s',
-  (route) => {
-    const markup = renderPage(Search, route);
-    expect(markup).toContain('data-search-input');
-    expect(markup).toContain('About unified catalog results');
-  },
-);
-
 test.each([false, true])('Incomplete Search results remain retryable (empty=%j)', (empty) => {
-  const client = new QueryClient();
+  const client = createClient();
   const options = searchCatalogQueryOptions(
     { query: 'dune', type: 'movie', feed: 'popular' },
     2026,
@@ -1671,47 +1567,44 @@ test.each([false, true])('Incomplete Search results remain retryable (empty=%j)'
 });
 
 test('Calendar keeps upcoming placeholders only for the same watched filter', () => {
-  const client = new QueryClient();
-  try {
-    client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, {
-      ...DEFAULT_APP_UI_PREFERENCES,
-      calendarHideWatched: true,
-    });
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <MemoryRouter>
-          <Calendar />
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
-    const query = client
-      .getQueryCache()
-      .find<CalendarSchedule>({ queryKey: ['calendar-events'], exact: false });
-    if (!query) throw new Error('Calendar query missing');
-    const { placeholderData } = query.options as QueryObserverOptions<CalendarSchedule>;
-    const options = { queryKey: query.queryKey, placeholderData };
-    const previous: CalendarSchedule = { trackedCount: 1, missingCount: 0, days: [], upcoming: [] };
-    const observer = new QueryObserver(client, {
-      ...options,
-      enabled: false,
-      initialData: previous,
-      queryKey: [...query.queryKey.slice(0, 4), false],
-    });
-    observer.setOptions({ ...options, enabled: false });
-    expect(observer.getCurrentResult().data).toBeUndefined();
-    client.setQueryData(query.queryKey, previous);
-    observer.setOptions({ ...options, enabled: false });
-    observer.setOptions({
-      ...options,
-      enabled: false,
-      queryKey: [query.queryKey[0], 'another month', ...query.queryKey.slice(2)],
-    });
-    expect(observer.getCurrentResult().data).toEqual(previous);
-    observer.destroy();
-  } finally {
-    client.clear();
-  }
+  const client = createClient();
+  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, {
+    ...DEFAULT_APP_UI_PREFERENCES,
+    calendarHideWatched: true,
+  });
+  markupWithClient(client, <Calendar />);
+  const query = client
+    .getQueryCache()
+    .find<CalendarSchedule>({ queryKey: ['calendar-events'], exact: false });
+  if (!query) throw new Error('Calendar query missing');
+  const { placeholderData } = query.options as QueryObserverOptions<CalendarSchedule>;
+  const options = { queryKey: query.queryKey, placeholderData };
+  const previous: CalendarSchedule = { trackedCount: 1, missingCount: 0, days: [], upcoming: [] };
+  const observer = new QueryObserver(client, {
+    ...options,
+    enabled: false,
+    initialData: previous,
+    queryKey: [...query.queryKey.slice(0, 4), false],
+  });
+  observer.setOptions({ ...options, enabled: false });
+  expect(observer.getCurrentResult().data).toBeUndefined();
+  client.setQueryData(query.queryKey, previous);
+  observer.setOptions({ ...options, enabled: false });
+  observer.setOptions({
+    ...options,
+    enabled: false,
+    queryKey: [query.queryKey[0], 'another month', ...query.queryKey.slice(2)],
+  });
+  expect(observer.getCurrentResult().data).toEqual(previous);
+  observer.destroy();
 });
+
+const ADD_TITLES_PROPS = {
+  list: { id: 'test-list', name: 'Test list', icon: 'list', item_ids: [] },
+  onOpenChange: () => {},
+  returnFocusRef: { current: null },
+};
+const AddTitlesFixture = () => <AddTitlesDialog {...ADD_TITLES_PROPS} />;
 
 test.each([false, true])(
   'Add Titles keeps cached rows available after a refresh failure (cached=%s)',
@@ -1730,17 +1623,7 @@ test.each([false, true])(
         throw new Error('Library unavailable');
       },
     });
-    const markup = renderPage(
-      () => (
-        <AddTitlesDialog
-          list={{ id: 'test-list', name: 'Test list', icon: 'list', item_ids: [] }}
-          onOpenChange={() => {}}
-          returnFocusRef={{ current: null }}
-        />
-      ),
-      '/profile?tab=lists',
-      client,
-    );
+    const markup = renderPage(AddTitlesFixture, '/profile?tab=lists', client);
     expect(markup).toContain('load your library.');
     expect(markup.includes('aria-label="Library titles"')).toBe(cached);
     expect(markup.includes('aria-label="Saved title"')).toBe(cached);
@@ -1748,15 +1631,30 @@ test.each([false, true])(
   },
 );
 
+test.each([false, true])('Incomplete Discover titles remain retryable (empty=%j)', (empty) => {
+  const client = createClient();
+  mockInitialState('library', 'discover');
+  client.setQueryData([...SEARCH_CATALOG_QUERY_KEY, 'add-titles-discover', undefined], {
+    items: empty ? [] : [{ id: 'saved-title', title: 'Saved title', type: 'movie' }],
+    partial: true,
+    exhausted: true,
+    continuation: { seenKeys: [] },
+  });
+  const markup = renderPage(AddTitlesFixture, '/profile?tab=lists', client);
+  expect(markup).toContain('Retry');
+  expect(markup).toContain('Results may be incomplete.');
+  expect(markup.includes('aria-label="Saved title"')).toBe(!empty);
+});
+
 test('Discover additions keep failed titles selected for retry', async () => {
-  const client = new QueryClient();
+  const client = createClient();
   const items = [
     { id: 'added', title: 'Added title', type: 'movie' },
     { id: 'retry', title: 'Retry title', type: 'movie' },
   ];
   let selected = new Map(items.map((item) => [item.id, item]));
   const originalState = react.useState;
-  const state = spyOn(react, 'useState').mockImplementation((initial: unknown) => {
+  spyOn(react, 'useState').mockImplementation((initial: unknown) => {
     if (initial instanceof Map) {
       return [
         selected,
@@ -1784,45 +1682,27 @@ test('Discover additions keep failed titles selected for retry', async () => {
     return 'add-notice';
   });
   const close = mock(() => {});
-  let submit!: () => void;
-  function Fixture() {
-    const dialog = AddTitlesDialog({
-      list: { id: 'test-list', name: 'Test list', icon: 'list', item_ids: [] },
-      onOpenChange: close,
-      returnFocusRef: { current: null },
+  const submit = () =>
+    captureWithClient(client, () => {
+      const dialog = AddTitlesDialog({ ...ADD_TITLES_PROPS, onOpenChange: close });
+      const footer = dialog.props.children.props.children.at(-1);
+      const [, actions] = footer.props.children;
+      const [, addButton] = actions.props.children;
+      return addButton.props.onClick;
     });
-    const footer = dialog.props.children.props.children.at(-1);
-    const [, actions] = footer.props.children;
-    const [, addButton] = actions.props.children;
-    submit = addButton.props.onClick;
-    return null;
-  }
-  const render = () =>
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <Fixture />
-      </QueryClientProvider>,
-    );
-  try {
-    render();
-    submit();
-    await notified.promise;
-    expect(close).not.toHaveBeenCalled();
-    expect([...selected.keys()]).toEqual(['retry']);
-    const feedback = notice.mock.calls[0][0]('add-notice');
-    expect(feedback.props.tone).toBe('error');
-    expect(feedback.props.detail).toBe('List is full.');
-    notified = Promise.withResolvers<void>();
-    render();
-    submit();
-    await notified.promise;
-    expect(add.mock.calls.map(([, item]) => item.id)).toEqual(['added', 'retry', 'retry']);
-    expect(close).toHaveBeenCalledTimes(1);
-    expect(selected.size).toBe(0);
-  } finally {
-    for (const spy of [state, add, notice]) spy.mockRestore();
-    client.clear();
-  }
+  submit()();
+  await notified.promise;
+  expect(close).not.toHaveBeenCalled();
+  expect([...selected.keys()]).toEqual(['retry']);
+  const feedback = notice.mock.calls[0][0]('add-notice');
+  expect(feedback.props.tone).toBe('error');
+  expect(feedback.props.detail).toBe('List is full.');
+  notified = Promise.withResolvers<void>();
+  submit()();
+  await notified.promise;
+  expect(add.mock.calls.map(([, item]) => item.id)).toEqual(['added', 'retry', 'retry']);
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(selected.size).toBe(0);
 });
 
 test.each(['library', 'discover'])(
@@ -1836,21 +1716,11 @@ test.each(['library', 'discover'])(
       partial: false,
       continuation: { seenKeys: [] },
     });
-    const originalState = react.useState;
-    const state = spyOn(react, 'useState').mockImplementation(((initial: unknown) =>
-      originalState(initial === 'library' ? source : initial)) as typeof react.useState);
+    const state = mockInitialState('library', source);
     const observers: InstanceType<typeof QueryObserver>[] = [];
     const unsubscribes: (() => void)[] = [];
     try {
-      renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <AddTitlesDialog
-            list={{ id: 'source-test', name: 'Source test', icon: 'list', item_ids: [] }}
-            onOpenChange={() => {}}
-            returnFocusRef={{ current: null }}
-          />
-        </QueryClientProvider>,
-      );
+      markupWithClient(client, <AddTitlesFixture />);
       for (const query of client.getQueryCache().getAll()) {
         const observer = new QueryObserver(client, query.options);
         observers.push(observer);
@@ -1872,8 +1742,7 @@ test.each(['library', 'discover'])(
     } finally {
       for (const unsubscribe of unsubscribes) unsubscribe();
       for (const observer of observers) observer.destroy();
-      for (const spy of [state, library, discover]) spy.mockRestore();
-      client.clear();
+      restoreSpies(state, library, discover);
     }
   },
 );
@@ -1915,10 +1784,8 @@ test.each([false, true])(
       markup = renderDetails(client, `/details/movie/${id}`);
     } finally {
       renderDialogPortal = false;
-      client.clear();
     }
 
-    // The original rows keep their labels and the +N full-cast popover.
     expect(markup).toContain('Starring');
     expect(markup).toContain('Directors');
     expect(markup).toContain('aria-label="Full cast"');
@@ -1945,7 +1812,7 @@ test.each([false, true])(
 test.each([false, true])(
   'Home offers recommendation retry only for a failed seed (failed=%s)',
   async (failed) => {
-    const client = new QueryClient();
+    const client = createClient();
     await client.prefetchQuery({
       queryKey: RECENT_WATCH_SEED_QUERY_KEY,
       queryFn: () => {
@@ -1967,22 +1834,114 @@ test('Home enables recommendation observation when its cold seed arrives', async
     nearViewport: enabled,
   }));
   const client = testClient();
-  try {
-    renderPage(Home, '/home', client);
-    expect(observation.mock.calls.at(-1)?.[0]).toBe(false);
-    client.setQueryData(RECENT_WATCH_SEED_QUERY_KEY, {
-      type: 'movie',
-      id: 'tt123',
-      title: 'Seed movie',
-    });
-    const markup = renderPage(Home, '/home', client);
-    expect(observation.mock.calls.at(-1)?.[0]).toBe(true);
-    expect(markup).toContain('Because you watched Seed movie');
-  } finally {
-    observation.mockRestore();
-    client.clear();
-  }
+  renderPage(Home, '/home', client);
+  expect(observation.mock.calls.at(-1)?.[0]).toBe(false);
+  client.setQueryData(RECENT_WATCH_SEED_QUERY_KEY, {
+    type: 'movie',
+    id: 'tt123',
+    title: 'Seed movie',
+  });
+  const markup = renderPage(Home, '/home', client);
+  expect(observation.mock.calls.at(-1)?.[0]).toBe(true);
+  expect(markup).toContain('Because you watched Seed movie');
 });
+
+function streamSelectorFixture(
+  available = true,
+  hasEnabledAddons = true,
+  fatalErrorMessage?: string,
+): StreamSelectorData {
+  return {
+    hasEnabledAddons,
+    fatalErrorMessage,
+    streams: available
+      ? [
+          {
+            streamKey: 'available-stream',
+            matchBadgeKinds: [],
+            matchTier: null,
+            showPackBadge: false,
+            presentation: {
+              sourceName: 'Available source',
+              streamTitle: 'Available release',
+              resolution: '1080p',
+              deliveryKind: 'http',
+              deliveryLabel: 'HTTP',
+              isInstantlyPlayable: true,
+              isBatch: false,
+            },
+          },
+        ]
+      : [],
+    sourceSummaries: available
+      ? [
+          {
+            id: 'available-source',
+            name: 'Available source',
+            status: 'healthy',
+            streamCount: 1,
+          },
+        ]
+      : [],
+    stats: {
+      resCounts: { '4k': 0, '1080p': Number(available), '720p': 0, sd: 0 },
+      playableCount: Number(available),
+      p2pCount: 0,
+      cachedCount: 0,
+      batchCount: 0,
+      episodeLikeCount: 0,
+      sourceHealth: { degraded: 0, offline: 0, pending: 0 },
+    },
+  };
+}
+
+test.each([false, true])(
+  'Stream search keeps its controls and filtered pack count while pending=%s',
+  (pending) => {
+    const markup = renderToStaticMarkup(
+      <StreamFilterToolbar
+        batchCounts={{ all: 20, episodes: 2, packs: 18 }}
+        filteredCount={18}
+        totalCount={20}
+        filters={{ ...DEFAULT_FILTERS, batch: 'packs', source: 'cached' }}
+        hasActiveFilter
+        isResolving={false}
+        isSearchPending={pending}
+        onFiltersChange={() => {}}
+        onResetFilters={() => {}}
+        onSearchQueryChange={() => {}}
+        onSearchSubmit={() => {}}
+        searchQuery='release'
+        showBatchFilter
+        stats={{ ...streamSelectorFixture().stats, batchCount: 18 }}
+      />,
+    );
+    expect(markup.includes('aria-busy="true"')).toBe(pending);
+    expect(markup).toContain('value="release"');
+    expect(markup).toContain('Clear search');
+    expect(markup).toContain('Reset');
+    // Counts reflect the other active filters — never a pre-filter total.
+    expect(markup).toContain('>18</span>');
+    expect(markup).not.toContain('18 total');
+    expect(markup).not.toContain('Total before other filters');
+  },
+);
+
+test.each([false, true])(
+  'Filtered-empty state offers a filter reset (resolving=%s)',
+  (resolving) => {
+    const clear = mock(() => {});
+    const view = StreamListFilteredEmptyState({
+      isResolving: resolving,
+      onClearFilters: clear,
+    });
+    const markup = renderToStaticMarkup(view);
+    expect(markup).toContain('No streams match these filters');
+    expect(markup).toContain('Show all streams');
+    view.props.action.props.onClick();
+    expect(clear).toHaveBeenCalledTimes(resolving ? 0 : 1);
+  },
+);
 
 test.each([
   { available: true, selectorFailed: true, hasEnabledAddons: true },
@@ -2001,48 +1960,11 @@ test.each([
         throw new Error('Addon configuration unavailable');
       },
     });
-    const data: StreamSelectorData = {
+    const data = streamSelectorFixture(
+      available,
       hasEnabledAddons,
-      fatalErrorMessage: selectorFailed ? failure.message : undefined,
-      streams: available
-        ? [
-            {
-              streamKey: 'available-stream',
-              matchBadgeKinds: [],
-              matchTier: null,
-              showPackBadge: false,
-              presentation: {
-                sourceName: 'Available source',
-                streamTitle: 'Available release',
-                resolution: '1080p',
-                deliveryKind: 'http',
-                deliveryLabel: 'HTTP',
-                isInstantlyPlayable: true,
-                isBatch: false,
-              },
-            },
-          ]
-        : [],
-      sourceSummaries: available
-        ? [
-            {
-              id: 'available-source',
-              name: 'Available source',
-              status: 'healthy',
-              streamCount: 1,
-            },
-          ]
-        : [],
-      stats: {
-        resCounts: { '4k': 0, '1080p': Number(available), '720p': 0, sd: 0 },
-        playableCount: Number(available),
-        p2pCount: 0,
-        cachedCount: 0,
-        batchCount: 0,
-        episodeLikeCount: 0,
-        sourceHealth: { degraded: 0, offline: 0, pending: 0 },
-      },
-    };
+      selectorFailed ? failure.message : undefined,
+    );
     client.setQueryData(
       streamSelectorQueryKey(
         target.type,
@@ -2056,8 +1978,21 @@ test.each([
       ),
       data,
     );
+    function DefaultViewCheck() {
+      const view = client
+        .getQueryCache()
+        .find({ queryKey: ['stream-selector-view'], exact: false });
+      expect(view?.state.data).toMatchObject({ streams: data.streams });
+      expect(view?.state.fetchStatus).toBe('idle');
+      return null;
+    }
     const markup = renderPage(
-      () => <StreamSelector open onClose={() => {}} target={target} />,
+      () => (
+        <>
+          <StreamSelector open onClose={() => {}} target={target} />
+          {available && <DefaultViewCheck />}
+        </>
+      ),
       '/details/movie/selector-test',
       client,
     );
@@ -2074,12 +2009,111 @@ test.each([
     expect(markup.includes('No enabled stream sources.')).toBe(
       !available && !selectorFailed && !hasEnabledAddons,
     );
-    expect(markup.includes('No stream-capable addons enabled.')).toBe(
+    expect(markup.includes('No addon provides Movie streams.')).toBe(
       !available && !selectorFailed && hasEnabledAddons,
     );
     expect(markup.includes('Manage addons')).toBe(!available && !selectorFailed);
   },
 );
+
+test('Selector pool eviction preserves live observers, placeholders, and current filter caches', async () => {
+  type View = { streams: StreamSelectorData['streams'] };
+  const client = testClient(false);
+  const target = { type: 'series' as const, id: 'selector-pool-test', season: 1, episode: 1 };
+  // `source` keeps the index query enabled — batch alone now splits client-side.
+  const filters = { ...DEFAULT_FILTERS, batch: 'episodes' as const, source: 'cached' as const };
+  const sourceKey = streamSelectorQueryKey(
+    target.type,
+    target.id,
+    1,
+    1,
+    undefined,
+    buildStreamRankingCacheKey(
+      playerStreamRankingOptions({ mediaId: target.id, mediaType: target.type }),
+    ),
+  );
+  const data = streamSelectorFixture();
+  const row = data.streams[0];
+  const indices = spyOn(api, 'getStreamSelectorIndices').mockImplementation(async (streams) =>
+    streams.map((_, index) => index),
+  );
+  const otherSessionKey = ['stream-selector-view', 'other-session', 0];
+  client.setQueryData(otherSessionKey, { streams: [row] });
+  const cleanups: (() => void)[] = [];
+  let observer: QueryObserverType<View> | undefined;
+  let oldObserver: QueryObserverType<View> | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let unsubscribeOld: (() => void) | undefined;
+  const renderView = (streams: StreamSelectorData['streams'], quality = 'all') => {
+    client.setQueryData(STREAM_SELECTOR_PREFERENCES_QUERY_KEY, {
+      initialized: true,
+      preferences: filters,
+      defaultPreferences: DEFAULT_FILTERS,
+      episodeDefaultPreferences: { ...filters, quality },
+    });
+    client.setQueryData<StreamSelectorData>(sourceKey, { ...data, streams });
+    capturedEffects = [];
+    captureWithClient(client, () =>
+      useStreamSelectorController({ target, open: true, onClose: () => {} }),
+    );
+    const effects = capturedEffects;
+    capturedEffects = null;
+    const query = client
+      .getQueryCache()
+      .findAll({ queryKey: ['stream-selector-view'] })
+      .at(-1)!;
+    const options = query.options as QueryObserverOptions<View>;
+    if (observer) observer.setOptions(options);
+    else {
+      observer = new QueryObserver(client, options);
+      unsubscribe = observer.subscribe(() => {});
+    }
+    runEffects(effects, cleanups);
+    return query;
+  };
+  try {
+    const first = renderView([row]);
+    await observer!.getCurrentQuery().promise;
+    oldObserver = new QueryObserver(client, {
+      ...(first.options as QueryObserverOptions<View>),
+      enabled: false,
+    });
+    unsubscribeOld = oldObserver.subscribe(() => {});
+    const rows = [row, { ...row, streamKey: 'second' }];
+    const second = renderView(rows);
+    expect(observer!.getCurrentResult().isPlaceholderData).toBe(true);
+    expect(observer!.getCurrentResult().data?.streams).toEqual([row]);
+    expect(first.isActive()).toBe(false);
+    expect(client.getQueryCache().get(first.queryHash)).toBe(first);
+    await observer!.getCurrentQuery().promise;
+    const filtered = renderView(rows, '720p');
+    await observer!.getCurrentQuery().promise;
+    expect(client.getQueryCache().get(second.queryHash)).toBe(second);
+    expect(client.getQueryCache().get(filtered.queryHash)).toBe(filtered);
+    const calls = indices.mock.calls.length;
+    observer!.setOptions(second.options as QueryObserverOptions<View>);
+    expect(observer!.getCurrentResult().isPlaceholderData).toBe(false);
+    expect(indices).toHaveBeenCalledTimes(calls);
+    unsubscribeOld();
+    oldObserver.destroy();
+    renderView([...rows, { ...row, streamKey: 'third' }]);
+    expect(observer!.getCurrentResult().data?.streams).toEqual(rows);
+    expect(client.getQueryCache().get(first.queryHash)).toBeUndefined();
+    expect(client.getQueryCache().get(second.queryHash)).toBeUndefined();
+    expect(client.getQueryCache().get(filtered.queryHash)).toBeUndefined();
+    expect(client.getQueryCache().findAll({ queryKey: ['stream-selector-view'] })).toHaveLength(2);
+    expect(client.getQueryData(otherSessionKey)).toEqual({ streams: [row] });
+    await observer!.getCurrentQuery().promise;
+  } finally {
+    capturedEffects = null;
+    for (const cleanup of cleanups.toReversed()) cleanup();
+    unsubscribeOld?.();
+    unsubscribe?.();
+    oldObserver?.destroy();
+    observer?.destroy();
+    indices.mockRestore();
+  }
+});
 
 test.each([false, true])(
   'Player keymap falls back only after an initial preference failure (stored=%s)',
@@ -2091,38 +2125,24 @@ test.each([false, true])(
       effectivePlayerKeybindings: { togglePlay: ['p'] },
       playerKeybindings: { togglePlay: ['p'] },
     };
-    try {
-      if (stored) client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, saved);
-      await client
-        .fetchQuery({
-          queryKey: APP_UI_PREFERENCES_QUERY_KEY,
-          queryFn: async () => {
-            throw new Error('Preference read failed');
-          },
-        })
-        .catch(() => {});
-      const { Fixture, captured } = captureHook(usePlayerKeymap);
-      renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <Fixture />
-        </QueryClientProvider>,
-      );
-      expect(
-        client.getQueryCache().find({ queryKey: DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY })?.options
-          .enabled,
-      ).toBe(!stored);
-      client.setQueryData(DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY, defaults);
-      const { Fixture: Loaded, captured: loaded } = captureHook(usePlayerKeymap);
-      renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <Loaded />
-        </QueryClientProvider>,
-      );
-      expect((await loaded.promise).keys.togglePlay).toEqual(stored ? ['p'] : [' ']);
-      expect((await captured.promise).overrides).toEqual(stored ? saved.playerKeybindings : {});
-    } finally {
-      client.clear();
-    }
+    if (stored) client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, saved);
+    await client
+      .fetchQuery({
+        queryKey: APP_UI_PREFERENCES_QUERY_KEY,
+        queryFn: async () => {
+          throw new Error('Preference read failed');
+        },
+      })
+      .catch(() => {});
+    const keymap = captureWithClient(client, usePlayerKeymap);
+    expect(
+      client.getQueryCache().find({ queryKey: DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY })?.options
+        .enabled,
+    ).toBe(!stored);
+    client.setQueryData(DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY, defaults);
+    const loaded = captureWithClient(client, usePlayerKeymap);
+    expect(loaded.keys.togglePlay).toEqual(stored ? ['p'] : [' ']);
+    expect(keymap.overrides).toEqual(stored ? saved.playerKeybindings : {});
   },
 );
 
@@ -2227,7 +2247,7 @@ test('An active native read recovers on reconnect after exhausting its offline r
 });
 
 test('Discovery changes detach stale prefetches without breaking current single-flight', async () => {
-  const client = new QueryClient();
+  const client = createClient();
   const mediaId = 'prefetch-generation-fixture';
   const detailsKey = detailsCardQueryKey('movie', mediaId);
   const progressKey = titleWatchProgressQueryKey(mediaId);
@@ -2286,7 +2306,6 @@ test('Discovery changes detach stale prefetches without breaking current single-
     for (const deferred of bundles) deferred.resolve(bundleFor('Cleanup', 0));
     await Promise.allSettled(settled);
     fetchBundle.mockRestore();
-    client.clear();
   }
 });
 
@@ -2298,25 +2317,20 @@ const SECTION_ITEM = {
 } as MediaDetails;
 
 test('Credits links pass the title identity to their scoped Rust command', async () => {
-  const runtime = spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true);
+  spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true);
   const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue(undefined);
-  try {
-    await api.openTitleCreditsLink('anime', 'kitsu:8671', 'tt2560140', 'https://anilist.co');
-    expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenCalledWith(
-      'open_title_credits_link',
-      {
-        mediaType: 'anime',
-        id: 'kitsu:8671',
-        imdbId: 'tt2560140',
-        url: 'https://anilist.co',
-      },
-      undefined,
-    );
-  } finally {
-    invoke.mockRestore();
-    runtime.mockRestore();
-  }
+  await api.openTitleCreditsLink('anime', 'kitsu:8671', 'tt2560140', 'https://anilist.co');
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(invoke).toHaveBeenCalledWith(
+    'open_title_credits_link',
+    {
+      mediaType: 'anime',
+      id: 'kitsu:8671',
+      imdbId: 'tt2560140',
+      url: 'https://anilist.co',
+    },
+    undefined,
+  );
 });
 
 const renderSections = (props: Partial<ComponentProps<typeof DetailsSections>> = {}) =>
@@ -2325,8 +2339,6 @@ const renderSections = (props: Partial<ComponentProps<typeof DetailsSections>> =
       <DetailsSections
         item={SECTION_ITEM}
         credits={SECTION_CREDITS}
-        value='episodes'
-        onValueChange={() => {}}
         hasEpisodes
         allowExtras
         {...props}
@@ -2345,40 +2357,24 @@ const SECTION_CREDITS: TitleCredits = {
       character: 'Tyrion Lannister',
     },
   ],
-  facts: { network: 'HBO', status: 'Ended', runtimeMinutes: 60 },
-  streamingLinks: [{ site: 'Crunchyroll', url: 'http://crunchyroll.com/ep/1' }],
 };
 
-test('Details sections render ARIA tabs, always-mounted panes, and attribution', () => {
-  const episodesMarkup = renderSections();
-  expect(episodesMarkup).toContain('aria-selected="true"');
-  expect(episodesMarkup).not.toContain('id="details-section-panel-episodes" hidden=""');
-  const aboutMarkup = renderSections({ value: 'about' });
-  expect(aboutMarkup).toContain('id="details-section-panel-episodes" hidden=""');
-  expect(aboutMarkup).toContain('data-episodes-children');
-  expect(aboutMarkup).toContain('role="tabpanel" tabindex="0"');
-  const markup = renderSections({ value: 'cast' });
-  expect(markup).toContain('role="tablist"');
-  expect(markup).toContain('aria-label="Title sections"');
+test('Details sections stack episodes and cast with attribution', () => {
+  const markup = renderSections();
+  expect(markup).not.toContain('role="tablist"');
+  expect(markup).not.toContain('role="tab"');
+  expect(markup).not.toContain('hidden=""');
   expect(markup).toContain('id="details-episodes-heading"');
-  expect(markup).toContain('id="details-section-tab-cast"');
-  expect(markup).toContain('id="details-section-tab-about"');
-  expect(markup).toContain('aria-selected="true"');
-  // The episodes pane stays mounted but hidden; children survive the switch.
-  expect(markup).toContain('id="details-section-panel-episodes" hidden=""');
   expect(markup).toContain('data-episodes-children');
-  expect(markup).toContain('id="details-section-panel-cast"');
-  // Cast content: search links, initials fallback, facts, links, footer.
+  expect(markup).toContain('id="details-cast-heading"');
   expect(markup).toContain('href="/search?q=Peter%20Dinklage"');
   expect(markup).toContain('Tyrion Lannister');
   expect(markup).toContain('>PD<');
-  expect(markup).toContain('HBO');
-  expect(markup).toContain('http://crunchyroll.com/ep/1');
   expect(markup).toContain('https://www.tvmaze.com');
   expect(markup).toContain('https://creativecommons.org/licenses/by-sa/4.0/');
 });
 
-test('Details sections hide unavailable panes and label anime cast Characters', () => {
+test('Details sections label anime cast Characters and handle sparse credits', () => {
   const anime = {
     ...SECTION_ITEM,
     isAnime: true,
@@ -2395,105 +2391,19 @@ test('Details sections hide unavailable panes and label anime cast Characters', 
       },
     ],
   };
-  const markup = renderSections({ item: anime, credits: animeCredits, value: 'cast' });
+  const markup = renderSections({ item: anime, credits: animeCredits });
   expect(markup).toContain('Characters');
   expect(markup).not.toContain('href="/search?q=Eren%20Yeager"');
   expect(markup).toContain('href="/search?q=Yuki%20Kaji"');
   expect(markup).toContain('href="https://anilist.co"');
   expect(markup).not.toContain('tvmaze.com');
-  // Missing credits and no item runtime: no cast/about tabs, no attribution.
-  const bareItem = { ...SECTION_ITEM, runtime: undefined } as MediaDetails;
-  const sparse = renderSections({ item: bareItem, credits: undefined });
+  const sparse = renderSections({ credits: undefined });
   expect(sparse).toContain('Episodes');
-  expect(sparse).not.toContain('details-section-tab-cast');
-  expect(sparse).not.toContain('details-section-tab-about');
+  expect(sparse).toContain('data-episodes-children');
+  expect(sparse).not.toContain('details-cast-heading');
   expect(sparse).not.toContain('creativecommons.org');
-  // A single Episodes tab keeps the original h2 (no tablist).
-  expect(sparse).not.toContain('role="tablist"');
-  expect(sparse).toContain('id="details-episodes-heading"');
-  // Movies never render the component.
+  expect(renderSections({ hasEpisodes: false, credits: undefined })).toBe('');
   expect(renderSections({ item: { ...SECTION_ITEM, type: 'movie' } })).toBe('');
-});
-
-test('Details section tabs navigate with arrows and edge keys', () => {
-  const tabs = [
-    { value: 'episodes', label: 'Episodes' },
-    { value: 'cast', label: 'Cast' },
-    { value: 'about', label: 'About' },
-  ] as const;
-  for (const [value, key, guard, expected] of [
-    ['episodes', 'ArrowRight', {}, 'cast'],
-    ['episodes', 'ArrowLeft', {}, 'about'],
-    ['episodes', 'End', {}, 'about'],
-    ['episodes', 'Home', {}, 'episodes'],
-    ['about', 'ArrowRight', {}, 'episodes'],
-    ['episodes', 'x', {}, null],
-    ['episodes', 'ArrowRight', { ctrlKey: true }, null],
-    ['episodes', 'ArrowRight', { nativeEvent: { isComposing: true } }, null],
-    ['episodes', 'ArrowRight', { defaultPrevented: true }, null],
-  ] as const) {
-    const change = mock((_next: string) => {});
-    const focus = mock(() => {});
-    const querySelector = mock((_selector: string) => ({ focus }));
-    const preventDefault = mock(() => {});
-    const element = DetailsSectionTabs({ tabs, value, onValueChange: change });
-    const onKeyDown = element.props.onKeyDown as (event: KeyboardEvent<HTMLDivElement>) => void;
-    onKeyDown({
-      key,
-      nativeEvent: { isComposing: false },
-      ...guard,
-      preventDefault,
-      currentTarget: { querySelector },
-    } as unknown as KeyboardEvent<HTMLDivElement>);
-    expect(change.mock.calls.map(([next]) => next)).toEqual(expected ? [expected] : []);
-    expect(preventDefault).toHaveBeenCalledTimes(expected ? 1 : 0);
-    expect(focus).toHaveBeenCalledTimes(expected ? 1 : 0);
-    if (expected) {
-      expect(querySelector).toHaveBeenCalledWith(
-        expected === 'episodes' ? '#details-episodes-heading' : `#details-section-tab-${expected}`,
-      );
-    }
-  }
-});
-
-test('Profile tabs leave modified and composing keys alone', () => {
-  let onKeyDown!: NonNullable<ComponentProps<typeof TabsTrigger>['onKeyDown']>;
-  function TriggerProbe() {
-    const trigger = TabsTrigger({ value: 'library' });
-    onKeyDown = trigger.props.onKeyDown;
-    return trigger;
-  }
-  renderToStaticMarkup(
-    <Tabs value='library' onValueChange={() => {}}>
-      <TriggerProbe />
-    </Tabs>,
-  );
-  for (const guard of [
-    {},
-    { altKey: true },
-    { ctrlKey: true },
-    { metaKey: true },
-    { shiftKey: true },
-    { nativeEvent: { isComposing: true } },
-    { defaultPrevented: true },
-  ]) {
-    const focus = mock(() => {});
-    const click = mock(() => {});
-    const next = { focus, click };
-    const currentTarget = { closest: () => ({ querySelectorAll: () => [currentTarget, next] }) };
-    const preventDefault = mock(() => {});
-    onKeyDown({
-      key: 'ArrowRight',
-      nativeEvent: { isComposing: false },
-      ...guard,
-      currentTarget,
-      preventDefault,
-    } as unknown as KeyboardEvent<HTMLButtonElement>);
-    const shouldNavigate = Object.keys(guard).length === 0;
-    expect(preventDefault).toHaveBeenCalledTimes(shouldNavigate ? 1 : 0);
-    expect(click).toHaveBeenCalledTimes(shouldNavigate ? 1 : 0);
-    expect(focus).toHaveBeenCalledTimes(shouldNavigate ? 1 : 0);
-  }
 });
 
 test('Details viewport observer waits for the enabled late anchor', () => {
@@ -2540,7 +2450,7 @@ test('Next airing chip only renders future episodes with a dateTime', () => {
 
 test('Details lazily creates one title credits query without an SSR fetch', async () => {
   const id = 'tt-sec';
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = createClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(api.detailsQueryOptions('series', id).queryKey, {
     id,
     type: 'series',
@@ -2552,8 +2462,6 @@ test('Details lazily creates one title credits query without an SSR fetch', asyn
   const spies = [spyOn(api, 'getTitleCredits'), spyOn(api, 'titleCreditsQueryOptions')];
   try {
     renderDetails(client, `/details/series/${id}`);
-    // Cold SSR: exactly one title-credits query, created disabled and idle.
-    // (assert before mockRestore - restore clears the recorded calls)
     expect(spies[1]).toHaveBeenCalledTimes(1);
     expect(spies[1]).toHaveBeenCalledWith('series', id, undefined);
     expect(spies[0]).not.toHaveBeenCalled();
@@ -2566,7 +2474,6 @@ test('Details lazily creates one title credits query without an SSR fetch', asyn
     expect(creditsQueries[0].state.fetchStatus).toBe('idle');
   } finally {
     spies.forEach((spy) => spy.mockRestore());
-    client.clear();
   }
 });
 
@@ -2589,18 +2496,54 @@ test('Season completion remains available for the last unwatched episode', () =>
   });
   client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
   const render = () => renderDetails(client, `/details/series/${id}`);
-  try {
-    render();
-    const unaired = client
-      .getQueryCache()
-      .getAll()
-      .find((query) => query.queryKey.includes('unaired-episodes'));
-    if (!unaired) throw new Error('Missing episode air-state query');
-    client.setQueryData(unaired.queryKey, new Set());
-    expect(render()).toContain('Mark season watched');
-  } finally {
-    client.clear();
-  }
+  render();
+  const unaired = client
+    .getQueryCache()
+    .getAll()
+    .find((query) => query.queryKey.includes('unaired-episodes'));
+  if (!unaired) throw new Error('Missing episode air-state query');
+  client.setQueryData(unaired.queryKey, new Set());
+  expect(render()).toContain('Mark season watched');
+});
+
+test.each([false, true])(
+  'Shared search exposes pending state and clears without scrolling (%s)',
+  (pending) => {
+    const onValueChange = mock((_value: string) => {});
+    const focus = mock(() => {});
+    const inputRef = { current: { focus } } as unknown as ComponentProps<
+      typeof SearchInput
+    >['inputRef'];
+    let element!: ReturnType<typeof SearchInput>;
+    function Probe() {
+      element = SearchInput({
+        value: 'Dune',
+        onValueChange,
+        inputRef,
+        pending,
+        'aria-label': 'Find titles',
+      });
+      return element;
+    }
+    const html = renderToStaticMarkup(<Probe />);
+    expect(html.includes('aria-busy="true"')).toBe(pending);
+    expect(html).toContain('aria-label="Find titles"');
+    element.props.children[2].props.onClick();
+    expect(onValueChange.mock.calls).toEqual([['']]);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+  },
+);
+
+test('Sidebar update indicator links directly to update settings', () => {
+  const client = testClient();
+  client.setQueryData(appUpdater.APP_UPDATE_STATE_QUERY_KEY, {
+    ...appUpdater.getInitialAppUpdateState(),
+    status: 'available',
+    update: { version: '0.9.4', notificationEligible: false },
+  });
+  const html = renderPage(Sidebar, '/', client);
+  const settingsLink = html.match(/<a\b[^>]*aria-label="Settings"[^>]*>/)?.[0];
+  expect(settingsLink).toContain('href="/settings?section=updates"');
 });
 
 test('Settings menu selection skips the current value and accepts a different value', () => {
@@ -2637,8 +2580,51 @@ test('Retry feedback blocks repeat activation while keeping the button focusable
   expect(onRetry).toHaveBeenCalledTimes(1);
 });
 
+test('Collection shortcuts only act within the focused collection', () => {
+  const appWindow = new EventTarget();
+  let focusedCollection: { contains: (node: unknown) => boolean } | null = null;
+  const restoreWindow = stubGlobal('window', appWindow);
+  const restoreDocument = stubGlobal('document', {
+    activeElement: { closest: () => focusedCollection },
+    querySelector: () => null,
+  });
+  const restoreElement = stubGlobal('HTMLElement', EventTarget);
+  const state = mockInitialState(false, true);
+  const trigger = {} as HTMLButtonElement;
+  function Collection() {
+    useCollectionSelection(['title'], ['title'], true, false).triggerRef.current = trigger;
+    return null;
+  }
+  const cleanups: (() => void)[] = [];
+  capturedEffects = [];
+  try {
+    renderToStaticMarkup(<Collection />);
+    runEffects(capturedEffects, cleanups);
+    const selectAll = () => {
+      const event = Object.assign(new Event('keydown', { cancelable: true }), {
+        key: 'a',
+        ctrlKey: true,
+      });
+      appWindow.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    expect(selectAll()).toBe(false);
+    focusedCollection = { contains: () => false };
+    expect(selectAll()).toBe(false);
+    focusedCollection = { contains: (node) => node === trigger };
+    expect(selectAll()).toBe(true);
+  } finally {
+    cleanups.toReversed().forEach((cleanup) => cleanup());
+    capturedEffects = null;
+    state.mockRestore();
+    restoreElement();
+    restoreDocument();
+    restoreWindow();
+  }
+});
+
 test('Save picker distinguishes saved lists and names each membership action', () => {
-  const client = new QueryClient();
+  const client = createClient();
   const item = { id: 'save-picker', type: 'movie' as const, title: 'A film' };
   client.setQueryData(listSummariesQueryKey(item.id), [
     { id: 'saved', name: 'Weekend cinema', icon: 'Film', item_count: 12, contains_item: true },
@@ -2664,3 +2650,57 @@ test('Save picker distinguishes saved lists and names each membership action', (
   expect(markup).toContain('>3 titles<');
   expect(markup).toContain('title="Weekend cinema"');
 });
+
+const bulkListItem = (id: string): MediaItem => ({ id, type: 'movie', title: id });
+
+test.each([false, true])(
+  'Bulk list additions keep requested order and roll back on failure (%s)',
+  async (fails) => {
+    const client = testClient();
+    const original = bulkListItem('saved');
+    const refreshed = { ...bulkListItem('b'), title: 'Refreshed B' };
+    client.setQueryData(['library'], [bulkListItem('a'), bulkListItem('b')]);
+    client.setQueryData(profileLibraryQueryKey({}), {
+      items: [refreshed, bulkListItem('c')],
+      allIds: ['a', 'b', 'c'],
+      statusCounts: {},
+    });
+    const list: UserList = {
+      id: 'list_a',
+      name: 'List',
+      icon: 'Film',
+      item_ids: ['saved'],
+      items: [original],
+    };
+    client.setQueryData(['lists'], [list]);
+    const native = Promise.withResolvers<number>();
+    const started = Promise.withResolvers<void>();
+    const add = spyOn(api, 'bulkAddToList').mockImplementation(() => {
+      started.resolve();
+      return native.promise;
+    });
+    let pending: Promise<number | undefined> | undefined;
+    try {
+      const mutation = captureWithClient(client, useBulkAddToList);
+      pending = mutation
+        .mutateAsync({ listId: list.id, itemIds: ['b', 'c', 'a', 'b', 'missing'] })
+        .catch((error: unknown) => {
+          if (!fails) throw error;
+          return undefined;
+        });
+      await started.promise;
+      const optimistic = client.getQueryData<UserList[]>(['lists'])![0];
+      expect(optimistic.item_ids).toEqual(['saved', 'b', 'c', 'a']);
+      expect(optimistic.items?.map((row) => row.id)).toEqual(optimistic.item_ids);
+      expect(optimistic.items?.[1]?.title).toBe('Refreshed B');
+      if (fails) native.reject(new Error('Write failed'));
+      else native.resolve(3);
+      await pending;
+      if (fails) expect(client.getQueryData<UserList[]>(['lists'])).toEqual([list]);
+    } finally {
+      native.resolve(3);
+      await pending;
+      add.mockRestore();
+    }
+  },
+);

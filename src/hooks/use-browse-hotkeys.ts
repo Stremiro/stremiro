@@ -70,7 +70,7 @@ export function useBrowseHotkeys() {
       if (key === 'arrowleft') navigateBack();
       else if (key === 'arrowright') void navigateForward();
       else {
-        const path = QUICK_SECTION_PATHS[Number(key) - 1];
+        const path = QUICK_SECTION_PATHS[Number(key) - 1]!;
         if (path === '/search') openSearch();
         else if (window.location.pathname !== path) navigateApp(path);
       }

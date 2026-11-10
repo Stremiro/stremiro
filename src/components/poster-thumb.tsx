@@ -1,7 +1,7 @@
 import { Film, Tv } from 'lucide-react';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
-import { cn, isHttpUrl } from '@/lib/utils';
+import { cn, isHttpUrl, isSeriesLikeMediaType } from '@/lib/utils';
 
 export function PosterThumb({
   poster,
@@ -22,7 +22,7 @@ export function PosterThumb({
   className?: string;
   imageClassName?: string;
 }) {
-  const Icon = mediaType === 'movie' ? Film : Tv;
+  const Icon = isSeriesLikeMediaType(mediaType) ? Tv : Film;
 
   return (
     <span

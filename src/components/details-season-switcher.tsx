@@ -164,7 +164,7 @@ export function SeasonSwitcher({
           event.preventDefault();
           goToSeasonIndex(nextIndex);
         }}
-        className='relative flex items-center gap-1 overflow-x-auto rounded-lg border border-white/[0.08] bg-white/[0.03] p-1 scrollbar-hide'
+        className='relative flex items-center gap-1 overflow-x-auto py-1 scrollbar-hide'
         role='tablist'
         aria-label='Seasons'
       >
@@ -199,7 +199,7 @@ export function SeasonSwitcher({
               aria-label={`${label}, ${pluralize(season.episodeCount, 'episode')}${watched > 0 ? `, ${watched} watched` : ''}`}
               tabIndex={isActive ? 0 : -1}
               className={cn(
-                'relative z-1 flex h-12 min-w-[92px] shrink-0 flex-col items-center justify-center whitespace-nowrap rounded-md px-4 text-[13.5px] font-semibold leading-none transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
+                'relative z-1 flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-[13px] font-medium leading-none transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
                 isActive ? 'text-white' : 'text-zinc-300 hover:bg-white/[0.04] hover:text-white',
               )}
               onClick={() => {
@@ -210,17 +210,17 @@ export function SeasonSwitcher({
               {season.episodeCount > 0 && (
                 <span
                   className={cn(
-                    'mt-1 text-[11px] font-medium tabular-nums',
+                    'text-[11px] font-medium tabular-nums',
                     isActive ? 'text-zinc-200' : 'text-zinc-400',
                   )}
                 >
-                  {pluralize(season.episodeCount, 'episode')}
+                  {season.episodeCount}
                 </span>
               )}
               {watched > 0 && season.episodeCount > 0 && (
                 <span
                   aria-hidden='true'
-                  className='absolute inset-x-4 bottom-1 h-[2px] overflow-hidden rounded-full bg-white/10'
+                  className='absolute inset-x-3 bottom-0.5 h-[2px] overflow-hidden rounded-full bg-white/10'
                 >
                   <span
                     className='block h-full origin-left rounded-full bg-(--accent-prog) transition-transform duration-300 motion-reduce:transition-none'

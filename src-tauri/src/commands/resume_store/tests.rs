@@ -19,6 +19,19 @@ fn sample_progress(last_watched: u64, position: f64) -> WatchProgress {
     }
 }
 
+fn seed_title(store: &mut ResumeStore, key: &str, type_: &str, id: &str, watched: u64) {
+    store
+        .upsert_progress(
+            key,
+            &WatchProgress {
+                id: id.into(),
+                type_: type_.into(),
+                ..sample_progress(watched, 120.0)
+            },
+        )
+        .unwrap();
+}
+
 fn user_version(path: &std::path::Path) -> i32 {
     Connection::open(path)
         .expect("reopen")
@@ -56,16 +69,7 @@ fn media_id_reads_keep_aliases_order_and_literal_ids() {
         ("movie:unrelated", "unrelated", "movie", 400),
         ("movie:quote'\"", "quote'\"", "movie", 500),
     ] {
-        store
-            .upsert_progress(
-                key,
-                &WatchProgress {
-                    id: id.into(),
-                    type_: type_.into(),
-                    ..sample_progress(watched, 120.0)
-                },
-            )
-            .unwrap();
+        seed_title(&mut store, key, type_, id, watched);
     }
     let all = store.load_entries().unwrap();
     for ids in [
@@ -283,6 +287,51 @@ fn continue_watching_dismissals_hide_titles_until_newer_progress_or_restore() {
 }
 
 #[test]
+fn malformed_continue_watching_cutoffs_do_not_hide_titles_and_are_pruned() {
+    let path = TempPath::file("cw-malformed-cutoffs");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    for (id, last_watched) in [("valid", 300), ("text", 200), ("blob", 100)] {
+        seed_title(
+            &mut store,
+            &format!("movie:{id}"),
+            "movie",
+            id,
+            last_watched,
+        );
+    }
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO continue_watching_dismissals (media_type, media_id, dismissed_through)
+             VALUES ('movie', 'valid', 300), ('movie', 'text', 'bogus'), ('movie', 'blob', X'01');",
+        )
+        .expect("seed malformed markers");
+    assert_eq!(
+        store.load_continue_watching_dismissals().unwrap().len(),
+        1,
+        "only integer cutoffs are readable"
+    );
+    assert_eq!(
+        continue_watching_titles(&mut store),
+        ["movie:text", "movie:blob"],
+        "unreadable cutoffs must not suppress readable history"
+    );
+    assert_eq!(store.load_entries().unwrap().len(), 3);
+
+    store
+        .dismiss_continue_watching("movie", "text")
+        .expect("replace malformed cutoff and prune");
+    assert_eq!(continue_watching_titles(&mut store), ["movie:blob"]);
+    assert_eq!(
+        dismissal_rows(&store),
+        [
+            ("movie".to_string(), "text".to_string(), 200),
+            ("movie".to_string(), "valid".to_string(), 300),
+        ]
+    );
+}
+
+#[test]
 fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility() {
     use super::super::history_helpers::build_history_key;
     let source_path = TempPath::file("backup-cw-source");
@@ -306,16 +355,7 @@ fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility()
             source.dismiss_continue_watching(type_, id).unwrap();
         }
     }
-    source
-        .upsert_progress(
-            "movie:resumed",
-            &WatchProgress {
-                id: "resumed".into(),
-                type_: "movie".into(),
-                ..sample_progress(200, 120.0)
-            },
-        )
-        .unwrap();
+    seed_title(&mut source, "movie:resumed", "movie", "resumed", 200);
     let entries = source.load_entries().unwrap();
     let markers =
         serde_json::to_value(source.load_continue_watching_dismissals().unwrap()).unwrap();
@@ -329,16 +369,13 @@ fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility()
                 ("restored", 50),
                 ("local-hidden", 300),
             ] {
-                destination
-                    .upsert_progress(
-                        &format!("movie:{id}"),
-                        &WatchProgress {
-                            id: id.into(),
-                            type_: "movie".into(),
-                            ..sample_progress(last_watched, 120.0)
-                        },
-                    )
-                    .unwrap();
+                seed_title(
+                    &mut destination,
+                    &format!("movie:{id}"),
+                    "movie",
+                    id,
+                    last_watched,
+                );
             }
             destination
                 .dismiss_continue_watching("movie", "restored")
@@ -482,16 +519,7 @@ fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corru
         ("a-negative", "series", "negative", 100),
         ("z-negative", "anime", "negative", 200),
     ] {
-        store
-            .upsert_progress(
-                key,
-                &WatchProgress {
-                    id: id.into(),
-                    type_: type_.into(),
-                    ..sample_progress(last_watched, 120.0)
-                },
-            )
-            .unwrap();
+        seed_title(&mut store, key, type_, id, last_watched);
     }
     store
         .connection
@@ -585,16 +613,7 @@ fn recent_and_watched_titles_are_bounded_distinct_stable_and_read_only() {
         ("z", "movie", "older", 100),
         ("x", "movie", "oldest", 50),
     ] {
-        store
-            .upsert_progress(
-                key,
-                &WatchProgress {
-                    id: id.to_string(),
-                    type_: type_.to_string(),
-                    ..sample_progress(last_watched, 120.0)
-                },
-            )
-            .unwrap();
+        seed_title(&mut store, key, type_, id, last_watched);
     }
     assert_eq!(
         ResumeStore::load_recent_titles(&path).unwrap(),

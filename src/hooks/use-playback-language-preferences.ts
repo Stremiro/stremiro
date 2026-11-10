@@ -8,6 +8,7 @@ import {
   type TrackLanguageCandidate,
 } from '@/lib/api';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
+import type { PlayerRouteMediaType } from '@/lib/player-navigation';
 import {
   effectivePlaybackLanguagePreferencesQueryKey,
   invalidatePlaybackLanguageQueries,
@@ -22,7 +23,7 @@ const PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME = 1000 * 60 * 5;
 const saveQueue = createSerialTaskQueue();
 const pendingLanguagePatches = new Set<PlaybackLanguagePreferences>();
 
-export const playbackLanguagePreferencesQueryOptions = queryOptions({
+const playbackLanguagePreferencesQueryOptions = queryOptions({
   queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
   queryFn: async () => {
     await saveQueue.pending();
@@ -90,7 +91,7 @@ function enqueueSave(
 
 interface UsePlaybackLanguagePreferencesOptions {
   mediaId?: string;
-  mediaType?: 'movie' | 'series' | 'anime';
+  mediaType?: PlayerRouteMediaType;
 }
 
 export function usePlaybackLanguagePreferences({

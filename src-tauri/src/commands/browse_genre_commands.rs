@@ -53,6 +53,8 @@ pub struct BrowseGenres {
     pub movie: Vec<String>,
     pub series: Vec<String>,
     pub anime: Vec<String>,
+    /// Genres declared by arbitrary (non-movie/series) addon catalog types.
+    pub addon: Vec<String>,
 }
 
 /// The `year` catalog's required `genre` extra enumerates years, not genres.
@@ -100,6 +102,41 @@ fn collect_catalog_genres(addons: &[AddonConfig], catalog_type: &str) -> Vec<Str
     options
 }
 
+/// Union of `genre` extra options across enabled addon catalogs whose type is
+/// neither `movie` nor `series`; the `All` option is a manifest sentinel, not a
+/// genre, so it is skipped. No fallback — custom types only exist when declared.
+fn collect_addon_catalog_genres(addons: &[AddonConfig]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut options = Vec::new();
+    let catalogs = addons
+        .iter()
+        .filter_map(|addon| addon.capabilities.as_ref())
+        .flat_map(|manifest| &manifest.catalogs)
+        .filter(|catalog| {
+            !matches!(
+                catalog.type_.trim().to_ascii_lowercase().as_str(),
+                "movie" | "series"
+            )
+        });
+    for catalog in catalogs {
+        let genre_options = catalog
+            .extras
+            .iter()
+            .filter(|extra| extra.name.trim().eq_ignore_ascii_case("genre"))
+            .flat_map(|extra| &extra.options);
+        for option in genre_options {
+            let option = option.trim();
+            if option.is_empty() || is_year_option(option) || option.eq_ignore_ascii_case("all") {
+                continue;
+            }
+            if seen.insert(option.to_ascii_lowercase()) {
+                options.push(option.to_string());
+            }
+        }
+    }
+    options
+}
+
 pub(crate) fn build_browse_genres(addons: &[AddonConfig]) -> BrowseGenres {
     let movie = collect_catalog_genres(addons, "movie");
     let series = collect_catalog_genres(addons, "series");
@@ -120,11 +157,18 @@ pub(crate) fn build_browse_genres(addons: &[AddonConfig]) -> BrowseGenres {
         })
         .cloned()
         .collect();
+    // `all` already covers genres shared with movie/series catalogs.
+    let all_lower: HashSet<String> = all.iter().map(|genre| genre.to_ascii_lowercase()).collect();
+    let addon = collect_addon_catalog_genres(addons)
+        .into_iter()
+        .filter(|genre| !all_lower.contains(&genre.to_ascii_lowercase()))
+        .collect();
     BrowseGenres {
         all,
         movie,
         series,
         anime,
+        addon,
     }
 }
 
@@ -180,6 +224,30 @@ mod tests {
         assert_eq!(genres.series, ["Animation", "Drama"]);
         assert_eq!(genres.all, ["Drama", "Comedy", "Horror", "Animation"]);
         assert_eq!(genres.anime, ["Drama", "Comedy", "Horror"]);
+        assert!(genres.addon.is_empty());
+    }
+
+    #[test]
+    fn addon_catalog_genres_dedup_skip_all_sentinel_and_all_union() {
+        let genres = build_browse_genres(&[
+            addon(vec![
+                ("movie", vec!["Drama"]),
+                ("Podcast", vec!["All", "Tech", "tech", "  Sports ", "drama"]),
+            ]),
+            addon(vec![("tv", vec!["Sports", "Live", "2024", ""])]),
+        ]);
+        assert_eq!(genres.addon, ["Tech", "Sports", "Live"]);
+        assert_eq!(genres.movie, ["Drama"]);
+    }
+
+    #[test]
+    fn addon_genres_stay_empty_without_custom_catalog_types() {
+        assert!(build_browse_genres(&[]).addon.is_empty());
+        assert!(
+            build_browse_genres(&[addon(vec![("movie", vec!["Drama"])])])
+                .addon
+                .is_empty()
+        );
     }
 
     #[test]

@@ -66,7 +66,9 @@ impl SearchCatalogContinuation {
         }
         self.all_cursors.map_or_else(
             || self.skip.is_none(),
-            |cursors| cursors.movie.is_none() && cursors.series.is_none(),
+            |cursors| {
+                cursors.movie.is_none() && cursors.series.is_none() && cursors.addon.is_none()
+            },
         )
     }
 }
@@ -77,6 +79,9 @@ pub struct AllBrowseCursors {
     movie: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     series: Option<u32>,
+    // Addon catalog branch: only armed when a genre is selected on the all tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    addon: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,12 +234,18 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
 
     let all_browse = normalized_query.is_none()
         && (request.media_type.is_none() || parsed_media_type == Some(SearchMediaType::Anime));
+    let has_genres = request
+        .genres
+        .as_deref()
+        .is_some_and(|genres| !genres.is_empty());
     let continuation = request.continuation.unwrap_or_else(|| {
         if all_browse {
             SearchCatalogContinuation {
                 all_cursors: Some(AllBrowseCursors {
                     movie: Some(0),
                     series: Some(0),
+                    // Custom-type catalogs need a genre to answer; unarmed otherwise.
+                    addon: (request.media_type.is_none() && has_genres).then_some(0),
                 }),
                 ..Default::default()
             }
@@ -532,6 +543,9 @@ async fn fetch_query_results(
         media_types,
         &genre_extras,
         criteria.continuation.search_cursors.as_deref(),
+        // All tab: reach addon-declared types' search catalogs too. Typed tabs
+        // (movie/series/anime) keep their own type so results stay in-category.
+        criteria.media_type.is_none(),
     )
     .await?;
     let mut items = retain_titled_catalog_items(page.items);
@@ -570,24 +584,38 @@ async fn resolve_search_genres(
     client: &AddonResourceClient,
     items: &mut [MediaItem],
 ) -> bool {
-    let work = stream::iter(items.iter_mut()).for_each_concurrent(
+    let mut positions = HashMap::new();
+    let mut groups = Vec::new();
+    for item in items.iter_mut().filter(|item| item.genres.is_none()) {
+        // Same fold as display dedup: one meta fetch serves every casing variant.
+        let position = positions
+            .entry(catalog_dedup_key(&item.type_, &item.id))
+            .or_insert_with(|| {
+                groups.push(((item.type_.as_str(), item.id.as_str()), Vec::new()));
+                groups.len() - 1
+            });
+        groups[*position].1.push(&mut item.genres);
+    }
+    let deadline = tokio::time::Instant::now() + SEARCH_GENRE_BUDGET;
+    let work = stream::iter(groups).for_each_concurrent(
         SEARCH_GENRE_CONCURRENCY,
-        |item| async move {
-            if item.genres.is_none() {
-                if let Ok(details) = super::addon_registry::fetch_meta_details_from_addons(
-                    client,
-                    snapshot,
-                    &item.type_,
-                    &item.id,
-                )
-                .await
-                {
-                    item.genres.clone_from(&details.genres);
+        |((type_, id), genres)| async move {
+            if let Ok(details) = super::addon_registry::fetch_meta_details_from_addons(
+                client,
+                snapshot,
+                type_,
+                id,
+                Some(deadline),
+            )
+            .await
+            {
+                for genres in genres {
+                    genres.clone_from(&details.genres);
                 }
             }
         },
     );
-    let _ = tokio::time::timeout(SEARCH_GENRE_BUDGET, work).await;
+    let _ = tokio::time::timeout_at(deadline, work).await;
     items.iter().any(|item| item.genres.is_none())
 }
 
@@ -666,10 +694,7 @@ async fn fetch_registry_browse_pages(
                 .map(|targets| (targets, extras))
         })
         .collect();
-    super::addon_registry::fetch_catalog_pages_for_target_groups(
-        client, media_type, groups, deadline,
-    )
-    .await
+    super::addon_registry::fetch_catalog_pages_for_target_groups(client, groups, deadline).await
 }
 
 /// One first page per seed genre, sharing the captured registry and one fetch pool.
@@ -914,26 +939,92 @@ async fn fetch_browse_page(
     ))
 }
 
+/// The all-tab addon branch: one page across every custom-type catalog that
+/// accepts the selected genre. Claims carry bit `1 << 2` so the cursor only
+/// advances on genuinely new items, like the typed branches.
+async fn fetch_addon_browse_page(
+    snapshot: &[AddonConfig],
+    client: &AddonResourceClient,
+    criteria: &SearchCatalogCriteria,
+    skip: u32,
+) -> Result<(CatalogFetchPage, SearchCursorClaims), String> {
+    let mut any_targets = false;
+    let groups = criteria
+        .genres
+        .iter()
+        .map(|genre| {
+            let extras = catalog_browse_extras(Some(genre), skip);
+            match super::addon_registry::select_addon_catalog_targets(snapshot, &extras) {
+                Ok(targets) => {
+                    any_targets = true;
+                    Ok((targets, extras))
+                }
+                Err(error) => Err(error),
+            }
+        })
+        .collect();
+    // An empty source space is deterministic, not transient — exhaust the
+    // branch instead of preserving a cursor that can never succeed.
+    if !any_targets {
+        return Ok((
+            CatalogFetchPage {
+                items: Vec::new(),
+                next_skip: None,
+                partial: false,
+            },
+            HashMap::new(),
+        ));
+    }
+    let page = super::addon_registry::merge_catalog_pages(
+        super::addon_registry::fetch_catalog_pages_for_target_groups(client, groups, None).await,
+        "Failed to load catalog.",
+    )?;
+
+    let claims = page
+        .items
+        .iter()
+        .map(|item| (catalog_dedup_key(&item.type_, &item.id), 1_u64 << 2))
+        .collect();
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for item in apply_browse_filters(
+        retain_titled_catalog_items(page.items),
+        SearchMediaType::Movie,
+        &criteria.genres,
+        criteria.year_range,
+    ) {
+        if seen.insert(catalog_dedup_key(&item.type_, &item.id)) {
+            items.push(item);
+        }
+    }
+    Ok((CatalogFetchPage { items, ..page }, claims))
+}
+
 fn merge_all_browse_pages(
     continuation: SearchCatalogContinuation,
     movie: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
     series: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
+    addon: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
 ) -> Result<SearchCatalogPage, String> {
     let cursors = continuation.all_cursors.unwrap_or_default();
     let mut next = AllBrowseCursors::default();
-    let mut pages = [Vec::new(), Vec::new()];
+    let mut pages = [Vec::new(), Vec::new(), Vec::new()];
     let mut claims = HashMap::new();
     let mut succeeded = false;
     let mut partial = false;
     let mut first_error = None;
-    for (index, skip, outcome) in [(0, cursors.movie, movie), (1, cursors.series, series)] {
+    for (index, skip, outcome) in [
+        (0, cursors.movie, movie),
+        (1, cursors.series, series),
+        (2, cursors.addon, addon),
+    ] {
         let (Some(skip), Some(outcome)) = (skip, outcome) else {
             continue;
         };
-        let cursor = if index == 0 {
-            &mut next.movie
-        } else {
-            &mut next.series
+        let cursor = match index {
+            0 => &mut next.movie,
+            1 => &mut next.series,
+            _ => &mut next.addon,
         };
         match outcome {
             Ok((page, page_claims)) => {
@@ -957,17 +1048,20 @@ fn merge_all_browse_pages(
         return Err(first_error.unwrap_or_else(|| "Failed to load catalog.".into()));
     }
 
-    let [movie, series] = pages;
-    let mut items = Vec::with_capacity(movie.len() + series.len());
-    let mut movie = movie.into_iter();
-    let mut series = series.into_iter();
+    let [movie, series, addon] = pages;
+    let mut items = Vec::with_capacity(movie.len() + series.len() + addon.len());
+    let mut branches = [movie.into_iter(), series.into_iter(), addon.into_iter()];
     loop {
-        let pair = (movie.next(), series.next());
-        if pair.0.is_none() && pair.1.is_none() {
+        let mut advanced = false;
+        for branch in &mut branches {
+            if let Some(item) = branch.next() {
+                items.push(item);
+                advanced = true;
+            }
+        }
+        if !advanced {
             break;
         }
-        items.extend(pair.0);
-        items.extend(pair.1);
     }
     let mut page = finish_catalog_page(items, continuation, None, Some(next), None, claims);
     page.partial = partial || first_error.is_some();
@@ -994,14 +1088,18 @@ pub(super) fn finish_catalog_page(
     }
     let mut added_movie = search_cursors.is_none() && progress & 1 != 0;
     let mut added_series = search_cursors.is_none() && progress & 2 != 0;
+    let mut added_addon = search_cursors.is_none() && progress & 4 != 0;
     items.retain(|item| {
         if seen.len() >= MAX_CATALOG_SEEN_KEYS
             || !seen.insert(catalog_dedup_key(&item.type_, &item.id))
         {
             return false;
         }
+        let typed =
+            item.type_.eq_ignore_ascii_case("movie") || item.type_.eq_ignore_ascii_case("series");
         added_movie |= item.type_.eq_ignore_ascii_case("movie");
         added_series |= item.type_.eq_ignore_ascii_case("series");
+        added_addon |= !typed;
         true
     });
     // Filtered-out titles are remembered too, or an addon that ignores `skip` would
@@ -1026,6 +1124,9 @@ pub(super) fn finish_catalog_page(
                 series: cursors
                     .series
                     .filter(|skip| Some(*skip) == previous.series || added_series),
+                addon: cursors
+                    .addon
+                    .filter(|skip| Some(*skip) == previous.addon || added_addon),
             }
         }),
         // Display deduplication must not stop a different source's advancing pages.
@@ -1095,11 +1196,20 @@ pub(crate) async fn query_search_catalog_for_request(
                 Some(fetch_browse_page(snapshot, client, criteria, media_type, skip).await)
             }
         };
-        let (movie, series) = tokio::join!(
+        // The addon branch only exists on the untyped all tab; anime keeps its
+        // movie/series merge.
+        let addon = async {
+            let skip = (criteria.media_type.is_none())
+                .then_some(cursors.addon)
+                .flatten()?;
+            Some(fetch_addon_browse_page(&snapshot, client, &criteria, skip).await)
+        };
+        let (movie, series, addon) = tokio::join!(
             fetch(SearchMediaType::Movie, cursors.movie),
             fetch(SearchMediaType::Series, cursors.series),
+            addon,
         );
-        return merge_all_browse_pages(criteria.continuation, movie, series);
+        return merge_all_browse_pages(criteria.continuation, movie, series, addon);
     }
 
     let skip = criteria.continuation.skip.unwrap_or(0);

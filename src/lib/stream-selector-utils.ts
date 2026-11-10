@@ -14,6 +14,13 @@ export const DEFAULT_FILTERS: StreamSelectorPreferences = {
   batch: 'all',
 };
 
+/** Counts for the batch segment, split from the same row set the list filters to. */
+export interface StreamBatchCounts {
+  all: number;
+  episodes: number;
+  packs: number;
+}
+
 interface TechBadge {
   label: string;
   cls: string;

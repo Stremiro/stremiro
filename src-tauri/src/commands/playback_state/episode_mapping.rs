@@ -131,7 +131,7 @@ fn read_episode_mapping_digest(value: serde_json::Value) -> Option<(u64, u64)> {
         .map(|record| (record.digest, record.seen_at))
 }
 
-/// Fingerprint of every input `build_episode_mapping_snapshot` reads, so a re-open
+/// Fingerprint of each coordinate's first episode mapping, so a re-open
 /// with an unchanged episode list skips the per-episode read/compare loop.
 /// Persisted per title; a mismatch (or eviction) costs one rescan, never a wrong result.
 pub(super) fn episode_mappings_digest(
@@ -144,7 +144,11 @@ pub(super) fn episode_mappings_digest(
     media_type.hash(&mut hasher);
     media_id.hash(&mut hasher);
     fallback_lookup_id.hash(&mut hasher);
+    let mut seen = HashSet::new();
     for episode in episodes {
+        if !seen.insert((episode.season, episode.episode)) {
+            continue;
+        }
         episode.id.hash(&mut hasher);
         episode.season.hash(&mut hasher);
         episode.episode.hash(&mut hasher);
@@ -191,8 +195,13 @@ pub(super) fn collect_episode_mapping_writes(
 ) -> (Vec<(String, CachedEpisodeMapping)>, Vec<String>, bool) {
     let mut snapshot_keys = Vec::with_capacity(episodes.len().min(snapshots.len()));
     let mut pending_writes = Vec::new();
+    let mut seen = HashSet::new();
 
     for (episode, next_snapshot) in episodes.iter().zip(snapshots.iter()) {
+        // Coordinate lookups select the first row, including duplicate addon episodes.
+        if !seen.insert((episode.season, episode.episode)) {
+            continue;
+        }
         let snapshot_key = playback_episode_mapping_snapshot_key(
             media_type,
             media_id,
@@ -396,7 +405,7 @@ impl PlaybackStateService {
             .iter()
             .map(|episode| {
                 build_episode_mapping_snapshot(
-                    media_type,
+                    &media_type,
                     &media_id,
                     normalized_fallback_lookup_id.as_deref(),
                     episode,
@@ -405,7 +414,7 @@ impl PlaybackStateService {
             })
             .collect();
         let digest = episode_mappings_digest(
-            media_type,
+            &media_type,
             &media_id,
             normalized_fallback_lookup_id.as_deref(),
             episodes,
@@ -433,7 +442,7 @@ impl PlaybackStateService {
             load_advisory_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
         let (pending_writes, pending_deletes, mut changed) = collect_episode_mapping_writes(
             &store,
-            media_type,
+            &media_type,
             &media_id,
             episodes,
             &snapshots,
@@ -493,7 +502,7 @@ impl PlaybackStateService {
             return Ok(None);
         };
         let store = self.open_state_store(app)?;
-        let key = playback_episode_mapping_snapshot_key(media_type, &media_id, season, episode);
+        let key = playback_episode_mapping_snapshot_key(&media_type, &media_id, season, episode);
         let cached: Option<CachedEpisodeMapping> =
             store.get_typed(playback_episode_mapping_item_key(&key));
         Ok(cached.and_then(|cached| {
@@ -520,7 +529,7 @@ impl PlaybackStateService {
         Ok(load_playback_episode_mapping_snapshot(
             &store,
             &playback_episode_mapping_snapshot_key(
-                media_type,
+                &media_type,
                 &media_id,
                 canonical_season,
                 canonical_episode,

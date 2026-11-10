@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { memo, useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { CHROME_CLOSE_BUTTON_CLASS, CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import { ShortcutTable } from '@/components/shortcut-table';
 import { buildPlayerShortcutRows, type PlayerKeymap } from '@/lib/player-keybindings';
@@ -11,10 +11,7 @@ interface PlayerShortcutsOverlayProps {
 
 // The shortcuts binding toggles this from the hotkey layer; the Escape chain in
 // usePlayerHotkeys closes it before panels, fullscreen, or back-nav.
-export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
-  keymap,
-  onClose,
-}: PlayerShortcutsOverlayProps) {
+export function PlayerShortcutsOverlay({ keymap, onClose }: PlayerShortcutsOverlayProps) {
   const rows = buildPlayerShortcutRows(keymap);
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -95,4 +92,4 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
       </div>
     </div>
   );
-});
+}

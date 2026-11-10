@@ -1415,6 +1415,24 @@ fn last_location_allows_only_bounded_app_routes() {
 }
 
 #[test]
+fn last_location_limit_counts_unicode_scalars_not_bytes() {
+    let prefix = "/search?q=";
+    for scalar in ["a", "界", "\u{1f600}"] {
+        let boundary = format!("{prefix}{}", scalar.repeat(512 - prefix.len()));
+        assert_eq!(
+            super::normalize_last_location(Some(boundary.clone())),
+            Some(boundary.clone()),
+            "512 scalars are accepted for {scalar:?}"
+        );
+        assert_eq!(
+            super::normalize_last_location(Some(format!("{boundary}{scalar}"))),
+            None,
+            "513 scalars are rejected for {scalar:?}"
+        );
+    }
+}
+
+#[test]
 fn startup_route_uses_only_valid_browse_locations() {
     for (page, route) in [
         (super::StartupPage::Home, None),

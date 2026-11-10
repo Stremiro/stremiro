@@ -105,6 +105,7 @@ function AppNavigationBinder() {
 function AppLinkManager() {
   useEffect(() => {
     if (!isTauriDesktopRuntime()) return;
+    let isActive = true;
     const openPendingLink = () => {
       void api
         .takePendingAppLink()
@@ -114,12 +115,19 @@ function AppLinkManager() {
         .catch(() => undefined);
     };
     const listener = listen('app://link', openPendingLink);
+    const settingsListener = listen('app://settings-requested', () => {
+      if (isActive) navigateApp('/settings');
+    });
+    void settingsListener.catch(() => undefined);
     void listener.then(openPendingLink, openPendingLink);
     return () => {
-      void listener.then(
-        (unlisten) => unlisten(),
-        () => undefined,
-      );
+      isActive = false;
+      for (const pendingListener of [listener, settingsListener]) {
+        void pendingListener.then(
+          (unlisten) => unlisten(),
+          () => undefined,
+        );
+      }
     };
   }, []);
 

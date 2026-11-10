@@ -8,7 +8,7 @@ import {
   Rewind,
   SkipForward,
 } from 'lucide-react';
-import { memo, useSyncExternalStore } from 'react';
+import { useSyncExternalStore } from 'react';
 import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import type { SubscribableStore } from '@/lib/subscribable-store';
@@ -50,12 +50,7 @@ interface PlayerOsdOverlayProps {
 }
 
 // Memoized between OSD events. The live region stays mounted while idle — remounting can drop screen-reader output.
-export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
-  store,
-  allowed,
-  isFullscreen,
-  compact,
-}: PlayerOsdOverlayProps) {
+export function PlayerOsdOverlay({ store, allowed, isFullscreen, compact }: PlayerOsdOverlayProps) {
   const { action, visible } = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const MessageIcon = action?.kind === 'message' && action.icon ? MESSAGE_ICONS[action.icon] : null;
 
@@ -152,4 +147,4 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
       )}
     </div>
   );
-});
+}

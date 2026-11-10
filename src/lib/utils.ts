@@ -11,13 +11,16 @@ export function orderByIds<T extends { id: string }>(
   orderedIds?: readonly string[] | null,
 ): T[] {
   if (!orderedIds) return source;
-  const remaining = new Map(source.map((item) => [item.id, item]));
-  const ordered = orderedIds.flatMap((id) => {
+  const remaining = new Map<string, T>();
+  for (const item of source) remaining.set(item.id, item);
+  const ordered: T[] = [];
+  for (const id of orderedIds) {
     const item = remaining.get(id);
     remaining.delete(id);
-    return item ? [item] : [];
-  });
-  return [...ordered, ...remaining.values()];
+    if (item) ordered.push(item);
+  }
+  for (const item of remaining.values()) ordered.push(item);
+  return ordered;
 }
 
 export function queryNeedsRetry(query: {
@@ -83,7 +86,7 @@ export const TITLE_ICON_CLASS =
   'shrink-0 text-white motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95 motion-safe:duration-500 motion-safe:fill-mode-backwards motion-safe:[animation-delay:120ms]';
 
 export const GENRE_LINK_CLASS =
-  'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[13px] font-medium text-white/85 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
+  'inline-flex min-h-7 items-center gap-1.5 rounded-sm text-[13px] font-medium text-white/65 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
 
 export const POPOVER_MOTION_CLASS =
   'data-[state=open]:animate-surface-in data-[state=closed]:animate-surface-out motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none';
@@ -108,16 +111,20 @@ export function getAccentTextColor(value: string): '#000000' | '#ffffff' {
   const [r, g, b] = rgb.map((channel) => {
     const normalized = channel / 255;
     return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  });
+  }) as [number, number, number];
   const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   return luminance > 0.179 ? '#000000' : '#ffffff';
 }
 
 const NEUTRAL_ACCENT = '#d4d4d8';
+const NEUTRAL_ACCENT_RGB = hexToRgbTriplet(NEUTRAL_ACCENT);
+const NEUTRAL_ACCENT_TEXT = getAccentTextColor(NEUTRAL_ACCENT);
 
 export function applyAccentVars(accent: string, targets: AccentTargets) {
   const root = document.documentElement;
-  root.style.setProperty('--app-accent-rgb', hexToRgbTriplet(accent));
+  const accentRgb = hexToRgbTriplet(accent);
+  const accentText = getAccentTextColor(accent);
+  root.style.setProperty('--app-accent-rgb', accentRgb);
   const scopes: Array<[string, boolean, boolean]> = [
     ['accent-nav', targets.navigation, true],
     ['accent-act', targets.actions, true],
@@ -128,8 +135,9 @@ export function applyAccentVars(accent: string, targets: AccentTargets) {
   for (const [scope, enabled, foreground] of scopes) {
     const color = enabled ? accent : NEUTRAL_ACCENT;
     root.style.setProperty(`--${scope}`, color);
-    root.style.setProperty(`--${scope}-rgb`, hexToRgbTriplet(color));
-    if (foreground) root.style.setProperty(`--on-${scope}`, getAccentTextColor(color));
+    root.style.setProperty(`--${scope}-rgb`, enabled ? accentRgb : NEUTRAL_ACCENT_RGB);
+    if (foreground)
+      root.style.setProperty(`--on-${scope}`, enabled ? accentText : NEUTRAL_ACCENT_TEXT);
   }
   root.style.setProperty('--accent-seek', targets.seekbar ? accent : '#ffffff');
 }
@@ -209,22 +217,30 @@ export function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => T)
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** `work.finally(cleanup)` with an awaited async cleanup; hooks call this because the React Compiler can't lower `try/finally`. */
-export async function withFinally<T>(work: Promise<T>, cleanup: () => unknown): Promise<T> {
-  try {
-    return await work;
-  } finally {
-    await cleanup();
-  }
+/** Await cleanup without putting `try/finally` in compiler-managed hooks. */
+export function withFinally<T>(work: Promise<T>, cleanup: () => unknown): Promise<T> {
+  return work.finally(cleanup);
 }
 
 let reducedMotionQuery: MediaQueryList | undefined;
 
+function getReducedMotionQuery(): MediaQueryList | undefined {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+  reducedMotionQuery ??= window.matchMedia('(prefers-reduced-motion: reduce)');
+  return reducedMotionQuery;
+}
+
 /** OS reduced-motion check — JS-driven motion (smooth scrolls) goes instant; CSS is covered by the index.css guard. */
 export function prefersReducedMotion(): boolean {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
-  reducedMotionQuery ??= window.matchMedia('(prefers-reduced-motion: reduce)');
-  return reducedMotionQuery.matches;
+  return getReducedMotionQuery()?.matches ?? false;
+}
+
+/** `useSyncExternalStore` subscribe half — fires when the OS reduced-motion setting flips mid-session. */
+export function subscribeReducedMotion(callback: () => void): () => void {
+  const query = getReducedMotionQuery();
+  if (!query) return () => {};
+  query.addEventListener('change', callback);
+  return () => query.removeEventListener('change', callback);
 }
 
 /** `ScrollBehavior` honoring reduced motion. */
@@ -289,10 +305,23 @@ export function formatEpisodeHeading(
   return [formatSeasonEpisode(season, episode), title].filter(Boolean).join(' · ');
 }
 
-/** Card/hero type pill — series/anime get their own labels, else Movie. */
+const MEDIA_TYPE_ACRONYMS = new Set(['tv', 'ppv', 'iptv']);
+
+/** Card/hero type pill — series/anime get their own labels, addon types titlecase per word, else Movie. */
 export function mediaTypeLabel(type?: string | null): string {
-  if (type?.trim().toLowerCase() === 'anime') return 'Anime';
-  return isSeriesLikeMediaType(type) ? 'TV Series' : 'Movie';
+  const normalized = type?.trim().toLowerCase();
+  if (normalized === 'anime') return 'Anime';
+  if (isSeriesLikeMediaType(type)) return 'TV Series';
+  if (!normalized || normalized === 'movie') return 'Movie';
+  return (
+    normalized
+      .split(/[\s_-]+/)
+      .filter(Boolean)
+      .map((word) =>
+        MEDIA_TYPE_ACRONYMS.has(word) ? word.toUpperCase() : word[0]!.toUpperCase() + word.slice(1),
+      )
+      .join(' ') || 'Movie'
+  );
 }
 
 /** Genre pills — catalog genres are already painted, so a late details payload must not swap the text. */

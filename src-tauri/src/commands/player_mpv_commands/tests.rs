@@ -314,6 +314,10 @@ fn mpv_command_targets_are_gated() {
         "https://bad host/video",
         "https://example.com:invalid/video",
         "http://[::1/video",
+        "https://user:pass@cdn.example/video",
+        "https://8.8.8.8/video",
+        "https://134744072/video",
+        "https://[2606:4700:4700::1111]/video",
     ] {
         assert!(
             validate_mpv_command("loadfile", &[json!(target)]).is_err(),
@@ -325,6 +329,7 @@ fn mpv_command_targets_are_gated() {
         "http://127.0.0.1:11470/video",
         "http://localhost:11470/video",
         "http://[::1]:11470/video",
+        "http://8.8.8.8/video",
     ] {
         assert!(
             validate_mpv_command("loadfile", &[json!(target)]).is_ok(),

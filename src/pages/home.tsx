@@ -6,13 +6,9 @@ import { Hero } from '@/components/hero';
 import {
   HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
   HorizontalMediaRail,
+  RailSkeleton,
 } from '@/components/horizontal-media-rail';
-import {
-  MediaCardSkeleton,
-  MEDIA_CARD_SLOT_CLASS_NAME,
-  mediaCardRailKey,
-  renderMediaCardRailItem,
-} from '@/components/media-card';
+import { mediaCardRailKey, renderMediaCardRailItem } from '@/components/media-card';
 import { MediaRow, RailTitleLink } from '@/components/media-row';
 import { ResumeSection } from '@/components/resume-section';
 import { RetryBanner } from '@/components/retry-banner';
@@ -100,11 +96,7 @@ function HomeRowPlaceholder() {
       </div>
       <div className={`${HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS} overflow-hidden`}>
         <div className='flex gap-4 px-1 pt-1 pb-8'>
-          {Array.from({ length: 8 }, (_, index) => (
-            <div key={index} className={`flex-none ${MEDIA_CARD_SLOT_CLASS_NAME}`}>
-              <MediaCardSkeleton />
-            </div>
-          ))}
+          <RailSkeleton />
         </div>
       </div>
     </div>

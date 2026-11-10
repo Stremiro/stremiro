@@ -23,9 +23,191 @@ fn parse_meta_item(value: serde_json::Value) -> Option<MediaDetails> {
     super::parse_meta_item(&serde_json::value::to_raw_value(&value).ok()?)
 }
 
+#[tokio::test]
+async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity() {
+    use crate::test_helpers::{test_details, test_episode};
+
+    let original_url = "https://episodes.metahub.space/tt0388629/2/1/w780.jpg";
+    let corrected_url = "https://episodes.metahub.space/tt0388629/1/9/w780.jpg";
+    let episode = Episode {
+        title: Some("The Honorable Liar? Captain Usopp!".into()),
+        release_date: Some("2000-01-12".into()),
+        thumbnail: Some(original_url.into()),
+        stream_lookup_id: Some("original-lookup".into()),
+        stream_season: Some(2),
+        stream_episode: Some(1),
+        ..test_episode("tt0388629:2:1", 2, 1)
+    };
+    let mut details = MediaDetails {
+        episodes: Some(vec![episode]),
+        is_anime: true,
+        ..test_details("tt0388629", "series")
+    };
+    let mut artwork = details.clone();
+    let target = &mut artwork.episodes.as_mut().unwrap()[0];
+    target.season = 1;
+    target.episode = 9;
+    target.thumbnail = Some(corrected_url.into());
+    let client = AddonResourceClient::new();
+    let url = build_resource_url(
+        "https://cinemeta-live.strem.io",
+        "meta",
+        "series",
+        "tt0388629",
+        &[],
+    )
+    .unwrap();
+    client.meta_cache.put(
+        &resource_cache_key("meta", &url),
+        Arc::new(artwork),
+        false,
+        || true,
+    );
+    for _ in 0..2 {
+        client
+            .repair_episode_artwork(&mut details, |_| panic!("cached artwork normalized again"))
+            .await;
+        let episode = &details.episodes.as_ref().unwrap()[0];
+        assert_eq!(episode.thumbnail.as_deref(), Some(corrected_url));
+        assert_eq!(
+            (&*episode.id, episode.season, episode.episode),
+            ("tt0388629:2:1", 2, 1)
+        );
+        assert_eq!(episode.stream_lookup_id.as_deref(), Some("original-lookup"));
+        assert_eq!(
+            (episode.stream_season, episode.stream_episode),
+            (Some(2), Some(1))
+        );
+    }
+    for (id, type_) in [("tt1234567", "series"), ("tt0388629", "movie")] {
+        let mut unrelated = details.clone();
+        unrelated.id = id.into();
+        unrelated.type_ = type_.into();
+        unrelated.episodes.as_mut().unwrap()[0].thumbnail = Some(corrected_url.into());
+        client.meta_cache.put(
+            &resource_cache_key("meta", &url),
+            Arc::new(unrelated),
+            false,
+            || true,
+        );
+        details.episodes.as_mut().unwrap()[0].thumbnail = Some(original_url.into());
+        client
+            .repair_episode_artwork(&mut details, |_| panic!("cached artwork normalized again"))
+            .await;
+        assert_eq!(
+            details.episodes.as_ref().unwrap()[0].thumbnail.as_deref(),
+            Some(original_url)
+        );
+    }
+}
+
+#[test]
+fn cinemeta_artwork_rejects_ambiguous_identity_and_preserves_other_artwork() {
+    use crate::test_helpers::{test_details, test_episode};
+
+    let episode = |id: &str, title: Option<&str>, day: Option<&str>, thumbnail: &str| Episode {
+        title: title.map(str::to_string),
+        release_date: day.map(str::to_string),
+        thumbnail: Some(thumbnail.into()),
+        ..test_episode(id, 2, 1)
+    };
+    let original = "https://episodes.metahub.space/tt123/2/1/w780.jpg";
+    let corrected = "https://episodes.metahub.space/tt123/1/9/w780.jpg";
+    let day = Some("2024-01-01");
+    let mut details = MediaDetails {
+        episodes: Some(vec![
+            episode("target-duplicate", Some("Target duplicate"), day, original),
+            episode(
+                "source-duplicate-a",
+                Some("Source duplicate"),
+                day,
+                original,
+            ),
+            episode(
+                "source-duplicate-b",
+                Some("Source duplicate"),
+                day,
+                original,
+            ),
+            episode("different-date", Some("Different date"), day, original),
+            episode(
+                "custom-art",
+                Some("Custom art"),
+                day,
+                "https://cdn.example/thumb.jpg",
+            ),
+            episode("no-title", None, day, original),
+            episode("no-date", Some("No date"), None, original),
+        ]),
+        ..test_details("tt123", "series")
+    };
+    let artwork = MediaDetails {
+        episodes: Some(vec![
+            episode("a", Some("Target duplicate"), day, corrected),
+            episode("b", Some("Target duplicate"), day, corrected),
+            episode("c", Some("Source duplicate"), day, corrected),
+            episode("d", Some("Different date"), Some("2024-01-02"), corrected),
+            episode("e", Some("Custom art"), day, corrected),
+            episode("f", None, day, corrected),
+            episode("g", Some("No date"), None, corrected),
+        ]),
+        ..test_details("tt123", "series")
+    };
+    let before = serde_json::to_value(&details).unwrap();
+    merge_cinemeta_artwork(&mut details, &artwork);
+    assert_eq!(serde_json::to_value(&details).unwrap(), before);
+}
+
+#[tokio::test]
+async fn cinemeta_artwork_failure_and_metadata_only_shapes_preserve_original_details() {
+    use crate::test_helpers::{test_details, test_episode};
+
+    let mut details = MediaDetails {
+        is_anime: true,
+        ..test_details("tt0388629", "series")
+    };
+    assert!(!needs_cinemeta_artwork(&details));
+    details.episodes = Some(vec![Episode {
+        thumbnail: Some("https://episodes.metahub.space/tt0388629/2/1/w780.jpg".into()),
+        ..test_episode("tt0388629:2:1", 2, 1)
+    }]);
+    assert!(needs_cinemeta_artwork(&details));
+    for (id, kind, anime) in [
+        ("kitsu:1", "series", true),
+        ("tt0388629", "movie", true),
+        ("tt0388629", "series", false),
+    ] {
+        let mut rejected = details.clone();
+        rejected.id = id.into();
+        rejected.type_ = kind.into();
+        rejected.is_anime = anime;
+        assert!(!needs_cinemeta_artwork(&rejected));
+    }
+    let client = AddonResourceClient::new();
+    let url = build_resource_url(
+        "https://cinemeta-live.strem.io",
+        "meta",
+        "series",
+        "tt0388629",
+        &[],
+    )
+    .unwrap();
+    client.failure_cache.put(
+        &resource_cache_key("meta", &url),
+        "Artwork unavailable".into(),
+        false,
+        || true,
+    );
+    let before = serde_json::to_value(&details).unwrap();
+    client
+        .repair_episode_artwork(&mut details, |_| panic!("failed artwork normalized"))
+        .await;
+    assert_eq!(serde_json::to_value(details).unwrap(), before);
+}
+
 #[test]
 fn resource_ids_reject_oversized_values_without_aliasing() {
-    let prefix = "x".repeat(MAX_ID_CHARS);
+    let prefix = "x".repeat(crate::commands::MEDIA_ID_MAX_CHARS);
     for id in [
         format!("{prefix}a"),
         format!("{prefix}b"),
@@ -61,36 +243,6 @@ fn resource_ids_reject_oversized_values_without_aliasing() {
             .collect::<Vec<_>>(),
         ["tt1:1:1"]
     );
-}
-
-#[test]
-fn cached_catalog_page_applies_normalizer_and_counts_consumed_entries_before_the_cap() {
-    let mut metas = vec![serde_json::json!(null)];
-    metas.extend((0..=MAX_CATALOG_ITEMS).map(|index| {
-        serde_json::json!({
-            "id": format!("tt{index}"), "type": "movie", "name": "Title"
-        })
-    }));
-    let bytes = serde_json::to_vec(&serde_json::json!({"metas": metas})).unwrap();
-    let page = parse_catalog_page(
-        serde_json::from_slice(&bytes).unwrap(),
-        |mut item| {
-            item.primary_year = Some(2024);
-            if item.id == "tt0" {
-                item.title.clear();
-            }
-            item
-        },
-        None,
-    );
-    assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS + 1);
-    assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
-    assert!(page.items[0].title.is_empty());
-    assert_eq!(page.items.last().unwrap().id, "tt499");
-    assert!(page
-        .items
-        .iter()
-        .all(|item| item.primary_year == Some(2024)));
 }
 
 #[tokio::test]
@@ -338,7 +490,7 @@ fn build_resource_url_encodes_id_and_extras() {
         url,
         "https://v3-cinemeta.strem.io/meta/series/tt0944947%3A1%3A2.json"
     );
-    let id = "界".repeat(MAX_ID_CHARS);
+    let id = "界".repeat(crate::commands::MEDIA_ID_MAX_CHARS);
     assert!(crate::commands::normalize_media_id(&id).is_some());
     let lookup = format!("{id}:{}:{}", u32::MAX, u32::MAX);
     for resource in ["stream", "subtitles"] {
@@ -400,7 +552,7 @@ fn parse_catalog_skips_malformed_siblings() {
 }
 
 #[test]
-fn parse_catalog_caps_valid_rows_and_counts_consumed_source_rows() {
+fn parse_catalog_normalizes_caps_valid_rows_and_counts_consumed_source_rows() {
     let metas: Vec<_> = (0..=MAX_CATALOG_ITEMS)
         .flat_map(|index| {
             [
@@ -410,12 +562,53 @@ fn parse_catalog_caps_valid_rows_and_counts_consumed_source_rows() {
         })
         .collect();
     let bytes = serde_json::to_vec(&serde_json::json!({"metas": metas})).unwrap();
-    let page = parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |item| item, None);
+    let page = parse_catalog_page(
+        serde_json::from_slice(&bytes).unwrap(),
+        |mut item| {
+            item.primary_year = Some(2024);
+            if item.id == "0" {
+                item.title.clear();
+            }
+            item
+        },
+        None,
+    );
     assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS * 2);
     assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
     for (index, item) in page.items.iter().enumerate() {
         assert_eq!(item.id, index.to_string());
-        assert_eq!(item.title, index.to_string());
+        assert_eq!(
+            item.title,
+            if index == 0 {
+                String::new()
+            } else {
+                index.to_string()
+            }
+        );
+        assert_eq!(item.primary_year, Some(2024));
+    }
+}
+
+#[test]
+fn catalog_and_metadata_years_keep_precedence_and_normalized_fallbacks() {
+    use serde_json::json;
+
+    for (year, release_info, expected) in [
+        (json!(" 2024 "), json!("1999"), Some("2024")),
+        (json!(2024), json!("1999"), Some("2024")),
+        (json!(" "), json!(" 2023– "), Some("2023–")),
+        (json!({}), json!(2022), Some("2022")),
+        (json!(null), json!(null), None),
+    ] {
+        let value = json!({
+            "id": "tt1", "name": "Title", "type": "movie",
+            "year": year, "releaseInfo": release_info,
+        });
+        assert_eq!(
+            catalog_item(value.clone()).unwrap().year.as_deref(),
+            expected
+        );
+        assert_eq!(parse_meta_item(value).unwrap().year.as_deref(), expected);
     }
 }
 
@@ -1194,6 +1387,13 @@ impl SubtitleDiskTest {
         client
     }
 
+    async fn fetch(&self, base: &str, type_: &str, id: &str) -> Vec<AddonSubtitle> {
+        self.client()
+            .fetch_subtitles(base, type_, id)
+            .await
+            .unwrap()
+    }
+
     fn file(&self, base: &str, type_: &str, id: &str) -> PathBuf {
         let url = build_resource_url(base, "subtitles", type_, id, &[]).unwrap();
         self.0.join("subtitles-v1").join(format!(
@@ -1220,11 +1420,7 @@ async fn subtitle_disk_cache_reuses_positive_response_after_restart_without_rewr
     }
     assert_eq!(baseline.finish().len(), 2, "memory-only clients each fetch");
     let server = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None)]);
-    let first = disk
-        .client()
-        .fetch_subtitles(&server.url, "series", "tt1:1:2")
-        .await
-        .unwrap();
+    let first = disk.fetch(&server.url, "series", "tt1:1:2").await;
     let path = disk.file(&server.url, "series", "tt1:1:2");
     let original = std::fs::read(&path).unwrap();
     let restarted = disk.client();
@@ -1262,14 +1458,7 @@ async fn subtitle_disk_cache_isolates_configured_source_type_and_episode() {
         (server.url.as_str(), "series", "tt1:1:3"),
     ] {
         for _ in 0..2 {
-            assert_eq!(
-                disk.client()
-                    .fetch_subtitles(base, type_, id)
-                    .await
-                    .unwrap()
-                    .len(),
-                1
-            );
+            assert_eq!(disk.fetch(base, type_, id).await.len(), 1);
         }
     }
     assert_eq!(
@@ -1291,10 +1480,7 @@ async fn subtitle_disk_hits_do_not_extend_signed_url_lifetime_in_memory() {
         (200, DISK_SUBTITLE_RESPONSE, None),
         (200, fresh, None),
     ]);
-    disk.client()
-        .fetch_subtitles(&server.url, "movie", "tt1")
-        .await
-        .unwrap();
+    disk.fetch(&server.url, "movie", "tt1").await;
     let path = disk.file(&server.url, "movie", "tt1");
     let bytes = std::fs::read(&path).unwrap();
     let mut entry: DiskEnvelope = serde_json::from_slice(&bytes).unwrap();
@@ -1321,10 +1507,7 @@ async fn subtitle_disk_hits_do_not_extend_signed_url_lifetime_in_memory() {
 async fn subtitle_disk_corruption_oversize_and_unsafe_urls_fall_back_to_http() {
     let disk = SubtitleDiskTest::new();
     let server = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None); 5]);
-    disk.client()
-        .fetch_subtitles(&server.url, "movie", "tt1")
-        .await
-        .unwrap();
+    disk.fetch(&server.url, "movie", "tt1").await;
     let path = disk.file(&server.url, "movie", "tt1");
     let unsafe_entry = serde_json::to_vec(&DiskEnvelope {
         key: None,
@@ -1349,11 +1532,7 @@ async fn subtitle_disk_corruption_oversize_and_unsafe_urls_fall_back_to_http() {
     ] {
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(
-            disk.client()
-                .fetch_subtitles(&server.url, "movie", "tt1")
-                .await
-                .unwrap()[0]
-                .url,
+            disk.fetch(&server.url, "movie", "tt1").await[0].url,
             "https://subs.test/en.srt?token=signed"
         );
     }

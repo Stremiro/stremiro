@@ -1,3 +1,5 @@
+import { boundedMapSet } from '@/lib/utils';
+
 export const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
   month: 'short',
   day: 'numeric',
@@ -21,15 +23,25 @@ export function toLocalMidnight(date: Temporal.PlainDate): Date {
   return new Date(date.toZonedDateTime(Temporal.Now.timeZoneId()).epochMilliseconds);
 }
 
+// Episode lists and the calendar re-parse the same release dates every render;
+// the PlainDate parse is the cost, so memoize on the day prefix (PlainDate is immutable).
+const scheduleDayCache = new Map<string, Temporal.PlainDate | null>();
+const SCHEDULE_DAY_CACHE_MAX = 256;
+
 /** Rust normalizes release dates; an ISO timestamp's prefix still means its named local day. */
 export function parseScheduleDay(value?: string | null): Temporal.PlainDate | null {
   const prefix = value?.trim().match(/^\d{4}-\d{2}-\d{2}/)?.[0];
   if (!prefix) return null;
+  const cached = scheduleDayCache.get(prefix);
+  if (cached !== undefined) return cached;
+  let day: Temporal.PlainDate | null = null;
   try {
-    return Temporal.PlainDate.from(prefix);
+    day = Temporal.PlainDate.from(prefix);
   } catch {
-    return null;
+    // Bad calendar dates stay misses too.
   }
+  boundedMapSet(scheduleDayCache, prefix, day, SCHEDULE_DAY_CACHE_MAX);
+  return day;
 }
 
 export function parseLocalScheduleDate(value?: string | null): Date | null {

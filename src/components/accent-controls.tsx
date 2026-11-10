@@ -137,7 +137,7 @@ export function AccentControls({
         }}
       >
         <div className='flex items-center justify-between gap-2'>
-          <div className='text-[10px] font-semibold uppercase tracking-widest text-zinc-400'>
+          <div className='text-[12px] font-semibold uppercase tracking-widest text-zinc-400'>
             Accent
           </div>
           <div className='flex items-center gap-3'>
@@ -153,7 +153,7 @@ export function AccentControls({
                   aria-pressed={tone === option}
                   onClick={() => setTone(option)}
                   className={cn(
-                    'h-6 rounded-sm px-2 text-[11px] font-medium capitalize transition-colors motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40',
+                    'h-7 rounded-md px-2.5 text-[12px] font-medium capitalize transition-colors motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40',
                     tone === option
                       ? 'bg-white/[0.1] text-white shadow-sm'
                       : 'text-zinc-400 hover:text-zinc-200',
@@ -169,7 +169,7 @@ export function AccentControls({
               onClick={() => {
                 if (accentColor !== DEFAULT_ACCENT_COLOR) changeColor(DEFAULT_ACCENT_COLOR);
               }}
-              className='rounded-sm text-[11px] font-medium text-zinc-400 transition-colors motion-reduce:transition-none hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:text-zinc-400'
+              className='rounded-sm text-[12px] font-medium text-zinc-400 transition-colors motion-reduce:transition-none hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:text-zinc-400'
             >
               Reset
             </button>
@@ -191,7 +191,7 @@ export function AccentControls({
                 aria-label={`${preset.label} accent`}
                 aria-pressed={isActive}
                 onClick={() => changeColor(color)}
-                className='flex h-6 w-6 items-center justify-center justify-self-center rounded-full border border-white/10 transition-transform duration-150 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 motion-reduce:transition-none motion-reduce:transform-none'
+                className='flex size-7 items-center justify-center justify-self-center rounded-full border border-white/10 transition-transform duration-150 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 motion-reduce:transition-none motion-reduce:transform-none'
                 // Selected ring uses the swatch's own color with a dark gap —
                 // quiet on every hue where a white ring + glow shouted.
                 style={{
@@ -220,10 +220,10 @@ export function AccentControls({
             aria-invalid={isAccentHexInvalid}
             aria-describedby={isAccentHexInvalid ? validationId : undefined}
             spellCheck={false}
-            className='h-9 rounded-lg border-white/[0.08] bg-white/[0.03] pl-11 text-xs font-mono text-zinc-100 uppercase placeholder:text-zinc-500 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
+            className='h-10 rounded-lg border-white/[0.08] bg-white/[0.03] pl-12 text-[13px] font-mono text-zinc-100 uppercase placeholder:text-zinc-500 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
           />
           <div
-            className='absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 overflow-hidden rounded-md border border-white/10 focus-within:ring-2 focus-within:ring-white/50 focus-within:ring-offset-2 focus-within:ring-offset-zinc-950'
+            className='absolute left-2.5 top-1/2 size-6 -translate-y-1/2 overflow-hidden rounded-md border border-white/10 focus-within:ring-2 focus-within:ring-white/50 focus-within:ring-offset-2 focus-within:ring-offset-zinc-950'
             style={{ backgroundColor: active }}
           >
             <input
@@ -237,7 +237,7 @@ export function AccentControls({
           </div>
         </div>
         {isAccentHexInvalid && (
-          <p id={validationId} className='text-xs leading-relaxed text-zinc-400'>
+          <p id={validationId} className='text-[13px] leading-relaxed text-zinc-400'>
             Use a 6-digit hex like #22d3ee.
           </p>
         )}
@@ -245,11 +245,11 @@ export function AccentControls({
 
       <div id={idPrefix ? `${idPrefix}-glow` : undefined} className='space-y-3'>
         <div className='flex items-center justify-between'>
-          <div className='text-[10px] font-semibold uppercase tracking-widest text-zinc-400'>
+          <div className='text-[12px] font-semibold uppercase tracking-widest text-zinc-400'>
             Glow
           </div>
           <span
-            className='text-xs font-medium tabular-nums text-zinc-400 transition-colors motion-reduce:transition-none'
+            className='text-[13px] font-medium tabular-nums text-zinc-400 transition-colors motion-reduce:transition-none'
             style={{ color: previewIntensity > 0 ? active : undefined }}
           >
             {previewIntensity}%
@@ -282,7 +282,7 @@ export function AccentControls({
             style={{ backgroundColor: active }}
           />
         </SliderPrimitive.Root>
-        <p className='text-xs leading-relaxed text-zinc-400'>
+        <p className='text-[13px] leading-relaxed text-zinc-400'>
           {previewIntensity === 0
             ? 'Pure black background.'
             : 'Tints the background with your accent.'}

@@ -6,6 +6,7 @@ import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-pr
 import { api, type AddonSubtitle, type PlaybackLanguagePreferences } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
 import { addSubtitleTrack, changePlayerTrack, readPlayerTrackList } from '@/lib/player-mpv';
+import type { PlayerRouteMediaType } from '@/lib/player-navigation';
 import {
   buildTrackAutoApplyFingerprint,
   buildTrackLanguageCandidateFingerprint,
@@ -45,7 +46,7 @@ interface ManualTrackPreference {
 
 interface UsePlayerTrackControllerArgs {
   mediaId?: string;
-  mediaType?: 'movie' | 'series' | 'anime';
+  mediaType?: PlayerRouteMediaType;
   activeStreamUrl?: string;
   hasPlaybackStarted: boolean;
   isLoading: boolean;

@@ -23,6 +23,8 @@ fn blocked_ip_literals_cover_loopback_private_and_metadata_ranges() {
         "[::ffff:127.0.0.1]",
         "[fc00::1]",
         "[fe80::1%eth0]",
+        "[fec0::1]",
+        "[feff:ffff::1]",
         // IPv4-embedding transition prefixes: 6to4 and Teredo.
         "[2002:7f00:1::]",
         "[2001:0:4136:e378:8000:63bf:3fff:fdd2]",
@@ -89,6 +91,15 @@ fn public_to_private_redirect_is_blocked() {
         "http://LOCALHOST.:11470/admin",
         "http://x.localhost:11470/admin",
         "http://a.b.LocalHost.:11470/admin",
+        // Numeric and IPv6 forms must hit the same block as their canonical literal.
+        "http://2130706433/admin",
+        "http://0x7f.0.0.1/admin",
+        "http://0177.0.0.1/admin",
+        "http://2852039166/latest/meta-data/",
+        "http://[::1]/admin",
+        "http://[::ffff:127.0.0.1]/admin",
+        "http://[fc00::1]/admin",
+        "http://[fec0::1]/admin",
     ] {
         assert!(
             !redirect_target_allowed(&initial, &url(target)),
@@ -123,27 +134,6 @@ fn url_parser_normalizes_routable_numerics_before_the_gate() {
         assert!(
             is_blocked_ip_literal(parsed.host_str().unwrap_or("")),
             "{raw} must be blocked"
-        );
-    }
-}
-
-#[test]
-fn public_to_numeric_private_redirect_is_blocked() {
-    let initial = url("https://evil-addon.test/manifest.json");
-    // Dotted decimal, single-decimal, and hex/octal loopback forms must
-    // hit the same block as their canonical literal.
-    for target in [
-        "http://2130706433/admin",
-        "http://0x7f.0.0.1/admin",
-        "http://0177.0.0.1/admin",
-        "http://2852039166/latest/meta-data/",
-        "http://[::1]/admin",
-        "http://[::ffff:127.0.0.1]/admin",
-        "http://[fc00::1]/admin",
-    ] {
-        assert!(
-            !redirect_target_allowed(&initial, &url(target)),
-            "{target} must be blocked"
         );
     }
 }

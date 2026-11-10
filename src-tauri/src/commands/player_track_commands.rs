@@ -17,6 +17,18 @@ pub(crate) enum PlayerTrackType {
     Video = 2,
 }
 
+impl PlayerTrackType {
+    /// Array slot for per-type label dedup — a match, not `as usize`, so a new
+    /// variant fails to compile here instead of indexing out of bounds.
+    fn index(self) -> usize {
+        match self {
+            PlayerTrackType::Audio => 0,
+            PlayerTrackType::Sub => 1,
+            PlayerTrackType::Video => 2,
+        }
+    }
+}
+
 /// One `track-list` row, already normalized: `selected` comes from
 /// `current-tracks/{type}/id` (authoritative — the per-track flag is never read).
 #[derive(Debug, Clone, Serialize)]
@@ -76,19 +88,21 @@ fn property_non_blank(value: Option<serde_json::Value>) -> Option<String> {
     let serde_json::Value::String(value) = value? else {
         return None;
     };
-    crate::providers::bound_optional(Some(value), usize::MAX)
+    super::normalize_non_empty(&value)
 }
 
 /// Merge duplicate `type:id` rows: later strings win and flags OR together.
 fn merge_track_variants(existing: &mut PlayerTrack, next: PlayerTrack) {
-    existing.title = next.title.or(existing.title.take());
-    existing.lang = next.lang.or(existing.lang.take());
+    existing.title = next.title.or_else(|| existing.title.take());
+    existing.lang = next.lang.or_else(|| existing.lang.take());
     existing.selected |= next.selected;
     existing.default_track |= next.default_track;
     existing.forced |= next.forced;
     existing.hearing_impaired |= next.hearing_impaired;
     existing.external |= next.external;
-    existing.external_filename = next.external_filename.or(existing.external_filename.take());
+    existing.external_filename = next
+        .external_filename
+        .or_else(|| existing.external_filename.take());
 }
 
 fn read_track_list(
@@ -123,8 +137,11 @@ fn read_track_list(
         )),
     });
 
-    let mut tracks: Vec<PlayerTrack> = Vec::new();
-    let mut index_by_key: HashMap<(u8, i64), usize> = HashMap::new();
+    // `count` is mpv's own track count — duplicates only merge, never exceed it.
+    // Clamp the reservation so a bogus count can't abort on capacity overflow.
+    let capacity = (count as usize).min(1_024);
+    let mut tracks: Vec<PlayerTrack> = Vec::with_capacity(capacity);
+    let mut index_by_key: HashMap<(u8, i64), usize> = HashMap::with_capacity(capacity);
 
     for index in 0..count {
         let prefix = format!("track-list/{index}");
@@ -209,13 +226,13 @@ fn read_track_list(
         if track.hearing_impaired {
             label.push_str(" · SDH");
         }
-        *label_counts[track.r#type as usize]
+        *label_counts[track.r#type.index()]
             .entry(label.clone())
             .or_insert(0) += 1;
         track.display_label = label;
     }
     for track in &mut tracks {
-        if label_counts[track.r#type as usize][&track.display_label] > 1 {
+        if label_counts[track.r#type.index()][&track.display_label] > 1 {
             use std::fmt::Write as _;
 
             let _ = write!(track.display_label, " #{}", track.id);

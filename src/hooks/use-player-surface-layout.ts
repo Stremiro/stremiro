@@ -411,8 +411,8 @@ function positionMiniMaskHoles(rect: MiniVideoRect) {
   // All reads before any write — interleaving thrashes layout per chased frame.
   const bounds = elements.map((element) => element.getBoundingClientRect());
   elements.forEach((element, index) => {
-    const holeX = rect.x - bounds[index].left;
-    const holeY = rect.y - bounds[index].top;
+    const holeX = rect.x - bounds[index]!.left;
+    const holeY = rect.y - bounds[index]!.top;
     const key = `${rect.width}x${rect.height}@${holeX},${holeY}`;
     const previousKey = maskHoleCache.get(element);
     if (previousKey === key) return;

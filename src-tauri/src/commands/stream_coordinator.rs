@@ -233,7 +233,10 @@ impl StreamSignalCache {
         &mut self,
         stream: &AddonStream,
         inputs: &StreamRecommendationInputs<'_>,
-    ) -> &StreamRecommendationKey {
+    ) -> StreamRecommendationKey {
+        if let Some(cached) = self.by_stream_key.get(&stream.stream_key) {
+            return *cached;
+        }
         if self.language_prefs.is_none() {
             self.reference = build_reference_title(inputs.match_context.title);
             self.language_prefs = Some(canonicalize_language_prefs(
@@ -243,15 +246,10 @@ impl StreamSignalCache {
         }
         let reference = self.reference.as_ref();
         let language_prefs = self.language_prefs.expect("fetch context just initialized");
-        // get-then-insert avoids cloning the key on hits.
-        if !self.by_stream_key.contains_key(&stream.stream_key) {
-            let computed = compute_cached_signals(stream, inputs, reference, language_prefs);
-            self.by_stream_key
-                .insert(stream.stream_key.clone(), computed);
-        }
+        let computed = compute_cached_signals(stream, inputs, reference, language_prefs);
         self.by_stream_key
-            .get(&stream.stream_key)
-            .expect("signal cache entry just filled")
+            .insert(stream.stream_key.clone(), computed);
+        computed
     }
 }
 
@@ -316,7 +314,7 @@ fn stream_recommendation_key(
             .as_deref()
             .and_then(|family| inputs.stream_family_priorities.get(family).copied())
             .unwrap_or(DEFAULT_STREAM_FAMILY_PRIORITY),
-        ..*cached
+        ..cached
     }
 }
 
@@ -356,11 +354,21 @@ fn language_label_is_in_title(
     false
 }
 
+fn is_dub_role_word(token: &str) -> bool {
+    matches!(token, "dub" | "dubbed")
+}
+
+fn is_sub_role_word(token: &str) -> bool {
+    matches!(token, "sub" | "subs" | "subbed" | "subtitle" | "subtitles")
+}
+
+/// "audio" marks an audio-language role but is not itself a dub hint.
+fn is_audio_role_word(token: &str) -> bool {
+    token == "audio" || is_dub_role_word(token)
+}
+
 fn is_language_role_word(token: &str) -> bool {
-    matches!(
-        token,
-        "audio" | "dub" | "dubbed" | "sub" | "subs" | "subbed" | "subtitle" | "subtitles"
-    )
+    is_audio_role_word(token) || is_sub_role_word(token)
 }
 
 /// Language score plus whether the only audio languages named differ from the preferred one.
@@ -386,7 +394,7 @@ fn stream_language_preference_priority(
     // Two-letter prose aliases ("de", "en", "pt") are ordinary title words too, so only
     // unambiguous mentions may demote a stream; they still count toward a match.
     let mut record_mention = |canonical: &'static str, role: Option<&str>, unambiguous: bool| {
-        let audio_only = matches!(role, Some("audio" | "dub" | "dubbed"));
+        let audio_only = role.is_some_and(is_audio_role_word);
         let audio = language_mention_is_audio(role.unwrap_or(""));
         audio_matches |= audio && preferred_audio_language == Some(canonical);
         other_audio |= audio
@@ -408,10 +416,10 @@ fn stream_language_preference_priority(
             .peekable();
         while let Some(token) = tokens.next() {
             let preceding = previous.replace(token);
-            match token {
-                "dub" | "dubbed" => has_dub = true,
-                "sub" | "subs" | "subbed" | "subtitle" | "subtitles" => has_subtitle_hint = true,
-                _ => {}
+            if is_dub_role_word(token) {
+                has_dub = true;
+            } else if is_sub_role_word(token) {
+                has_subtitle_hint = true;
             }
             let start = token.as_ptr() as usize - segment.as_ptr() as usize;
             while tags.peek().is_some_and(|(range, _)| range.end <= start) {
@@ -509,9 +517,14 @@ fn is_episode_token(token: &str) -> bool {
             && !episode.is_empty()
             && season.chars().all(|ch| ch.is_ascii_digit())
             && episode.chars().all(|ch| ch.is_ascii_digit())
-    }) || (token.starts_with('s')
-        && token.contains('e')
-        && token.chars().skip(1).any(|ch| ch.is_ascii_digit()))
+    }) || token
+        .strip_prefix('s')
+        .and_then(|token| token.split_once('e'))
+        .is_some_and(|(season, episode)| {
+            !season.is_empty()
+                && season.bytes().all(|byte| byte.is_ascii_digit())
+                && episode.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        })
 }
 
 fn is_title_boundary_token(token: &str) -> bool {
@@ -545,12 +558,12 @@ fn is_neutral_title_extra(token: &str, media_type: &str) -> bool {
     is_title_stop_word(token)
         || TITLE_NEUTRAL_EXTRA_TOKENS.contains(&token)
         || token.chars().all(|ch| ch.is_ascii_digit())
-        || (media_type == "movie" && matches!(token, "movie" | "film"))
+        || (!matches!(media_type, "series" | "anime") && matches!(token, "movie" | "film"))
 }
 
 fn is_spin_off_title_extra(token: &str, media_type: &str) -> bool {
     TITLE_SPINOFF_TOKENS.contains(&token)
-        || (media_type != "movie" && matches!(token, "movie" | "film"))
+        || (matches!(media_type, "series" | "anime") && matches!(token, "movie" | "film"))
 }
 
 fn stream_episode_relevance_priority(
@@ -647,9 +660,11 @@ fn stream_title_relevance_score(
     {
         let candidate = strip_leading_group_tag(candidate);
         let normalized = normalize_token_text(candidate);
-        let candidate_tokens: HashSet<&str> = tokenize_title_words(&normalized, true)
+        let mut candidate_tokens: Vec<&str> = tokenize_title_words(&normalized, true)
             .filter(|word| !is_title_stop_word(word))
             .collect();
+        candidate_tokens.sort_unstable();
+        candidate_tokens.dedup();
         if candidate_tokens.is_empty() {
             continue;
         }
@@ -672,7 +687,7 @@ fn stream_title_relevance_score(
         }
         let initialism_match = reference_initialism
             .as_deref()
-            .is_some_and(|initialism| candidate_tokens.contains(initialism));
+            .is_some_and(|initialism| candidate_tokens.contains(&initialism));
 
         if overlap_count == 0 && !initialism_match {
             continue;
@@ -695,7 +710,7 @@ fn stream_title_relevance_score(
         }
 
         // Bare numbers can be episode labels on series; only movie sequels are unambiguous.
-        if media_type == "movie" && overlap_count >= reference_tokens.len() {
+        if !matches!(media_type, "series" | "anime") && overlap_count >= reference_tokens.len() {
             let mut words = candidate
                 .split(|ch: char| !ch.is_ascii_alphanumeric())
                 .filter(|word| !word.is_empty())
@@ -912,9 +927,12 @@ pub(crate) fn sort_streams_by_recommendation(
     for stream in streams.iter_mut() {
         rank_stream_by_recommendation(stream, inputs, signals);
     }
-    // Stable sort keeps input order for tied keys.
+    // P2P rows follow playable rows; stable ties retain declaration order.
     streams.sort_by_cached_key(|stream| {
-        std::cmp::Reverse(stream_recommendation_key(stream, &inputs, signals))
+        (
+            !stream.presentation.is_instantly_playable,
+            std::cmp::Reverse(stream_recommendation_key(stream, &inputs, signals)),
+        )
     });
 }
 

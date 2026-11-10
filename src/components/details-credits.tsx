@@ -27,7 +27,7 @@ export function DetailsCredits({
   if (!cast.length && !directors.length && !writers.length) return null;
 
   return (
-    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2.5 text-[13px] leading-6 sm:gap-x-4'>
+    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1.5 text-[13px] leading-6 sm:gap-x-4'>
       {[cast, directors, writers].map((names, groupIndex) => {
         if (!names.length) return null;
         const isCast = groupIndex === 0;
@@ -48,9 +48,7 @@ export function DetailsCredits({
         ));
         return (
           <Fragment key={groupKey}>
-            <dt className='text-[10.5px] font-semibold uppercase tracking-[0.14em] text-zinc-500'>
-              {label}
-            </dt>
+            <dt className='text-[12px] font-medium text-zinc-400'>{label}</dt>
             <dd
               className={
                 isCast ? 'flex min-w-0 items-baseline gap-2 text-white/80' : 'min-w-0 break-words'
@@ -77,7 +75,7 @@ export function DetailsCredits({
                   >
                     <h2
                       id='details-full-cast-heading'
-                      className='mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'
+                      className='mb-3 text-[13px] font-semibold text-zinc-200'
                     >
                       Full cast
                     </h2>

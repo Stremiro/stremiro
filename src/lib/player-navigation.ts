@@ -8,7 +8,7 @@ import {
 } from '@/lib/resolve-player-stream';
 import { createGeneration } from '@/lib/utils';
 
-export type PlayerRouteMediaType = 'movie' | 'series' | 'anime';
+export type PlayerRouteMediaType = 'movie' | 'series' | 'anime' | (string & {});
 
 // Positive but below the resume threshold: suppress saved history without seeking.
 export const PLAYER_RESTART_START_TIME = 1;
@@ -56,7 +56,8 @@ export function resolvePlayerRouteMediaType(
     return 'anime';
   }
 
-  return normalizedType === 'movie' ? 'movie' : 'series';
+  // Addon-declared types pass through so details/meta/streams route to the right addon catalogs.
+  return normalizedType === 'movie' ? 'movie' : (normalizedType ?? 'series');
 }
 
 /** Details path for an opaque addon id — encoded so `/`/`?`/`#` stay inside the segment (RR decodes params). */
