@@ -244,7 +244,7 @@ function MiniPlayerTimeLabel({ active, clock, duration, seekPreviewStore }: Mini
   );
 }
 
-const MINI_SKIP_MARK: Record<string, string> = {
+const MINI_SKIP_MARK: Record<SkipSegment['type'], string> = {
   intro: 'bg-amber-200/90',
   recap: 'bg-orange-200/90',
   outro: 'bg-sky-200/90',
@@ -255,7 +255,7 @@ function miniSkipMarks(segments: readonly SkipSegment[]): PlayerSliderMark[] {
   return segments.map((segment) => ({
     start: segment.start_time,
     end: segment.end_time,
-    className: MINI_SKIP_MARK[segment.type] ?? 'bg-white/70',
+    className: MINI_SKIP_MARK[segment.type],
   }));
 }
 
@@ -308,9 +308,8 @@ function MiniPlayerSeekSlider({
         disabled={duration <= 0}
         marks={skipSegments?.length ? miniSkipMarks(skipSegments) : undefined}
         onAimChange={setAimedSeconds}
-        onPointerDown={(event) => {
-          event.stopPropagation();
-          if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
+        // PlayerSlider stops propagation and forwards only primary-button presses.
+        onPointerDown={() => {
           isDraggingRef.current = true;
         }}
         onValueChange={(value) => {
@@ -422,6 +421,10 @@ export function MiniPlayer({
   const pendingFocusClaimRef = useRef(claimFocusOnMount);
   const [hovered, setHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
+  const [capturedPointer, setCapturedPointer] = useState<{
+    target: Element;
+    pointerId: number;
+  } | null>(null);
   const { idle: pointerIdle, wake: wakePointer } = usePointerIdle();
   const menu = useInlineMenu({
     rootRef: frameRef,
@@ -430,6 +433,7 @@ export function MiniPlayer({
   const releaseInteraction = () => {
     setHovered(false);
     setHasFocus(false);
+    setCapturedPointer(null);
   };
   const releaseHover = () => setHovered(false);
   useWindowRelease(releaseInteraction, releaseHover);
@@ -824,6 +828,8 @@ export function MiniPlayer({
   );
 
   const handlePointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    setCapturedPointer((current) => (current?.pointerId === event.pointerId ? null : current));
+    wakePointer();
     const drag = releaseDrag(event);
     if (!drag) return;
     if (drag.moved) {
@@ -870,7 +876,15 @@ export function MiniPlayer({
     !isDocking &&
     !isSettling &&
     !menu.presence.mounted &&
-    (hasFocus || !isPlaying || isWorking || !!upNext || endOfMedia || (hovered && !pointerIdle));
+    ((capturedPointer !== null &&
+      capturedPointer.target.isConnected &&
+      capturedPointer.target.hasPointerCapture(capturedPointer.pointerId)) ||
+      hasFocus ||
+      !isPlaying ||
+      isWorking ||
+      !!upNext ||
+      endOfMedia ||
+      (hovered && !pointerIdle));
   const effectivelyMuted = isMuted || volume === 0;
   const motionCover = useDelayedUnmount(isMoving || isSettling || isDocking, 150);
 
@@ -906,7 +920,12 @@ export function MiniPlayer({
       }}
       onPointerUp={finishDrag}
       onPointerCancel={handlePointerCancel}
-      onLostPointerCapture={handlePointerCancel}
+      onGotPointerCaptureCapture={(event) => {
+        if (event.target instanceof Element && event.target !== event.currentTarget) {
+          setCapturedPointer({ target: event.target, pointerId: event.pointerId });
+        }
+      }}
+      onLostPointerCaptureCapture={handlePointerCancel}
       onPointerEnter={() => {
         setHovered(document.visibilityState !== 'hidden');
         wakePointer();
@@ -1010,16 +1029,15 @@ export function MiniPlayer({
             />
           )}
 
-          {/* During playback the skip chip yields to the hover controls. */}
+          {/* Resting skip chip; under hover/focus the labeled copy in the chrome's status slot owns the action. */}
           {skipAction && showLiveSurface && isPlaying && !upNext && !endOfMedia && (
             <PlayerSkipButton
               action={skipAction}
               keymap={keymap}
               variant='compact'
-              // Same rest-state contract as the Up Next strip — docked chrome owns the action under hover/focus.
               tabIndex={-1}
               className={cn(
-                'absolute bottom-2.5 right-2 z-[25] min-h-9 gap-2 px-3 py-2 font-medium leading-tight transition-[opacity,color,background-color,border-color]',
+                'absolute bottom-3 right-2.5 z-[25] font-medium leading-tight transition-[opacity,color,background-color,border-color]',
                 controlsActive && 'pointer-events-none opacity-0',
               )}
             />
@@ -1103,6 +1121,13 @@ export function MiniPlayer({
                       >
                         Up next · {upNext.label}
                       </button>
+                    ) : skipAction ? (
+                      <PlayerSkipButton
+                        action={skipAction}
+                        keymap={keymap}
+                        variant='compact'
+                        className='h-6 gap-1 rounded-md px-2 py-0 text-[11px] font-medium'
+                      />
                     ) : (
                       <span className='min-w-0 truncate text-[11px] text-white/65'>
                         {isWorking ? 'Loading…' : !isPlaying ? 'Paused' : ''}
@@ -1150,11 +1175,6 @@ export function MiniPlayer({
                       />
                     )}
 
-                    {/* Hover-state skip: the resting chip fades under the chrome. */}
-                    {skipAction && (
-                      <PlayerSkipButton action={skipAction} keymap={keymap} variant='icon' />
-                    )}
-
                     <PlayerVolumeControl
                       variant='mini'
                       active={controlsActive}
@@ -1165,7 +1185,8 @@ export function MiniPlayer({
                       onVolumeChange={onVolumeChange}
                     />
 
-                    {isWorking && (
+                    {/* The status slot already says Loading… unless the skip pill holds it. */}
+                    {isWorking && skipAction && !upNext && (
                       <Loader2 className='ml-1 h-3 w-3 shrink-0 animate-spin text-white/40' />
                     )}
                   </div>
@@ -1203,9 +1224,7 @@ export function MiniPlayer({
               )}
               <div className='pointer-events-none absolute inset-0 bg-linear-to-t from-black/70 via-black/30 to-black/50' />
               <div className='absolute inset-x-0 top-0 z-10 flex items-center justify-between p-1.5'>
-                <div className='flex items-center gap-1'>
-                  <MiniExpandButton keymap={keymap} onClick={onExpand} />
-                </div>
+                <MiniExpandButton keymap={keymap} onClick={onExpand} />
                 <MiniCloseButton onClick={onClose} />
               </div>
               {/* Pointer-transparent — rendered last, it would otherwise cover the buttons/expand target above. */}
@@ -1224,7 +1243,7 @@ export function MiniPlayer({
                 >
                   {error || statusText || 'Preparing playback'}
                 </p>
-                <p className='absolute inset-x-0 bottom-2 truncate px-3 text-[10px] text-white/50'>
+                <p className='absolute inset-x-0 bottom-2 truncate px-3 text-[11px] text-white/50'>
                   <MiniTitle title={title} episodeLabel={episodeLabel} />
                 </p>
               </div>

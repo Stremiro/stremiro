@@ -72,11 +72,33 @@ impl DurableStoreRegistry {
         if let Some(store) = lock_or_recover(&self.stores).get(&path) {
             return Ok(store.clone());
         }
-        let store = DurableStore::load(&path)?;
-        Ok(lock_or_recover(&self.stores)
-            .entry(path)
-            .or_insert(store)
-            .clone())
+        // Read and parse outside the registry lock. Only the first opener can
+        // move a corrupt file aside and publish its replacement map.
+        let entries = read_store_entries(&path)?;
+        let mut stores = lock_or_recover(&self.stores);
+        match stores.entry(path) {
+            Entry::Occupied(slot) => Ok(slot.get().clone()),
+            Entry::Vacant(slot) => {
+                let path = slot.key().as_path();
+                let entries = match entries {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        quarantine_store(path, &error)?;
+                        HashMap::new()
+                    }
+                };
+                let store = DurableStore {
+                    path: Arc::from(path),
+                    data: Arc::new(Mutex::new(StoreData {
+                        entries,
+                        dirty: false,
+                        #[cfg(test)]
+                        save_count: 0,
+                    })),
+                };
+                Ok(slot.insert(store).clone())
+            }
+        }
     }
 
     /// Persists every store with unsaved mutations — the exit path's
@@ -108,39 +130,44 @@ struct StoreData {
     save_count: usize,
 }
 
-/// Store files are flat `{key: value}` objects — empty bytes, invalid JSON, and
-/// non-object payloads are rejected so a torn or foreign file never loads as empty.
-fn parse_store_bytes(bytes: &[u8], path: &Path) -> Result<HashMap<String, Value>, String> {
-    serde_json::from_slice(bytes)
-        .map_err(|error| format!("Invalid store file {}: {}", path.display(), error))
+fn read_store_entries(path: &Path) -> Result<serde_json::Result<HashMap<String, Value>>, String> {
+    match retry_transient_fs(|| std::fs::read(path)) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Ok(HashMap::new())),
+        Err(error) => {
+            log_warn(
+                "durable-store",
+                "load",
+                "failed",
+                &[field("path", path.display()), field("error", &error)],
+            );
+            Err(error.to_string())
+        }
+    }
+}
+
+fn quarantine_store(path: &Path, error: &serde_json::Error) -> Result<(), String> {
+    let quarantine = path.with_extension(format!(
+        "corrupt-{}-{}",
+        super::now_unix_millis(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::rename(path, quarantine).map_err(|rename_error| {
+        format!(
+            "Invalid store file {}: {error}. Could not quarantine: {rename_error}",
+            path.display()
+        )
+    })?;
+    log_warn(
+        "durable-store",
+        "load",
+        "quarantined",
+        &[field("path", path.display())],
+    );
+    Ok(())
 }
 
 impl DurableStore {
-    fn load(path: &Path) -> Result<Self, String> {
-        let entries = match retry_transient_fs(|| std::fs::read(path)) {
-            Ok(bytes) => parse_store_bytes(&bytes, path)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(error) => {
-                log_warn(
-                    "durable-store",
-                    "load",
-                    "failed",
-                    &[field("path", path.display()), field("error", &error)],
-                );
-                return Err(error.to_string());
-            }
-        };
-        Ok(Self {
-            path: Arc::from(path),
-            data: Arc::new(Mutex::new(StoreData {
-                entries,
-                dirty: false,
-                #[cfg(test)]
-                save_count: 0,
-            })),
-        })
-    }
-
     pub(crate) fn get(&self, key: impl AsRef<str>) -> Option<Value> {
         lock_or_recover(&self.data)
             .entries
@@ -167,18 +194,15 @@ impl DurableStore {
         T::deserialize(data.entries.get(key.as_ref())?).ok()
     }
 
-    pub(crate) fn set(&self, key: impl Into<String>, value: Value) {
+    pub(crate) fn set(&self, key: impl AsRef<str>, value: Value) {
         let mut data = lock_or_recover(&self.data);
-        match data.entries.entry(key.into()) {
-            Entry::Occupied(mut entry) => {
-                if entry.get() == &value {
-                    return;
-                }
-                entry.insert(value);
+        if let Some(existing) = data.entries.get_mut(key.as_ref()) {
+            if existing == &value {
+                return;
             }
-            Entry::Vacant(entry) => {
-                entry.insert(value);
-            }
+            *existing = value;
+        } else {
+            data.entries.insert(key.as_ref().to_string(), value);
         }
         data.dirty = true;
     }

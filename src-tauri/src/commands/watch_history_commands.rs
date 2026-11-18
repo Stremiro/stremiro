@@ -408,14 +408,18 @@ pub(super) fn build_title_watch_progress_with_priorities(
         .iter()
         .find(|row| !is_series_like_watch_progress(row))
         .cloned();
-    let up_next_source = choose_up_next_source(
-        history
-            .iter()
-            .filter(|row| is_series_like_watch_progress(row))
-            .map(Cow::Borrowed)
-            .collect(),
-        source_health_priorities.unwrap_or(&HashMap::new()),
-    );
+    let up_next_source = if series_resume_entry.is_none() {
+        choose_up_next_source(
+            history
+                .iter()
+                .filter(|row| is_series_like_watch_progress(row))
+                .map(Cow::Borrowed)
+                .collect(),
+            source_health_priorities.unwrap_or(&HashMap::new()),
+        )
+    } else {
+        None
+    };
     TitleWatchProgress {
         episode_progress: build_title_episode_progress(&history, source_health_priorities),
         watched_episode_ceiling: build_watched_episode_ceiling(&history),

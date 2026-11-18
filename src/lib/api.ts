@@ -369,6 +369,7 @@ export interface BrowseGenres {
 
 export type AddonConfigsOp =
   | { kind: 'add'; url: string }
+  | { kind: 'replaceUrl'; id: string; url: string }
   | { kind: 'remove'; id: string }
   | { kind: 'setEnabled'; id: string; enabled: boolean }
   | { kind: 'reorder'; ids: string[] };

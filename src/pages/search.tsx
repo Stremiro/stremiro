@@ -19,12 +19,14 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { Link, NavigationType, useNavigationType } from 'react-router';
 import { CompactFloatingBar } from '@/components/compact-floating-bar';
 import { GenreIcon } from '@/components/genre-icon';
+import { PageCard } from '@/components/page-section';
 import { StatePanel } from '@/components/state-panel';
 import {
   DropdownMenu,
@@ -42,9 +44,8 @@ import {
   MediaCardSkeleton,
   mediaCardRailKey,
 } from '@/components/media-card';
-import { PageCard } from '@/components/page-section';
 import { Input } from '@/components/ui/input';
-import { Skeleton } from '@/components/ui/skeleton';
+import { IndeterminateBar, Skeleton } from '@/components/ui/skeleton';
 import { SegmentPill } from '@/components/ui/segmented-control';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
@@ -59,13 +60,12 @@ import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { getErrorMessage, isNoCapableAddonError, type MediaItem } from '@/lib/api';
 import { foldAsciiCase } from '@/lib/api-cache';
 import { isAppLinkText, openAppLinkText } from '@/lib/app-links';
-import { handleRovingGroupKeyDown, whenRowMounted } from '@/lib/dom';
+import { handleRovingGroupKeyDown, isPlainKeyEvent, whenRowMounted } from '@/lib/dom';
 import { navigateBack } from '@/lib/navigation';
 import { prefetchSearchCatalog, searchCatalogQueryOptions } from '@/lib/search-catalog';
 import { type SearchFeed, type SearchMediaType } from '@/lib/search-page-state';
 import {
   cn,
-  ICON_CHIP_CLASS,
   PAGE_NOTICE_CLASS,
   pluralize,
   queryNeedsRetry,
@@ -134,15 +134,15 @@ const estimateSearchItemHeight = (itemWidth: number) =>
 const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 motion-reduce:transition-none hover:enabled:not-aria-disabled:bg-white/[0.08] hover:enabled:not-aria-disabled:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 const SEARCH_FACET_BUTTON_CLASS =
-  'nav-switch-item group flex h-10 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium not-aria-disabled:hover:border-white/[0.18] not-aria-disabled:active:bg-white/[0.1] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+  'nav-switch-item group flex h-10 shrink-0 items-center gap-1.5 rounded-md border px-3 text-sm font-medium not-aria-disabled:hover:border-white/[0.18] not-aria-disabled:active:bg-white/[0.1] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
 const FACET_ICON_CLASS =
   'size-3.5 shrink-0 opacity-75 transition-opacity duration-150 group-not-aria-disabled:group-hover:opacity-100 group-data-[state=open]:opacity-100 motion-reduce:transition-none';
 const RECENT_SEARCH_ROW_BUTTON_CLASS =
-  'flex h-8 items-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 focus-visible:bg-white/[0.08] focus-visible:text-zinc-100 focus-visible:outline-none';
+  'flex h-10 items-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 focus-visible:bg-white/[0.08] focus-visible:text-zinc-100 focus-visible:outline-none';
 // Mouse picks keep focus in the field so the panel stays put and typing continues.
 const keepSearchInputFocus = (event: ReactMouseEvent) => event.preventDefault();
 const SEARCH_FACET_IDLE_CLASS =
-  'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100';
+  'border-white/[0.1] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100';
 
 function SearchPanel({
   action,
@@ -160,11 +160,10 @@ function SearchPanel({
   titleRole?: string;
 }) {
   return (
-    <PageCard role={role} className='mx-auto mt-10 max-w-sm px-6 py-12'>
+    <PageCard role={role} className='mx-auto mt-10 max-w-md px-8 py-12'>
       <StatePanel
         role='presentation'
         icon={icon}
-        iconClassName={cn(ICON_CHIP_CLASS, 'size-10 rounded-xl')}
         title={title}
         titleRole={titleRole}
         description={description}
@@ -315,11 +314,9 @@ function SearchResults({
       <SearchPanel
         role={isRetryingInitialLoad ? 'status' : 'alert'}
         title={isRetryingInitialLoad ? 'Loading content…' : 'Failed to load content'}
-        description={
-          isRetryingInitialLoad ? 'Trying the request again.' : getErrorMessage(errorObj)
-        }
+        description={isRetryingInitialLoad ? undefined : getErrorMessage(errorObj)}
         action={
-          !isRetryingInitialLoad && isNoCapableAddonError(errorObj) ? (
+          isNoCapableAddonError(errorObj) ? (
             <Link
               to='/settings?section=addons'
               className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
@@ -337,7 +334,7 @@ function SearchResults({
               }}
               className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
             >
-              Retry
+              {isRetryingInitialLoad ? 'Retrying…' : 'Retry'}
             </button>
           )
         }
@@ -348,7 +345,7 @@ function SearchResults({
   if (results.length === 0) {
     return (
       <SearchPanel
-        icon={<SearchX aria-hidden='true' className='h-5 w-5 text-zinc-400' />}
+        icon={<SearchX aria-hidden='true' className='h-6 w-6 text-zinc-500' />}
         title={
           trimmedDebouncedQuery
             ? `No results for \u201c${trimmedDebouncedQuery}\u201d`
@@ -570,7 +567,8 @@ export function Search() {
     placeholderData: isOnline ? keepPreviousData : undefined,
     enabled: isOnline,
   });
-  const results = data?.pages.flatMap((page) => page.items) ?? [];
+  const pages = data?.pages;
+  const results = useMemo(() => pages?.flatMap((page) => page.items) ?? [], [pages]);
   const partial = data?.pages.some((page) => page.partial) ?? false;
 
   // Manifest-driven union of `genre` extra options the enabled addons declare
@@ -641,16 +639,7 @@ export function Search() {
     searchFieldFocused && !recentDismissed && !query && recentSearches.length > 0;
   const recentListRef = useRef<HTMLUListElement>(null);
   const dismissRecentOnEscape = (event: ReactKeyboardEvent) => {
-    if (
-      event.key !== 'Escape' ||
-      event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.shiftKey
-    )
-      return;
+    if (event.key !== 'Escape' || !isPlainKeyEvent(event)) return;
     event.preventDefault();
     event.stopPropagation();
     setRecentDismissed(true);
@@ -685,10 +674,10 @@ export function Search() {
     resetScroll();
   };
 
-  const isRetryingInitialLoad = isFetched && isLoading;
   const isBrowsing = !trimmedQuery;
   const HeadingIcon = isBrowsing ? Compass : SearchIcon;
   const isRefining = isTyping || isPlaceholderData;
+  const isRetryingInitialLoad = isFetched && isLoading;
   const showSkeleton = (isLoading || isRefining) && !isRetryingInitialLoad && results.length === 0;
   const isUpdating = isOnline && isFetching && !isFetchingNextPage;
   const [updatingRevealed, setUpdatingRevealed] = useState(false);
@@ -719,13 +708,8 @@ export function Search() {
 
   const moveResultFocus = (event: ReactKeyboardEvent) => {
     if (
+      !isPlainKeyEvent(event) ||
       !event.key.startsWith('Arrow') ||
-      event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.ctrlKey ||
-      event.altKey ||
-      event.metaKey ||
-      event.shiftKey ||
       !(event.target instanceof HTMLElement) ||
       !event.target.matches('[data-media-card-poster]')
     )
@@ -867,7 +851,7 @@ export function Search() {
               aria-describedby='search-keyboard-hint'
               data-search-input
               ref={searchInputRef}
-              className='h-12 w-full rounded-xl border-white/[0.1] bg-white/[0.04] pl-11 pr-20 text-base text-zinc-100 placeholder:text-zinc-400 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15 md:text-base'
+              className='peer h-12 w-full rounded-lg border-white/[0.1] bg-white/[0.04] pl-11 pr-20 text-base text-zinc-100 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] transition-[background-color,border-color,box-shadow] duration-150 placeholder:text-zinc-400 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15 motion-reduce:transition-none md:text-base'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onPaste={(event) => {
@@ -935,13 +919,24 @@ export function Search() {
               }}
             />
             {/* eslint-enable jsx-a11y/no-autofocus */}
-            <SearchIcon className='pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-zinc-500' />
+            <SearchIcon className='pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-zinc-500 transition-colors duration-150 peer-focus-visible:text-zinc-200 motion-reduce:transition-none' />
+            {!query && (
+              <kbd
+                aria-hidden='true'
+                className='pointer-events-none absolute right-3.5 top-1/2 hidden h-6 min-w-6 -translate-y-1/2 items-center justify-center rounded border border-white/[0.1] bg-white/[0.04] px-1.5 font-mono text-[12px] leading-none text-zinc-500 peer-focus:hidden sm:flex'
+              >
+                /
+              </kbd>
+            )}
+            {showUpdating && (
+              <div
+                aria-hidden='true'
+                className='pointer-events-none absolute inset-x-3 bottom-0 h-px overflow-hidden'
+              >
+                <IndeterminateBar className='bg-(--accent-nav)' />
+              </div>
+            )}
             <div className='absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-1.5'>
-              <span aria-hidden='true' className='flex h-4 w-4 items-center justify-center'>
-                {showUpdating && (
-                  <span className='h-1.5 w-1.5 animate-pulse rounded-full bg-(--accent-nav) motion-reduce:animate-none' />
-                )}
-              </span>
               {query ? (
                 <button
                   type='button'
@@ -960,6 +955,9 @@ export function Search() {
                 aria-label='Recent searches'
                 className='absolute inset-x-0 top-full z-30 mt-1.5 overflow-hidden rounded-xl border border-white/5 bg-zinc-950/80 shadow-2xl backdrop-blur-xl animate-surface-in motion-reduce:animate-none'
               >
+                <h2 className='px-3.5 pb-1 pt-3 text-xs font-semibold text-zinc-400'>
+                  Recent searches
+                </h2>
                 <ul
                   ref={recentListRef}
                   className='max-h-[min(224px,36vh)] overflow-y-auto overscroll-contain scrollbar-hide p-1'
@@ -1020,7 +1018,10 @@ export function Search() {
                     </li>
                   ))}
                 </ul>
-                <div className='border-t border-white/[0.06] p-1'>
+                <div className='flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] px-2 py-1.5'>
+                  <span aria-hidden='true' className='px-1.5 text-xs text-zinc-400'>
+                    ↑ ↓ Navigate · Enter Select
+                  </span>
                   <button
                     type='button'
                     onMouseDown={keepSearchInputFocus}
@@ -1029,7 +1030,7 @@ export function Search() {
                       void clearRecentSearches();
                       searchInputRef.current?.focus({ preventScroll: true });
                     }}
-                    className='flex h-7 w-full items-center justify-center rounded-md px-2 text-[12px] font-medium text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 motion-reduce:transition-none'
+                    className='flex h-8 items-center justify-center rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 motion-reduce:transition-none'
                   >
                     Clear recent searches
                   </button>
@@ -1045,13 +1046,13 @@ export function Search() {
             <div
               role='radiogroup'
               aria-label='Content type'
-              className='relative isolate grid h-10 w-full max-w-full grid-cols-4 rounded-xl bg-white/[0.03] p-1 ring-1 ring-inset ring-white/[0.08] justify-self-center sm:w-auto xl:col-start-2 xl:row-start-1'
+              className='relative isolate grid h-10 w-full max-w-full grid-cols-4 rounded-lg bg-white/[0.03] p-1 ring-1 ring-inset ring-white/[0.08] justify-self-center sm:w-auto xl:col-start-2 xl:row-start-1'
             >
               <SegmentPill
                 index={SEARCH_TYPE_OPTIONS.findIndex((option) => option.id === activeType)}
                 count={SEARCH_TYPE_OPTIONS.length}
                 inset={4}
-                className='rounded-lg'
+                className='rounded-md'
               />
               {SEARCH_TYPE_OPTIONS.map((option) => (
                 <button
@@ -1065,7 +1066,7 @@ export function Search() {
                   onPointerEnter={() => prefetchType(option.id)}
                   onFocus={() => prefetchType(option.id)}
                   className={cn(
-                    'nav-switch-item relative inline-flex h-8 min-w-0 items-center justify-center rounded-lg px-3 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25 sm:px-3.5',
+                    'nav-switch-item relative inline-flex h-8 min-w-0 items-center justify-center rounded-md px-3 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25 sm:px-3.5',
                     activeType === option.id
                       ? 'text-(--on-accent-nav)'
                       : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
@@ -1146,7 +1147,7 @@ export function Search() {
                         <DropdownMenuSubTrigger className='flex min-h-10 items-center gap-2.5 px-2.5 text-sm text-zinc-300'>
                           <Puzzle aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
                           <span>Addon genres</span>
-                          <span className='ml-auto mr-1 rounded-[5px] border border-white/[0.08] bg-white/[0.05] px-1.5 text-[11px] leading-4 tabular-nums text-zinc-500'>
+                          <span className='ml-auto mr-1 rounded-md bg-white/[0.06] px-1.5 text-[11px] leading-4 tabular-nums text-zinc-400'>
                             {addonGenres.length}
                           </span>
                         </DropdownMenuSubTrigger>
@@ -1382,7 +1383,7 @@ export function Search() {
               <span
                 key={id}
                 title={label}
-                className='accent-lattice-soft max-w-36 shrink-0 truncate rounded-[5px] border px-2 py-1 text-[13px] font-medium'
+                className='accent-lattice-soft max-w-36 shrink-0 truncate rounded-md border px-2 py-1 text-[13px] font-medium'
               >
                 {label}
               </span>

@@ -159,7 +159,7 @@ impl SkipTimesProvider {
                 SKIP_TIMES_TTL,
                 SKIP_TIMES_EMPTY_TTL,
             ),
-            in_flight: InFlight::new(SKIP_TIMES_CACHE_ENTRIES),
+            in_flight: InFlight::default(),
             #[cfg(test)]
             segments_url: SKIPDB_SEGMENTS_URL.to_string(),
         }
@@ -184,21 +184,16 @@ impl SkipTimesProvider {
             return Ok(cached);
         }
         let key_lock = self.in_flight.claim(&key);
-        let result = async {
-            let _fetch_permit = key_lock.lock().await;
-            if let Some(cached) = self.cache.get(&key) {
-                return Ok(cached);
-            }
-            let result = self
-                .fetch_segments(imdb_id, season, episode, duration_secs)
-                .await?;
-            self.cache
-                .put(&key, result.clone(), result.segments.is_empty(), || true);
-            Ok(result)
+        let _fetch_permit = key_lock.lock().await;
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(cached);
         }
-        .await;
-        self.in_flight.release(&key, &key_lock);
-        result
+        let result = self
+            .fetch_segments(imdb_id, season, episode, duration_secs)
+            .await?;
+        self.cache
+            .put(&key, result.clone(), result.segments.is_empty(), || true);
+        Ok(result)
     }
 
     /// Fetch skippable segments from SkipDB (`GET /api/segments`).

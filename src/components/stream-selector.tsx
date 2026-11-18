@@ -198,7 +198,7 @@ const StreamItem = memo(function StreamItem({
         onRowFocus(stream.streamKey);
       }}
       className={cn(
-        'group relative px-3 py-2.5 rounded-xl',
+        'group relative px-3 py-2.5 rounded-lg',
         'bg-white/[0.02] border border-white/[0.05]',
         'hover:bg-white/[0.045] hover:border-white/[0.1]',
         'transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer w-full overflow-hidden',
@@ -239,7 +239,7 @@ const StreamItem = memo(function StreamItem({
         data-stream-key={stream.streamKey}
         tabIndex={tabIndex}
         aria-label={`${opensPack ? 'Browse episodes in' : 'Select'} ${sourceName} ${opensPack ? 'pack' : 'stream'}${techBadges.map((badge) => `, ${badge.description ? `${badge.label} source` : badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
-        className='absolute inset-0 z-0 rounded-xl aria-disabled:cursor-default focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
+        className='absolute inset-0 z-0 rounded-lg aria-disabled:cursor-default focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
       />
 
       {isResolving && (
@@ -265,7 +265,7 @@ const StreamItem = memo(function StreamItem({
       >
         <div
           aria-hidden='true'
-          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.08] bg-linear-to-b from-white/[0.08] to-white/[0.015] shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_1px_2px_rgba(0,0,0,0.4)]'
+          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/[0.05]'
         >
           <DeliveryIcon
             className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
@@ -283,7 +283,7 @@ const StreamItem = memo(function StreamItem({
                 <span
                   key={`${badge.label}:${badge.cls}`}
                   className={cn(
-                    'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[10.5px] font-semibold leading-none tabular-nums',
+                    'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[11px] font-semibold leading-none tabular-nums',
                     badge.cls,
                     badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
                   )}
@@ -292,13 +292,13 @@ const StreamItem = memo(function StreamItem({
                 </span>
               ))}
               {isActive && (
-                <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
+                <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[11px] font-medium leading-none'>
                   <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
                   Current
                 </span>
               )}
               {!isActive && isLastUsed && (
-                <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[10.5px] font-medium leading-none text-zinc-200'>
+                <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[11px] font-medium leading-none text-zinc-200'>
                   <span className='h-1.5 w-1.5 rounded-full bg-zinc-300' />
                   Last played
                 </span>
@@ -311,7 +311,7 @@ const StreamItem = memo(function StreamItem({
             </div>
           </div>
 
-          <p className='mt-0.5 overflow-hidden text-[11px] leading-snug text-zinc-400'>
+          <p className='mt-0.5 overflow-hidden text-[12px] leading-snug text-zinc-400'>
             <span ref={titleRef} className='hover-marquee block truncate'>
               {streamTitle}
               {hdrDescription && <span className='text-zinc-500'> · {hdrDescription}</span>}
@@ -321,7 +321,7 @@ const StreamItem = memo(function StreamItem({
           <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
             <span
               className={cn(
-                'w-16 shrink-0 truncate text-[10.5px] font-medium tabular-nums',
+                'w-16 shrink-0 truncate text-[11px] font-medium tabular-nums',
                 isResolving ? 'text-(--accent-act)' : 'text-zinc-400',
               )}
             >
@@ -329,7 +329,7 @@ const StreamItem = memo(function StreamItem({
             </span>
             <span
               className={cn(
-                'w-[4.5rem] shrink-0 inline-flex items-center gap-0.5 truncate text-[10.5px] tabular-nums',
+                'w-[4.5rem] shrink-0 inline-flex items-center gap-0.5 truncate text-[11px] tabular-nums',
                 stream.seeders === 0
                   ? 'text-zinc-500 font-medium'
                   : sortMode === 'seeds'
@@ -349,10 +349,10 @@ const StreamItem = memo(function StreamItem({
             <div className='flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden'>
               {metaParts.map((part, index) => (
                 <Fragment key={part.key}>
-                  {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
+                  {index > 0 && <span className='text-zinc-700 text-[11px]'>·</span>}
                   <span
                     className={cn(
-                      'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
+                      'text-[11px] font-medium text-zinc-400 truncate min-w-0',
                       part.className,
                     )}
                   >
@@ -372,7 +372,7 @@ const StreamItem = memo(function StreamItem({
                   <span
                     key={kind}
                     className={cn(
-                      'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
+                      'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[11px] font-medium leading-none',
                       badge.cls,
                     )}
                   >
@@ -429,7 +429,7 @@ const StreamItem = memo(function StreamItem({
         presence={menu.presence}
         orientation='horizontal'
         label={`Actions for ${sourceName} stream`}
-        className='rounded-xl bg-zinc-950/90 backdrop-blur-sm'
+        className='rounded-lg bg-zinc-950/90 backdrop-blur-sm'
         onAction={menu.close}
         actions={[
           { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
@@ -652,7 +652,7 @@ function StreamVirtualList({
       ref={scrollRef}
       role='list'
       aria-label='Streams'
-      className='h-full overflow-y-auto overscroll-contain'
+      className='h-full overflow-y-auto overscroll-contain [mask-image:linear-gradient(to_bottom,black_calc(100%_-_20px),transparent)]'
       onKeyDown={handleListKeyDown}
     >
       <div

@@ -1,7 +1,31 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { SubtitleColor, SubtitleEdge, SubtitleFont } from '@/lib/api';
 import type { Track } from '@/lib/player-track-utils';
+
+export interface VideoMarginRatio {
+  left?: number;
+  right?: number;
+  top?: number;
+  bottom?: number;
+}
+
+/** Fields consumed by the player; native events can carry additional metadata. */
+export interface PlayerMpvEvent {
+  event: string;
+  name?: string;
+  data?: unknown;
+  [key: string]: unknown;
+}
+
+export async function listenMpvEvents(
+  callback: (event: PlayerMpvEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<PlayerMpvEvent>(`mpv-event-${getCurrentWindow().label}`, (event) =>
+    callback(event.payload),
+  );
+}
 
 // mpv IPC goes through the allowlisted `player_mpv_*` commands — the webview only reaches backend-admitted verbs/properties.
 export function mpvCommand(

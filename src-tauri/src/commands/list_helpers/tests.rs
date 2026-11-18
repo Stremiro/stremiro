@@ -26,38 +26,27 @@ fn ids(values: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn reorder_known_ids_keeps_requested_order_and_appends_omitted() {
-    let current = ids(&["a", "b", "c"]);
-    // Omitted ids keep their items, appended in current order — a stale
-    // snapshot payload must not drop entries added after it was captured.
-    assert_eq!(
-        reorder_known_ids(&current, ids(&["c", "a"])),
-        ids(&["c", "a", "b"])
-    );
-}
-
-#[test]
-fn reorder_known_ids_ignores_unknown_and_duplicate_requested_ids() {
-    let current = ids(&["a", "b", "c"]);
-    assert_eq!(
-        reorder_known_ids(&current, ids(&["ghost", "b", "b", "a"])),
-        ids(&["b", "a", "c"])
-    );
-}
-
-#[test]
-fn reorder_known_ids_empty_request_preserves_current_order() {
-    let current = ids(&["a", "b"]);
-    assert_eq!(reorder_known_ids(&current, Vec::new()), ids(&["a", "b"]));
-}
-
-#[test]
-fn reorder_known_ids_dedupes_corrupt_repeated_current_ids() {
-    let current = ids(&["a", "b", "a"]);
-    assert_eq!(
-        reorder_known_ids(&current, ids(&["b", "a"])),
-        ids(&["b", "a"])
-    );
-    // Even an empty request cannot resurrect the corrupt duplicate.
-    assert_eq!(reorder_known_ids(&current, Vec::new()), ids(&["a", "b"]));
+fn reorder_known_ids_orders_requests_and_heals_corrupt_lists() {
+    for (current, request, expected) in [
+        // Omitted ids keep their items, appended in current order — a stale
+        // snapshot payload must not drop entries added after it was captured.
+        (
+            ids(&["a", "b", "c"]),
+            ids(&["c", "a"]),
+            ids(&["c", "a", "b"]),
+        ),
+        // Unknown and duplicate requested ids are ignored.
+        (
+            ids(&["a", "b", "c"]),
+            ids(&["ghost", "b", "b", "a"]),
+            ids(&["b", "a", "c"]),
+        ),
+        // An empty request preserves current order.
+        (ids(&["a", "b"]), Vec::new(), ids(&["a", "b"])),
+        // Corrupt repeated current ids dedupe; an empty request cannot resurrect one.
+        (ids(&["a", "b", "a"]), ids(&["b", "a"]), ids(&["b", "a"])),
+        (ids(&["a", "b", "a"]), Vec::new(), ids(&["a", "b"])),
+    ] {
+        assert_eq!(reorder_known_ids(&current, request), expected);
+    }
 }

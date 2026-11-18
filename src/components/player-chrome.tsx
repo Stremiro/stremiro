@@ -16,6 +16,9 @@ import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
   CHROME_ICON_STROKE,
+  CHROME_MENU_HEADING_CLASS,
+  CHROME_MENU_ITEM_IDLE_CLASS,
+  CHROME_MENU_ITEM_SELECTED_CLASS,
   CHROME_MENU_ROW_FOCUS_CLASS,
   CHROME_PILL_CLASS,
   CHROME_POPOVER_CLASS,
@@ -368,6 +371,21 @@ export function PlayerControlsRow({
               }}
             />
           )}
+          {SEEK_BUTTONS.map(({ action, label, hint, delta }) => (
+            <button
+              key={action}
+              type='button'
+              aria-label={label}
+              aria-keyshortcuts={ariaKeyShortcuts(keymap, action)}
+              onClick={() => {
+                void onSeekRelative(delta).catch(() => undefined);
+              }}
+              className={CHROME_ICON_BUTTON_CLASS}
+              title={withShortcutHint(hint, keymap, action)}
+            >
+              <SeekTenIcon forward={delta > 0} />
+            </button>
+          ))}
         </div>
 
         <PlayerVolumeControl
@@ -392,22 +410,6 @@ export function PlayerControlsRow({
       </div>
 
       <div className={cn(CHROME_PILL_CLASS, 'ml-auto gap-1.5 px-1.5')}>
-        {SEEK_BUTTONS.map(({ action, label, hint, delta }) => (
-          <button
-            key={action}
-            type='button'
-            aria-label={label}
-            aria-keyshortcuts={ariaKeyShortcuts(keymap, action)}
-            onClick={() => {
-              void onSeekRelative(delta).catch(() => undefined);
-            }}
-            className={CHROME_ICON_BUTTON_CLASS}
-            title={withShortcutHint(hint, keymap, action)}
-          >
-            <SeekTenIcon forward={delta > 0} />
-          </button>
-        ))}
-
         {trackSelectors}
 
         <Popover open={speedMenuOpen} onOpenChange={onSpeedMenuOpenChange}>
@@ -430,7 +432,7 @@ export function PlayerControlsRow({
                 event.stopPropagation();
               }}
             >
-              <span className='text-xs font-semibold tabular-nums'>{playbackSpeed}x</span>
+              <span className='text-xs font-semibold tabular-nums'>{playbackSpeed}×</span>
             </button>
           </PopoverTrigger>
           <PopoverContent
@@ -441,16 +443,16 @@ export function PlayerControlsRow({
             aria-labelledby={speedHeadingId}
             className={cn(
               CHROME_POPOVER_CLASS,
-              'max-h-(--radix-popover-content-available-height) w-64 max-w-[calc(100vw-1rem)] overflow-y-auto overscroll-contain p-2',
+              'max-h-(--radix-popover-content-available-height) w-64 max-w-[calc(100vw-1rem)] overflow-y-auto overscroll-contain',
             )}
             onClick={(event) => {
               event.stopPropagation();
             }}
           >
-            <h4 id={speedHeadingId} className='px-2 py-2 text-[13px] font-semibold text-zinc-200'>
+            <h4 id={speedHeadingId} className={CHROME_MENU_HEADING_CLASS}>
               Speed
             </h4>
-            <div className='grid grid-cols-4 gap-1'>
+            <div className='grid grid-cols-3 gap-1'>
               {SPEED_OPTIONS.map((s) => (
                 <button
                   key={s}
@@ -463,13 +465,13 @@ export function PlayerControlsRow({
                   }}
                   className={cn(
                     CHROME_MENU_ROW_FOCUS_CLASS,
-                    'flex min-h-10 items-center justify-center rounded-md px-1 text-[13px] tabular-nums transition-colors hover:bg-white/[0.08]',
+                    'flex h-10 items-center justify-center rounded-md text-[13px] font-medium tabular-nums transition-colors',
                     s === playbackSpeed
-                      ? 'bg-white/[0.08] text-white font-semibold'
-                      : 'text-white/60 hover:text-white',
+                      ? cn(CHROME_MENU_ITEM_SELECTED_CLASS, 'font-semibold')
+                      : CHROME_MENU_ITEM_IDLE_CLASS,
                   )}
                 >
-                  {s}x
+                  {s}×
                 </button>
               ))}
             </div>

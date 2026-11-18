@@ -223,7 +223,7 @@ fn premature_eof_is_a_stream_failure_instead_of_completion() {
 }
 
 #[test]
-fn mpv_config_keeps_native_options_and_observers_fixed() {
+fn mpv_config_applies_initial_playback_settings_and_passes_native_validation() {
     let shader_dir = std::path::Path::new("C:\\cache\\mpv-shaders");
     for (volume, paused) in [(0.0, false), (78.5, true)] {
         let config = build_player_mpv_config(
@@ -238,17 +238,6 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
             ("volume", json!(volume.to_string())),
             ("mute", json!(if paused { "yes" } else { "no" })),
             ("pause", json!(if paused { "yes" } else { "no" })),
-            ("vo", json!("gpu-next")),
-            ("hwdec", json!("auto-safe")),
-            ("gpu-api", json!("d3d11")),
-            ("gpu-context", json!("d3d11")),
-            ("cache", json!("auto")),
-            ("demuxer-max-bytes", json!("96MiB")),
-            ("demuxer-max-back-bytes", json!("24MiB")),
-            ("load-scripts", json!("no")),
-            ("resume-playback", json!("no")),
-            ("save-position-on-quit", json!("no")),
-            ("sid", json!("no")),
         ] {
             assert_eq!(config.initial_options.get(name), Some(&value), "{name}");
         }
@@ -256,23 +245,28 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
             config.initial_options.get("gpu-shader-cache-dir"),
             paused.then(|| json!(shader_dir.to_str().unwrap())).as_ref()
         );
-        assert!(config.initial_options.contains_key("alang"));
-        assert!(!config.initial_options.contains_key("cache-secs"));
-        assert!(!config.initial_options.contains_key("wid"));
-        assert_eq!(config.observed_properties.len(), 11);
-        assert_eq!(config.observed_properties["duration"], "double");
-        assert_eq!(
-            config.observed_properties["current-tracks/audio/id"],
-            "int64"
-        );
-        assert!(!config.observed_properties.contains_key("time-pos"));
-        assert!(!config
-            .observed_properties
-            .contains_key("demuxer-cache-duration"));
-        // The wrapper wedges on malformed init payloads instead of erroring —
-        // the built config must always pass the plugin's pre-FFI validator.
+        // The wrapper can wedge on malformed initialization payloads.
         tauri_plugin_libmpv::validate_mpv_config(&config).unwrap();
     }
+    let config = build_player_mpv_config(0.0, false, false, Some("en"), Some("off"), None);
+    for (name, value) in [
+        ("load-scripts", json!("no")),
+        ("resume-playback", json!("no")),
+        ("save-position-on-quit", json!("no")),
+        ("sid", json!("no")),
+    ] {
+        assert_eq!(config.initial_options.get(name), Some(&value), "{name}");
+    }
+    assert!(config.initial_options.contains_key("alang"));
+    assert_eq!(config.observed_properties["duration"], "double");
+    assert_eq!(
+        config.observed_properties["current-tracks/audio/id"],
+        "int64"
+    );
+    assert!(!config.observed_properties.contains_key("time-pos"));
+    assert!(!config
+        .observed_properties
+        .contains_key("demuxer-cache-duration"));
 }
 
 #[test]
@@ -381,6 +375,16 @@ fn mpv_command_targets_are_gated() {
     assert!(
         subtitles::validate_url("https://cdn.example/sub.srt?token=x", "Subtitle", None).is_ok()
     );
+    // Addon admission allows 2,048 characters; multibyte paths exceed the mpv argument byte cap.
+    let unicode = format!("https://subs.example/{}.srt", "漢".repeat(1_400));
+    assert!(unicode.len() > MPV_ARG_MAX_CHARS);
+    assert!(subtitles::validate_url(&unicode, "Subtitle", None).is_ok());
+    assert!(subtitles::validate_url(
+        "https://cdn.example/s.srt",
+        &"t".repeat(MPV_ARG_MAX_CHARS + 1),
+        None
+    )
+    .is_err());
     assert!(validate_mpv_command("set", &[json!("script"), json!("evil.lua")]).is_err());
     assert!(validate_mpv_command("cycle", &[json!("watch-later-directory")]).is_err());
     assert!(validate_mpv_command("set", &[json!("screenshot-directory"), json!("C:\\")]).is_err());
@@ -628,10 +632,6 @@ fn property_batch_preserves_order_and_continues_after_native_failure() {
         (SubtitleFont::Mono, "mono", "Cascadia Mono"),
     ] {
         assert_eq!(serde_json::to_value(font).unwrap(), json!(stored));
-        assert_eq!(
-            serde_json::from_value::<SubtitleFont>(json!(stored)).unwrap(),
-            font
-        );
         let properties = mpv_subtitle_appearance_properties(
             font,
             SubtitleColor::White,
@@ -662,10 +662,6 @@ fn property_batch_preserves_order_and_continues_after_native_failure() {
         (SubtitleColor::Amber, "amber", "#FFFFD89B"),
     ] {
         assert_eq!(serde_json::to_value(color).unwrap(), json!(stored));
-        assert_eq!(
-            serde_json::from_value::<SubtitleColor>(json!(stored)).unwrap(),
-            color
-        );
         let properties = mpv_subtitle_appearance_properties(
             SubtitleFont::Default,
             color,

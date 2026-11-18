@@ -21,13 +21,13 @@ use super::{
 use crate::operational_log::{field, log_warn};
 use crate::providers::addon_manifest::snapshot_supports_request;
 use crate::providers::addons::{
-    stream_conflicts_with_episode_targets, AddonStream, AddonTransport, StreamDeliveryKind,
-    StreamResolution,
+    stream_conflicts_with_episode_targets, stream_conflicts_with_work_years, AddonStream,
+    AddonTransport, StreamDeliveryKind, StreamResolution,
 };
 use crate::providers::trim_to_max;
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::{Serialize, Serializer};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -66,6 +66,20 @@ fn resolve_ranking_deadline(
         remaining.saturating_sub(probe_reserve)
     });
     now + ranking_budget
+}
+
+fn selector_metadata_deadline(
+    now: tokio::time::Instant,
+    fetch_deadline: Option<tokio::time::Instant>,
+    deadline: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    [fetch_deadline, deadline].into_iter().flatten().fold(
+        now + Duration::from_millis(2_500),
+        |limit, deadline| {
+            // Reserve most of the remaining budget for stream fetches and probing.
+            limit.min(now + deadline.saturating_duration_since(now) / 4)
+        },
+    )
 }
 
 /// Resolve/recovery fan-out options (bounded by `RESOLVE_FETCH_DEADLINE`).
@@ -355,6 +369,16 @@ fn normalize_video_id(video_id: Option<&str>) -> Option<String> {
     video_id.and_then(|id| normalize_media_id(super::js_trim(id)))
 }
 
+fn video_episode_coordinates(id: &str) -> Option<(&str, u32, u32)> {
+    let (base, episode) = id.rsplit_once(':')?;
+    let (base, season) = base.rsplit_once(':')?;
+    // kitsu:{title}:{episode} is flat, not season/episode numbering.
+    if base.is_empty() || base == "kitsu" {
+        return None;
+    }
+    Some((base, season.parse().ok()?, episode.parse().ok()?))
+}
+
 pub(crate) struct StreamQueryRequest<'a> {
     pub media_type: &'a str,
     pub id: &'a str,
@@ -375,9 +399,21 @@ impl StreamQueryRequest<'_> {
         if matches!(self.media_type, "series" | "anime") && self.season.zip(self.episode).is_some()
         {
             if let Some(id) = normalize_video_id(video_id) {
-                if !ids.contains(&id) {
-                    // Keep the working primary, then try the addon's video.id before heuristic fallbacks.
-                    ids.insert(1, id);
+                let absolute = video_episode_coordinates(&id)
+                    .filter(|(base, season, episode)| {
+                        base.starts_with("tt") && *season > 1 && Some(*episode) != self.episode
+                    })
+                    .map(|(base, _, episode)| format!("{base}:1:{episode}"));
+                let index = match ids.iter().position(|query| *query == id) {
+                    Some(index) => index,
+                    None => {
+                        // Keep the working primary, then try the addon's video.id before heuristic fallbacks.
+                        ids.insert(1, id);
+                        1
+                    }
+                };
+                if let Some(absolute) = absolute.filter(|absolute| !ids.contains(absolute)) {
+                    ids.insert(index + 1, absolute);
                 }
             }
         }
@@ -391,15 +427,8 @@ impl StreamQueryRequest<'_> {
     ) -> Vec<(u32, u32)> {
         let mut targets = self.episode_targets(ranking);
         if matches!(self.media_type, "series" | "anime") {
-            let target = normalize_video_id(video_id).and_then(|id| {
-                let (base, episode) = id.rsplit_once(':')?;
-                let (base, season) = base.rsplit_once(':')?;
-                // kitsu:{title}:{episode} is flat, not season/episode numbering.
-                if base.is_empty() || base == "kitsu" {
-                    return None;
-                }
-                Some((season.parse().ok()?, episode.parse().ok()?))
-            });
+            let target = normalize_video_id(video_id)
+                .and_then(|id| video_episode_coordinates(&id).map(|(_, s, e)| (s, e)));
             if let Some(target) = target.filter(|target| !targets.contains(target)) {
                 targets.push(target);
             }
@@ -488,6 +517,9 @@ pub(crate) fn resolve_stream_ranking_scope(
 #[derive(Clone, Copy)]
 struct EpisodeEligibility<'a> {
     targets: &'a [(u32, u32)],
+    accepted_years: &'a [u16],
+    reference_title: Option<&'a str>,
+    resolve: bool,
     final_season: Option<u32>,
     exclusions: Option<&'a StreamExclusions<'a>>,
 }
@@ -499,9 +531,10 @@ async fn fetch_prepared_streams_for_addon(
     addon: &AddonConfig,
     episode_eligibility: Option<EpisodeEligibility<'_>>,
     not_before: Option<Instant>,
+    wanted_stream_key: Option<&str>,
 ) -> Result<Vec<AddonStream>, String> {
     let source_name = addon.name.as_str();
-    let resolve = episode_eligibility.is_some();
+    let resolve = episode_eligibility.is_some_and(|eligibility| eligibility.resolve);
     let mut last_error: Option<String> = None;
     let mut any_succeeded = false;
     let mut unprobeable_streams = Vec::new();
@@ -521,18 +554,17 @@ async fn fetch_prepared_streams_for_addon(
 
         // Snapshot before spawning: a `clear_cache` landing mid-flight revokes this attempt's cooldown right.
         let generation = provider.cache_generation();
-        let attempt = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-            provider
-                .get_streams_fresh(
-                    effective_type,
-                    query_id,
-                    &addon.url,
-                    (source_name, &addon.id),
-                    not_before,
-                    prepare_addon_streams,
-                )
-                .await
-        })
+        let attempt = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            provider.get_streams_fresh(
+                effective_type,
+                query_id,
+                &addon.url,
+                (source_name, &addon.id),
+                not_before,
+                prepare_addon_streams,
+            ),
+        )
         .await;
 
         let warn = |outcome: &str, detail: (&'static str, String)| {
@@ -557,12 +589,23 @@ async fn fetch_prepared_streams_for_addon(
                         exclusions.retain(&mut prepared);
                     }
                     prepared.retain(|stream| {
-                        !stream_conflicts_with_episode_targets(
-                            stream.match_texts(),
-                            eligibility.targets,
-                            eligibility.final_season,
-                        )
+                        (!resolve
+                            || !stream_conflicts_with_episode_targets(
+                                stream.match_texts(),
+                                eligibility.targets,
+                                eligibility.final_season,
+                            ))
+                            && !stream_conflicts_with_work_years(
+                                stream.match_texts(),
+                                eligibility.accepted_years,
+                                eligibility.reference_title,
+                                eligibility.targets,
+                            )
                     });
+                }
+                // The selector may have shown a row owned by a later query id.
+                if let Some(key) = wanted_stream_key {
+                    prepared.retain(|stream| stream.stream_key == key);
                 }
                 if prepared.is_empty() {
                     continue;
@@ -657,6 +700,7 @@ async fn fetch_stream_for_link_from_addons(
                 addon,
                 None,
                 None,
+                Some(stream_key),
             )
             .await,
         )
@@ -671,6 +715,7 @@ async fn fetch_stream_for_link_from_addons(
             stream_addons[index],
             None,
             None,
+            Some(stream_key),
         )
     }))
     .buffer_unordered(ADDON_STREAM_FETCH_CONCURRENCY_LIMIT);
@@ -678,11 +723,9 @@ async fn fetch_stream_for_link_from_addons(
     let mut first_error = None;
     while let Some(result) = pending.next().await {
         match result {
+            // Each per-addon fetch already kept only rows with `stream_key`.
             Ok(streams) => {
-                if let Some(stream) = streams
-                    .into_iter()
-                    .find(|stream| stream.stream_key == stream_key)
-                {
+                if let Some(stream) = streams.into_iter().next() {
                     return Ok(Some(stream));
                 }
             }
@@ -734,6 +777,7 @@ async fn cached_episode_video_id(
 #[derive(Default)]
 struct SelectorStoreInputs {
     video_id: Option<String>,
+    accepted_years: Vec<u16>,
     source_health_priorities: HashMap<String, u8>,
     preferred_title_source_id: Option<String>,
     language_preferences: PlaybackLanguagePreferences,
@@ -755,6 +799,12 @@ impl SelectorStoreRead {
     fn essentials(&self) -> Result<SelectorStoreInputs, String> {
         let store = super::open_store(&self.app, super::SETTINGS_STORE_FILE)?;
         Ok(SelectorStoreInputs {
+            accepted_years: self.service.accepted_work_years(
+                &self.app,
+                &self.media_type,
+                &self.media_id,
+                self.season,
+            ),
             video_id: self.video_key.as_ref().and_then(
                 |(media_type, media_id, season, episode)| {
                     self.service
@@ -865,6 +915,8 @@ struct SelectorFetchContext<'a> {
     query: &'a StreamQueryRequest<'a>,
     ranking: &'a StreamRankingScope,
     episode_targets: Vec<(u32, u32)>,
+    accepted_years: Vec<u16>,
+    reference_title: Option<String>,
     addon_source_priorities: HashMap<String, u32>,
     source_health_priorities: HashMap<String, u8>,
     preferred_title_source_id: Option<String>,
@@ -886,7 +938,8 @@ impl SelectorFetchContext<'_> {
             preferred_title_source_id: self.preferred_title_source_id.as_deref(),
             match_context: StreamMatchContext {
                 media_type: &self.ranking.media_type,
-                title: self.ranking.title.as_deref(),
+                title: self.reference_title.as_deref(),
+                accepted_years: &self.accepted_years,
                 episode_targets: &self.episode_targets,
                 canonical_season: self.ranking.season,
                 is_final_season: self.is_final_season,
@@ -919,6 +972,7 @@ async fn fetch_addon_stream_outcome(
         addon,
         episode_eligibility,
         not_before,
+        None,
     )
     .await;
     // Exact cast: `min` caps the u128 at u64::MAX, so `as` cannot wrap.
@@ -1036,8 +1090,32 @@ async fn ensure_stream_family_priorities<'a>(
     Ok(())
 }
 
+async fn await_family_priorities(
+    lookup: impl std::future::Future<Output = Result<(), String>>,
+    pending: &mut (impl Stream<Item = (usize, AddonStreamFetchOutcome)> + Unpin),
+    ready: &mut VecDeque<(usize, AddonStreamFetchOutcome)>,
+) -> Result<(), String> {
+    tokio::pin!(lookup);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut lookup => return result,
+            Some(outcome) = pending.next() => ready.push_back(outcome),
+        }
+    }
+}
+
+fn family_priority_deadline(
+    now: tokio::time::Instant,
+    request_deadline: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    request_deadline.map_or(now + PROGRESSIVE_FAMILY_LOOKUP_TIMEOUT, |deadline| {
+        resolve_ranking_deadline(now, Some(deadline))
+    })
+}
+
 /// `resolve` bounds the fan-out for resolve/recovery.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn fetch_stream_selector_data(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -1049,6 +1127,8 @@ pub(crate) async fn fetch_stream_selector_data(
     deadline: Option<tokio::time::Instant>,
 ) -> Result<StreamSelectorData, String> {
     let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
+    let fetch_deadline =
+        resolve.map(|_| resolve_fetch_deadline(tokio::time::Instant::now(), deadline));
 
     let snapshot = super::addon_registry::load_enabled_addons_snapshot(app);
     let enabled_addons = match deadline {
@@ -1067,13 +1147,14 @@ pub(crate) async fn fetch_stream_selector_data(
     }
 
     let SelectorStoreInputs {
-        video_id,
+        mut video_id,
         mut source_health_priorities,
         mut preferred_title_source_id,
         language_preferences,
         is_final_season,
+        mut accepted_years,
     } = snapshot_selector_inputs(app, playback_state, ranking, &enabled_addons, deadline).await?;
-    let query_ids = query.query_ids(video_id.as_deref());
+    let mut query_ids = query.query_ids(video_id.as_deref());
     if let Some(resolve) = resolve {
         resolve.apply_source_failure(
             &mut source_health_priorities,
@@ -1081,6 +1162,77 @@ pub(crate) async fn fetch_stream_selector_data(
         );
     }
 
+    let mut reference_title = ranking.title.clone();
+    if accepted_years.is_empty() {
+        if let Some(client) =
+            app.try_state::<crate::providers::addon_resource::AddonResourceClient>()
+        {
+            let now = tokio::time::Instant::now();
+            let metadata_deadline = selector_metadata_deadline(now, fetch_deadline, deadline);
+            if let Ok(Ok(details)) = tokio::time::timeout_at(
+                metadata_deadline,
+                super::media_commands::fetch_media_details_shared_inner(
+                    app,
+                    &client,
+                    &ranking.media_type,
+                    &ranking.media_id,
+                ),
+            )
+            .await
+            {
+                let details = if video_id.is_none()
+                    && details.is_anime
+                    && ranking.season.is_some_and(|season| season != 1)
+                    && crate::providers::addon_resource::needs_cinemeta_artwork(&details)
+                {
+                    let mut repaired = (*details).clone();
+                    let _ = tokio::time::timeout_at(
+                        metadata_deadline,
+                        client.repair_episode_artwork(
+                            &mut repaired,
+                            super::media_normalization::normalize_media_details,
+                        ),
+                    )
+                    .await;
+                    std::sync::Arc::new(repaired)
+                } else {
+                    details
+                };
+                accepted_years = PlaybackStateService::accepted_work_years_from_details(
+                    &details,
+                    ranking.season,
+                );
+                if reference_title.is_none() && !details.title.is_empty() {
+                    reference_title = Some(details.title.clone());
+                }
+                if video_id.is_none() {
+                    if let Some((season, episode)) = ranking.season.zip(ranking.episode) {
+                        let fallback_lookup = details
+                            .imdb_id
+                            .as_deref()
+                            .unwrap_or(ranking.media_id.as_str());
+                        video_id = details
+                            .episodes
+                            .as_deref()
+                            .into_iter()
+                            .flatten()
+                            .find(|ep| ep.season == season && ep.episode == episode)
+                            .and_then(|ep| {
+                                let source =
+                                    super::episode_navigation::build_source_episode_coordinates(
+                                        ep,
+                                        fallback_lookup,
+                                    );
+                                super::episode_navigation::additional_episode_video_id(ep, &source)
+                            });
+                        if video_id.is_some() {
+                            query_ids = query.query_ids(video_id.as_deref());
+                        }
+                    }
+                }
+            }
+        }
+    }
     let stream_addons: Vec<(usize, &AddonConfig, u8)> = enabled_addons
         .iter()
         .enumerate()
@@ -1125,7 +1277,6 @@ pub(crate) async fn fetch_stream_selector_data(
         });
     }
 
-    let now = tokio::time::Instant::now();
     let ctx = SelectorFetchContext {
         app,
         playback_state,
@@ -1133,6 +1284,8 @@ pub(crate) async fn fetch_stream_selector_data(
         query,
         ranking,
         episode_targets: query.episode_targets_with_video_id(ranking, video_id.as_deref()),
+        accepted_years,
+        reference_title,
         addon_source_priorities: build_addon_source_priority_map(
             active_stream_addons.iter().map(|(_, addon)| *addon),
         ),
@@ -1140,7 +1293,7 @@ pub(crate) async fn fetch_stream_selector_data(
         preferred_title_source_id,
         language_preferences,
         is_final_season,
-        fetch_deadline: resolve.map(|_| resolve_fetch_deadline(now, deadline)),
+        fetch_deadline,
         deadline,
     };
 
@@ -1228,10 +1381,13 @@ async fn run_progressive_fetch(
 
     let provider = ctx.provider;
     let final_season = ctx.ranking.season.filter(|_| ctx.is_final_season);
-    let episode_eligibility = resolve.map(|resolve| EpisodeEligibility {
+    let episode_eligibility = Some(EpisodeEligibility {
         targets: &ctx.episode_targets,
+        accepted_years: &ctx.accepted_years,
+        reference_title: ctx.reference_title.as_deref(),
+        resolve: resolve.is_some(),
         final_season,
-        exclusions: resolve.exclusions,
+        exclusions: resolve.and_then(|resolve| resolve.exclusions),
     });
     let not_before = resolve.and_then(|resolve| resolve.not_before);
     let mut pending = fetch_addon_outcomes(
@@ -1242,29 +1398,34 @@ async fn run_progressive_fetch(
         episode_eligibility,
         not_before,
     );
+    let mut ready = VecDeque::new();
 
     // No deadline keeps the full selector wait; resolve/recovery bounds the fan-out.
     let fetch_deadline = ctx.fetch_deadline;
     let settle_on_stream_key = resolve.and_then(|resolve| resolve.settle_on_stream_key);
 
     loop {
-        let next = match fetch_deadline {
-            Some(deadline) => match tokio::time::timeout_at(deadline, pending.next()).await {
-                Ok(next) => next,
-                Err(_) => {
-                    log_warn(
-                        "stream-fetcher",
-                        "fetch_stream_selector_data",
-                        "resolve-fetch-deadline-reached",
-                        &[
-                            field("media_type", ctx.query.media_type),
-                            field("media_id", ctx.query.id),
-                        ],
-                    );
-                    break;
-                }
-            },
-            None => pending.next().await,
+        let next = if let Some(next) = ready.pop_front() {
+            Some(next)
+        } else {
+            match fetch_deadline {
+                Some(deadline) => match tokio::time::timeout_at(deadline, pending.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        log_warn(
+                            "stream-fetcher",
+                            "fetch_stream_selector_data",
+                            "resolve-fetch-deadline-reached",
+                            &[
+                                field("media_type", ctx.query.media_type),
+                                field("media_id", ctx.query.id),
+                            ],
+                        );
+                        break;
+                    }
+                },
+                None => pending.next().await,
+            }
         };
         let Some((index, outcome)) = next else {
             break;
@@ -1280,7 +1441,6 @@ async fn run_progressive_fetch(
         if let Some(channel) = progress {
             // A slow or failed store read must not stall the fan-out: it only costs this
             // snapshot its family signal, and the next arrival retries every missing family.
-            // The final merge looks up whatever is still missing without this cap.
             let retry_all = family_priorities_incomplete;
             let lookup = ensure_stream_family_priorities(
                 ctx.app,
@@ -1291,9 +1451,9 @@ async fn run_progressive_fetch(
                     .filter(|(arrived, _)| retry_all || **arrived == index)
                     .flat_map(|(_, outcome)| &outcome.streams),
                 &mut stream_family_priorities,
-                Some(tokio::time::Instant::now() + PROGRESSIVE_FAMILY_LOOKUP_TIMEOUT),
-            )
-            .await;
+                Some(family_priority_deadline(tokio::time::Instant::now(), None)),
+            );
+            let lookup = await_family_priorities(lookup, &mut pending, &mut ready).await;
             family_priorities_incomplete = lookup.is_err();
             if let Err(error) = lookup {
                 log_fetcher_error(
@@ -1456,9 +1616,10 @@ async fn merge_selector_outcomes(
         // Progressive-pass scores are reused; a non-channel caller finds them all
         // missing and pays the same store read. A wedged store costs the family
         // signal, not the pool — unscored families rank on the default.
-        let ranking_deadline = ctx
-            .deadline
-            .map(|deadline| resolve_ranking_deadline(tokio::time::Instant::now(), Some(deadline)));
+        let ranking_deadline = Some(family_priority_deadline(
+            tokio::time::Instant::now(),
+            ctx.deadline,
+        ));
         if let Err(error) = ensure_stream_family_priorities(
             ctx.app,
             ctx.playback_state,

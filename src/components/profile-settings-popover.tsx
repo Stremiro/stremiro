@@ -142,7 +142,7 @@ export function ProfileSettingsPopover({
                   >
                     {previewName}
                   </p>
-                  <p className='text-[10.5px] text-zinc-600'>Preview — save to apply</p>
+                  <p className='text-[11px] text-zinc-600'>Preview — save to apply</p>
                 </div>
                 <div
                   className='h-5 w-5 shrink-0 rounded-md border border-white/10 transition-colors duration-200'

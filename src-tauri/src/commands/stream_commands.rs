@@ -34,8 +34,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::ipc::Channel;
-use tauri::{command, AppHandle, State};
+use tauri::ipc::JavaScriptChannelId;
+use tauri::{command, AppHandle, State, Webview};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -291,7 +291,7 @@ fn stream_link(stream: &AddonStream) -> Result<StreamLink, String> {
 }
 
 #[command]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn get_stream_link(
     app: AppHandle,
     provider: State<'_, AddonTransport>,
@@ -359,12 +359,13 @@ fn normalize_recovery_url(value: Option<String>) -> Option<String> {
 }
 
 #[command]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn get_stream_selector_data(
     app: AppHandle,
+    webview: Webview,
     playback_state: State<'_, PlaybackStateService>,
     provider: State<'_, AddonTransport>,
-    on_progress: Channel,
+    on_progress: Option<JavaScriptChannelId>,
     media_type: String,
     id: String,
     season: Option<u32>,
@@ -392,13 +393,14 @@ pub async fn get_stream_selector_data(
         "stream lookup",
     )?;
 
+    let on_progress = on_progress.map(|id| id.channel_on(webview));
     fetch_stream_selector_data(
         &app,
         &playback_state,
         &provider,
         &query.request(&query.id),
         &query.ranking,
-        Some(&on_progress),
+        on_progress.as_ref(),
         // Selector opens keep the full per-addon budgets.
         None,
         None,
@@ -533,7 +535,7 @@ fn preferred_probe_error(
 }
 
 #[command]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn resolve_best_stream(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
@@ -672,7 +674,7 @@ pub async fn resolve_best_stream(
 }
 
 #[command]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn recover_playback_stream(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,

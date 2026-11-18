@@ -152,7 +152,15 @@ pub(crate) fn additional_episode_video_id(
     episode: &Episode,
     source: &SourceEpisodeCoordinates,
 ) -> Option<String> {
-    let id = normalize_media_id(js_trim(&episode.id))?;
+    let id = normalize_media_id(js_trim(
+        episode.alternate_video_id.as_deref().unwrap_or(&episode.id),
+    ))?;
+    if source.lookup_id.starts_with("tt")
+        && id.starts_with("tt")
+        && source.lookup_id.split(':').next() != id.split(':').next()
+    {
+        return None;
+    }
     (id != source.lookup_id
         && id != format!("{}:{}:{}", source.lookup_id, source.season, source.episode))
     .then_some(id)

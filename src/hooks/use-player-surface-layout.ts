@@ -1,6 +1,5 @@
 import { useCallback, type RefObject, useEffect, useRef } from 'react';
-import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
-import { setMpvProperty, setVideoMarginRatio } from '@/lib/player-mpv';
+import { setMpvProperty, setVideoMarginRatio, type VideoMarginRatio } from '@/lib/player-mpv';
 import { clamp } from '@/lib/utils';
 
 // Shared with the mini player's drag bounds so chrome resizes can't desync them.
@@ -131,25 +130,25 @@ function buildVideoMarginRatio(
     bottomPx: number;
   },
 ): VideoMarginRatio {
-  const ratio: VideoMarginRatio = {
+  const ratio = {
     left: clampMarginRatio(insets.leftPx / viewportWidth),
     right: clampMarginRatio(insets.rightPx / viewportWidth),
     top: clampMarginRatio(insets.topPx / viewportHeight),
     bottom: clampMarginRatio(insets.bottomPx / viewportHeight),
   };
 
-  const horizontalTotal = (ratio.left ?? 0) + (ratio.right ?? 0);
+  const horizontalTotal = ratio.left + ratio.right;
   if (horizontalTotal >= 0.98) {
     const scale = 0.98 / horizontalTotal;
-    ratio.left = (ratio.left ?? 0) * scale;
-    ratio.right = (ratio.right ?? 0) * scale;
+    ratio.left *= scale;
+    ratio.right *= scale;
   }
 
-  const verticalTotal = (ratio.top ?? 0) + (ratio.bottom ?? 0);
+  const verticalTotal = ratio.top + ratio.bottom;
   if (verticalTotal >= 0.98) {
     const scale = 0.98 / verticalTotal;
-    ratio.top = (ratio.top ?? 0) * scale;
-    ratio.bottom = (ratio.bottom ?? 0) * scale;
+    ratio.top *= scale;
+    ratio.bottom *= scale;
   }
 
   return ratio;
@@ -157,14 +156,10 @@ function buildVideoMarginRatio(
 
 interface UsePlayerSurfaceLayoutArgs {
   playerContainerRef: RefObject<HTMLDivElement | null>;
-  topChromeRef: RefObject<HTMLDivElement | null>;
-  bottomChromeRef: RefObject<HTMLDivElement | null>;
   activeStreamUrl?: string;
   mpvSurfaceReady: boolean;
   isFullscreen: boolean;
   isPip?: boolean;
-  isLoading: boolean;
-  isResolving: boolean;
   showErrorOverlay: boolean;
   /** 'mini' hands margin ownership to useMiniPlayerSurface. */
   presentation: 'expanded' | 'mini';
@@ -172,14 +167,10 @@ interface UsePlayerSurfaceLayoutArgs {
 
 export function usePlayerSurfaceLayout({
   playerContainerRef,
-  topChromeRef,
-  bottomChromeRef,
   activeStreamUrl,
   mpvSurfaceReady,
   isFullscreen,
   isPip,
-  isLoading,
-  isResolving,
   showErrorOverlay,
   presentation,
 }: UsePlayerSurfaceLayoutArgs) {
@@ -190,7 +181,6 @@ export function usePlayerSurfaceLayout({
   // Stale async applies must never overwrite a newer computation.
   const marginGenerationRef = useRef(0);
   const isMini = presentation === 'mini';
-  const shouldReserveOverlayChrome = !isPip && (isLoading || isResolving);
   useEffect(() => {
     if (!mpvSurfaceReady || !activeStreamUrl) return;
     // Margins shrink video, not subtitle text; keep the track and saved tuning intact.
@@ -235,40 +225,19 @@ export function usePlayerSurfaceLayout({
         );
       }
 
-      const topChromeRect = shouldReserveOverlayChrome
-        ? topChromeRef.current?.getBoundingClientRect()
-        : undefined;
-      const bottomChromeRect = shouldReserveOverlayChrome
-        ? bottomChromeRef.current?.getBoundingClientRect()
-        : undefined;
-      const baseTopInsetPx = !isFullscreen && !isPip ? PLAYER_TITLEBAR_HEIGHT_PX : 0;
-      const topInsetPx = topChromeRect
-        ? Math.max(baseTopInsetPx, topChromeRect.bottom - containerRect.top)
-        : baseTopInsetPx;
-      const bottomInsetPx = bottomChromeRect
-        ? Math.max(0, containerRect.bottom - bottomChromeRect.top)
-        : 0;
-      const leftInsetPx = !isFullscreen && !isPip ? PLAYER_SIDEBAR_WIDTH_PX : 0;
-
-      const nextMargins = buildVideoMarginRatio(containerRect.width, containerRect.height, {
-        leftPx: leftInsetPx,
-        rightPx: 0,
-        topPx: topInsetPx,
-        bottomPx: bottomInsetPx,
-      });
-
-      return applyMarginRatio(nextMargins, generation);
+      // Chrome overlays the frame; reserving it would letterbox the video while loading.
+      const windowed = !isFullscreen && !isPip;
+      return applyMarginRatio(
+        buildVideoMarginRatio(containerRect.width, containerRect.height, {
+          leftPx: windowed ? PLAYER_SIDEBAR_WIDTH_PX : 0,
+          rightPx: 0,
+          topPx: windowed ? PLAYER_TITLEBAR_HEIGHT_PX : 0,
+          bottomPx: 0,
+        }),
+        generation,
+      );
     },
-    [
-      applyMarginRatio,
-      bottomChromeRef,
-      isFullscreen,
-      isPip,
-      playerContainerRef,
-      showErrorOverlay,
-      shouldReserveOverlayChrome,
-      topChromeRef,
-    ],
+    [applyMarginRatio, isFullscreen, isPip, playerContainerRef, showErrorOverlay],
   );
 
   // Latest-render binding for imperative callers; a state token would re-render
@@ -294,10 +263,7 @@ export function usePlayerSurfaceLayout({
     if (typeof ResizeObserver === 'undefined') return;
 
     const container = playerContainerRef.current;
-    const topChrome = shouldReserveOverlayChrome ? topChromeRef.current : null;
-    const bottomChrome = shouldReserveOverlayChrome ? bottomChromeRef.current : null;
-
-    if (!container && !topChrome && !bottomChrome) return;
+    if (!container) return;
 
     let animationFrameId: number | null = null;
     const observer = new ResizeObserver(() => {
@@ -307,14 +273,12 @@ export function usePlayerSurfaceLayout({
 
       animationFrameId = window.requestAnimationFrame(() => {
         animationFrameId = null;
-        // Imperative apply — a chrome resize never re-renders the tree.
+        // Imperative apply — a container resize never re-renders the tree.
         marginRequestRef.current();
       });
     });
 
-    if (container) observer.observe(container);
-    if (topChrome) observer.observe(topChrome);
-    if (bottomChrome) observer.observe(bottomChrome);
+    observer.observe(container);
 
     return () => {
       observer.disconnect();
@@ -322,15 +286,7 @@ export function usePlayerSurfaceLayout({
         window.cancelAnimationFrame(animationFrameId);
       }
     };
-    // PiP unmounts the chrome; returning mounts new nodes behind the same refs.
-  }, [
-    bottomChromeRef,
-    isMini,
-    isPip,
-    playerContainerRef,
-    shouldReserveOverlayChrome,
-    topChromeRef,
-  ]);
+  }, [isMini, playerContainerRef]);
 
   useEffect(() => {
     marginRequestRef.current();

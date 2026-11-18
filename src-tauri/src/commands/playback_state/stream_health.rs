@@ -381,7 +381,7 @@ pub(super) fn accepts_outcome(
 /// Shared upsert skeleton for the outcome-driven snapshot indexes: recency guard
 /// first, then index insert → item write → prune → index write so a new key can't
 /// evict itself and the index never names a missing item.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn upsert_outcome_snapshot<S: Default + Serialize>(
     store: &DurableStore,
     key: &str,

@@ -403,6 +403,17 @@ fn calendar_schedule(
             .or_default()
             .push(event);
     }
+    for events in days.values_mut() {
+        // Keep the capped upcoming list in the same order as the calendar day.
+        events.sort_by_cached_key(|event| {
+            (
+                event.type_ != "episode",
+                event.season.unwrap_or(0),
+                event.episode.unwrap_or(0),
+                event.series_title.to_lowercase(),
+            )
+        });
+    }
     let upcoming = days
         .iter()
         .filter(|(date, _)| contains_upcoming(date, upcoming))
@@ -415,18 +426,7 @@ fn calendar_schedule(
         missing_count,
         days: days
             .into_iter()
-            .map(|(date, mut events)| {
-                // Episodes first (season, episode), then movies by title.
-                events.sort_by_cached_key(|event| {
-                    (
-                        event.type_ != "episode",
-                        event.season.unwrap_or(0),
-                        event.episode.unwrap_or(0),
-                        event.series_title.to_lowercase(),
-                    )
-                });
-                CalendarDay { date, events }
-            })
+            .map(|(date, events)| CalendarDay { date, events })
             .collect(),
         upcoming,
     }
@@ -973,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn calendar_schedule_upcoming_bounds_cap_and_within_day_stability() {
+    fn calendar_schedule_upcoming_bounds_cap_and_episode_order() {
         let mut events: Vec<_> = (1..=9)
             .rev()
             .map(|episode| {
@@ -1000,7 +1000,7 @@ mod tests {
                 .iter()
                 .map(|event| event.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["first", "e9", "e8", "e7", "e6", "e5", "e4", "e3"]
+            vec!["first", "e1", "e2", "e3", "e4", "e5", "e6", "e7"]
         );
     }
 

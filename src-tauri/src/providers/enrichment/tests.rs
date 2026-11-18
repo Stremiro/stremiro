@@ -289,6 +289,37 @@ fn disk_eviction_and_body_bounds() {
     assert!(read_disk_envelope(&path, "big").is_none());
 }
 
+#[cfg(windows)]
+#[test]
+fn disk_cache_refuses_growth_when_eviction_fails_and_recovers_after_unlock() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = TempPath::dir("enrich-locked");
+    let mut held = Vec::new();
+    for index in 0..DISK_MAX_ENTRIES {
+        let path = dir.join(format!("locked-{index}.json"));
+        std::fs::write(&path, b"cached").unwrap();
+        held.push(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(path)
+                .unwrap(),
+        );
+    }
+    let path = dir.join("new.json");
+    assert!(
+        write_disk_envelope(&path, b"new").is_none(),
+        "an optional cache write must be skipped if no victim can be deleted"
+    );
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), DISK_MAX_ENTRIES);
+    drop(held);
+    write_disk_envelope(&path, b"new").expect("writes recover once eviction is possible");
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), DISK_MAX_ENTRIES);
+}
+
 #[tokio::test]
 async fn concurrent_failures_share_gate_and_negative_cache() {
     // Two different keys, one unpaced source, one scripted 429: the source

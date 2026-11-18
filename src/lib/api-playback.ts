@@ -24,7 +24,6 @@ import type {
 } from '@/lib/api';
 import {
   buildStreamCacheKey,
-  primeBestStreamRequest,
   runBestStreamRequest,
   trackWatchProgressEpochWrite,
   trackWatchProgressSave,
@@ -82,8 +81,10 @@ type StreamSelectorRowPayload = {
   isPlayable: boolean;
   seeders: AddonStream['seeders'];
   sizeBytes: AddonStream['sizeBytes'];
-  searchFields: (string | undefined)[];
+  searchFields: readonly (string | undefined)[];
 };
+
+const EMPTY_SEARCH_FIELDS: readonly [] = [];
 
 // `streams` is structural-shared and identity-keyed upstream, so debounced search/filter
 // changes resend identical rows — cache both payload shapes on the array itself.
@@ -118,7 +119,7 @@ function buildStreamSelectorRow(
           stream.presentation.sizeLabel,
           stream.presentation.resolution,
         ]
-      : [],
+      : EMPTY_SEARCH_FIELDS,
   };
 }
 
@@ -154,7 +155,7 @@ export const playbackApi = {
     episode: number | undefined,
     absoluteEpisode: number | undefined,
     options: StreamRankingOptions | undefined,
-    onProgress: Channel<StreamSelectorData>,
+    onProgress?: Channel<StreamSelectorData>,
   ) =>
     // No TS cache — RQ owns the UI entry, Rust owns ranking/cache. `onProgress` gets merged+ranked snapshots per addon.
     safeInvoke<StreamSelectorData>('get_stream_selector_data', {
@@ -183,12 +184,19 @@ export const playbackApi = {
       searchQuery,
     });
   },
-  getAddonSubtitles: (type: string, id: string, season?: number, episode?: number) =>
+  getAddonSubtitles: (
+    type: string,
+    id: string,
+    season?: number,
+    episode?: number,
+    absoluteEpisode?: number,
+  ) =>
     safeInvoke<AddonSubtitle[]>('get_addon_subtitles', {
       mediaType: type,
       id,
       season,
       episode,
+      absoluteEpisode,
     }),
   resolveBestStream: (
     type: string,
@@ -229,19 +237,6 @@ export const playbackApi = {
         },
       },
     );
-  },
-  /** Seeds a resolved stream under the exact key the player replays; mismatched options miss. */
-  primeBestStream: (
-    type: string,
-    id: string,
-    season: number | undefined,
-    episode: number | undefined,
-    absoluteEpisode: number | undefined,
-    options: ResolveBestStreamOptions | undefined,
-    result: BestResolvedStream,
-  ) => {
-    const cacheKey = bestStreamCacheKey(type, id, season, episode, absoluteEpisode, options);
-    primeBestStreamRequest(cacheKey, result);
   },
   recoverPlaybackStream: ({
     mediaId: id,

@@ -40,21 +40,14 @@ fn merge_track_variants_prefers_next_non_blank_strings_and_ors_flags() {
         existing.external_filename.as_deref(),
         Some("https://subs.example/1")
     );
-}
 
-#[test]
-fn merge_track_variants_lets_next_string_win() {
-    let mut existing = PlayerTrack {
-        title: Some("Old".to_string()),
-        ..track(1, PlayerTrackType::Audio)
-    };
-    let next = PlayerTrack {
-        title: Some("New".to_string()),
-        ..track(1, PlayerTrackType::Audio)
-    };
-
-    merge_track_variants(&mut existing, next);
-
+    merge_track_variants(
+        &mut existing,
+        PlayerTrack {
+            title: Some("New".to_string()),
+            ..track(2, PlayerTrackType::Sub)
+        },
+    );
     assert_eq!(existing.title.as_deref(), Some("New"));
 }
 
@@ -78,7 +71,6 @@ fn player_track_serializes_with_frontend_field_names() {
     assert_eq!(json["defaultTrack"], true);
     assert_eq!(json["externalFilename"], "https://subs.example/1");
     // Absent optionals are omitted, matching the frontend's `field?` shape.
-    assert!(json.get("externalFilename").is_some());
     let minimal = serde_json::to_value(track(1, PlayerTrackType::Video)).unwrap();
     assert!(minimal.get("lang").is_none());
     assert!(minimal.get("title").is_none());

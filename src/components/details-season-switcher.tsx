@@ -1,8 +1,13 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useEffect, useRef } from 'react';
-import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
+import {
+  DRAG_SCROLL_CLASS,
+  useHorizontalDragScroll,
+  useScrollEdgeIndicators,
+} from '@/hooks/use-scroll-edge-indicators';
 import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import type { SeasonEpisodeState } from '@/lib/details-episode-state';
+import { isPlainKeyEvent } from '@/lib/dom';
 import { clamp, cn, pluralize, scrollBehavior } from '@/lib/utils';
 
 interface SeasonSwitcherProps {
@@ -79,6 +84,7 @@ export function SeasonSwitcher({
 }: SeasonSwitcherProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
+  const dragScrollProps = useHorizontalDragScroll<HTMLDivElement>();
   const {
     bind: bindScrollRef,
     syncScrollState,
@@ -145,15 +151,7 @@ export function SeasonSwitcher({
       <div
         ref={bindScrollRef}
         onKeyDown={(event) => {
-          if (
-            event.defaultPrevented ||
-            event.nativeEvent.isComposing ||
-            event.altKey ||
-            event.ctrlKey ||
-            event.metaKey ||
-            event.shiftKey
-          )
-            return;
+          if (!isPlainKeyEvent(event)) return;
           if (activeIndex < 0) return;
           let nextIndex: number;
           if (event.key === 'ArrowLeft') nextIndex = activeIndex - 1;
@@ -164,7 +162,11 @@ export function SeasonSwitcher({
           event.preventDefault();
           goToSeasonIndex(nextIndex);
         }}
-        className='relative flex items-center gap-1 overflow-x-auto py-1 scrollbar-hide'
+        {...dragScrollProps}
+        className={cn(
+          'relative flex items-center gap-1 overflow-x-auto overscroll-x-contain py-1 scrollbar-hide',
+          hasOverflow && DRAG_SCROLL_CLASS,
+        )}
         role='tablist'
         aria-label='Seasons'
       >
@@ -177,7 +179,13 @@ export function SeasonSwitcher({
               height: indicator.height,
               transform: `translate3d(${indicator.left}px, ${indicator.top}px, 0)`,
             }}
-          />
+          >
+            {/* Accent ridge on the top-right corner only, drawn over the pill's 1px border. Whole-pixel
+                pieces (corner arc + two fading lines) stay crisp; masks/fractional strokes blur. */}
+            <span className='absolute -right-px -top-px size-[7px] rounded-tr-md border-r border-t border-(--accent-nav)' />
+            <span className='absolute -top-px right-[5px] h-px w-5 bg-linear-to-l from-(--accent-nav) to-transparent' />
+            <span className='absolute -right-px top-[5px] h-5 w-px bg-linear-to-b from-(--accent-nav) to-transparent' />
+          </span>
         )}
         {seasons.map((season) => {
           const isActive = activeSeason === season.number;
@@ -255,7 +263,7 @@ export function SeasonSwitcher({
           <div
             key={side}
             className={cn(
-              'pointer-events-none absolute inset-y-0 z-10 flex w-12 items-center from-background via-background/80 to-transparent focus-within:opacity-100',
+              'pointer-events-none absolute inset-y-0 z-10 flex w-12 items-center from-background via-background/80 to-transparent transition-opacity duration-150 focus-within:opacity-100 motion-reduce:transition-none',
               edgeClass,
               !canScroll && 'opacity-0',
             )}

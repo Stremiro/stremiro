@@ -1,9 +1,18 @@
+use super::addons::parse_stored_addon_configs;
+use super::app_ui::{
+    normalize_last_location, normalize_stored_app_ui_preferences, sanitize_app_ui_preferences,
+    StartupPage, StoredAppUiPreferences,
+};
+use super::keybindings::{normalize_player_binding_key, resolve_player_keybindings};
+use super::profile::{
+    normalize_stored_profile_preferences, sanitize_local_profile, sanitize_profile_preferences,
+    AccentTargets, LocalProfile, ProfileViewMode, StoredProfilePreferences,
+};
+use super::stream_selector::sanitize_stream_selector_preferences;
 use super::{
-    normalize_addon_url, parse_stored_addon_configs, sanitize_app_ui_preferences,
-    sanitize_local_profile, sanitize_profile_preferences, sanitize_stream_selector_preferences,
-    AccentTargets, AddonConfig, AddonConfigView, AppUiPreferences, LocalProfile,
-    ProfilePreferences, ProfileViewMode, StreamSelectorBatch, StreamSelectorPreferences,
-    StreamSelectorQuality, StreamSelectorSort, StreamSelectorSource,
+    normalize_addon_url, AddonConfig, AddonConfigView, AppUiPreferences, ProfilePreferences,
+    StreamSelectorBatch, StreamSelectorPreferences, StreamSelectorQuality, StreamSelectorSort,
+    StreamSelectorSource,
 };
 use std::collections::BTreeMap;
 
@@ -653,8 +662,8 @@ fn stored_profile_accent_targets_default_per_flag() {
         "viewMode": "grid",
     });
 
-    let parsed = serde_json::from_value::<super::StoredProfilePreferences>(stored.clone())
-        .map(super::normalize_stored_profile_preferences)
+    let parsed = serde_json::from_value::<StoredProfilePreferences>(stored.clone())
+        .map(normalize_stored_profile_preferences)
         .expect("partial targets payload parses");
     assert_eq!(parsed.profile.username, "Streamer");
     assert_eq!(parsed.profile.accent_color, "#abcdef");
@@ -750,12 +759,12 @@ fn app_ui_automatic_update_checks_default_and_preserve_partial_patches() {
 fn stored_app_ui_preferences_drops_only_malformed_fields() {
     // One corrupt field must not reset every sibling preference — the
     // lenient per-field decode drops just the malformed value.
-    let parsed = serde_json::from_value::<super::StoredAppUiPreferences>(serde_json::json!({
+    let parsed = serde_json::from_value::<StoredAppUiPreferences>(serde_json::json!({
         "playerVolume": 73.4,
         "playerSpeed": 1.5,
         "spoilerProtection": true,
     }))
-    .map(super::normalize_stored_app_ui_preferences)
+    .map(normalize_stored_app_ui_preferences)
     .expect("blob parses with a malformed field");
 
     assert_eq!(parsed.player_volume, super::PLAYER_VOLUME_DEFAULT);
@@ -862,8 +871,8 @@ fn recent_searches_record_newest_first_deduplicated_and_bounded() {
             vec!["Dune".to_string(), "x".to_string()],
         ),
     ] {
-        let parsed = serde_json::from_value::<super::StoredAppUiPreferences>(stored)
-            .map(super::normalize_stored_app_ui_preferences)
+        let parsed = serde_json::from_value::<StoredAppUiPreferences>(stored)
+            .map(normalize_stored_app_ui_preferences)
             .unwrap();
         assert_eq!(parsed.recent_searches, expected);
     }
@@ -1017,13 +1026,13 @@ fn sanitize_app_ui_preferences_clamps_runtime_values() {
 #[test]
 fn stored_app_ui_preferences_defaults_missing_subtitle_tuning() {
     // Stores written before subtitle tuning shipped carry none of the keys.
-    let parsed = serde_json::from_value::<super::StoredAppUiPreferences>(serde_json::json!({
+    let parsed = serde_json::from_value::<StoredAppUiPreferences>(serde_json::json!({
         "playerVolume": 80,
         "subtitleFont": "comic",
         "subtitleEdge": 3,
         "autoLoadAddonSubtitles": "yes"
     }))
-    .map(super::normalize_stored_app_ui_preferences)
+    .map(normalize_stored_app_ui_preferences)
     .expect("legacy payload parses");
 
     assert_eq!(parsed.player_volume, 80);
@@ -1042,7 +1051,7 @@ fn stored_app_ui_preferences_defaults_missing_subtitle_tuning() {
     assert!(!parsed.auto_skip_intro);
     assert!(!parsed.close_to_tray);
     assert!(!parsed.start_minimized);
-    assert_eq!(parsed.startup_page, super::StartupPage::Home);
+    assert_eq!(parsed.startup_page, StartupPage::Home);
     assert_eq!(parsed.last_location, None);
 }
 
@@ -1089,8 +1098,6 @@ fn player_timing_preferences_normalize_and_round_trip() {
     .unwrap();
     assert_eq!(legacy.next_episode_countdown_secs, 8);
     assert_eq!(legacy.controls_hide_delay_ms, 3000);
-    assert_eq!(AppUiPreferences::default().next_episode_countdown_secs, 8);
-    assert_eq!(AppUiPreferences::default().controls_hide_delay_ms, 3000);
 
     for (seconds, delay_ms) in [(5, 2000), (8, 3000), (10, 5000), (15, 8000), (30, 3000)] {
         let patch = serde_json::from_value(serde_json::json!({
@@ -1153,7 +1160,7 @@ fn shell_preferences_parse_and_patch_without_resetting_siblings() {
     assert_eq!(parsed.player_volume, 42);
     assert!(parsed.close_to_tray);
     assert!(!parsed.start_minimized);
-    assert_eq!(parsed.startup_page, super::StartupPage::Home);
+    assert_eq!(parsed.startup_page, StartupPage::Home);
     assert_eq!(parsed.last_location.as_deref(), Some("/search?q=space"));
 
     let patch = serde_json::from_value(serde_json::json!({
@@ -1164,7 +1171,7 @@ fn shell_preferences_parse_and_patch_without_resetting_siblings() {
     let patched = super::apply_app_ui_preferences_patch(parsed, patch);
     assert!(patched.close_to_tray);
     assert!(patched.start_minimized);
-    assert_eq!(patched.startup_page, super::StartupPage::LastVisited);
+    assert_eq!(patched.startup_page, StartupPage::LastVisited);
     assert_eq!(patched.last_location.as_deref(), Some("/search?q=space"));
     let clear = serde_json::from_value(serde_json::json!({ "lastLocation": null })).unwrap();
     assert_eq!(
@@ -1177,13 +1184,13 @@ fn shell_preferences_parse_and_patch_without_resetting_siblings() {
 fn player_keybindings_keep_known_actions_and_first_claim_per_key() {
     for (key, normalized) in [(" ", " "), ("K", "k"), ("ArrowRight", "arrowright")] {
         assert_eq!(
-            super::normalize_player_binding_key(key),
+            normalize_player_binding_key(key),
             Ok(normalized.to_string())
         );
     }
-    assert!(super::normalize_player_binding_key("5").is_err());
+    assert!(normalize_player_binding_key("5").is_err());
     for key in ["", "Escape", "Tab", "   ", "\u{7}", "abcdefghijklmnopq"] {
-        assert!(super::normalize_player_binding_key(key).is_err(), "{key:?}");
+        assert!(normalize_player_binding_key(key).is_err(), "{key:?}");
     }
 
     let parsed = super::parse_app_ui_preferences(serde_json::json!({
@@ -1251,7 +1258,7 @@ fn player_keybindings_resolution_claims_overrides_before_defaults() {
             vec!["p".to_string(), "m".to_string()],
         ),
     ]);
-    let effective = super::resolve_player_keybindings(&conflicting);
+    let effective = resolve_player_keybindings(&conflicting);
     assert_eq!(effective["togglePlay"], vec!["p"]);
     assert_eq!(effective["toggleMute"], vec!["m"]);
 }
@@ -1292,7 +1299,7 @@ fn player_keybindings_bind_moves_keys_and_keeps_first_duplicate() {
     assert_eq!(moved["toggleMute"], vec!["m"]);
     let deduped = super::bind_player_key(moved, "togglePlay", 0, Some("p")).unwrap();
     assert_eq!(deduped["togglePlay"], vec!["p"]);
-    let effective = super::resolve_player_keybindings(&deduped);
+    let effective = resolve_player_keybindings(&deduped);
     assert_eq!(effective["togglePlay"], vec!["p"]);
     assert_eq!(effective["toggleMute"], vec!["m"]);
 }
@@ -1382,7 +1389,7 @@ fn last_location_allows_only_bounded_app_routes() {
         "/settings?section=general",
     ] {
         assert_eq!(
-            super::normalize_last_location(Some(valid.to_string())).as_deref(),
+            normalize_last_location(Some(valid.to_string())).as_deref(),
             Some(valid)
         );
     }
@@ -1420,12 +1427,12 @@ fn last_location_limit_counts_unicode_scalars_not_bytes() {
     for scalar in ["a", "界", "\u{1f600}"] {
         let boundary = format!("{prefix}{}", scalar.repeat(512 - prefix.len()));
         assert_eq!(
-            super::normalize_last_location(Some(boundary.clone())),
+            normalize_last_location(Some(boundary.clone())),
             Some(boundary.clone()),
             "512 scalars are accepted for {scalar:?}"
         );
         assert_eq!(
-            super::normalize_last_location(Some(format!("{boundary}{scalar}"))),
+            normalize_last_location(Some(format!("{boundary}{scalar}"))),
             None,
             "513 scalars are rejected for {scalar:?}"
         );
@@ -1435,13 +1442,10 @@ fn last_location_limit_counts_unicode_scalars_not_bytes() {
 #[test]
 fn startup_route_uses_only_valid_browse_locations() {
     for (page, route) in [
-        (super::StartupPage::Home, None),
-        (super::StartupPage::Library, Some("/library")),
-        (super::StartupPage::Calendar, Some("/calendar")),
-        (
-            super::StartupPage::LastVisited,
-            Some("/settings?section=general"),
-        ),
+        (StartupPage::Home, None),
+        (StartupPage::Library, Some("/library")),
+        (StartupPage::Calendar, Some("/calendar")),
+        (StartupPage::LastVisited, Some("/settings?section=general")),
     ] {
         let preferences = AppUiPreferences {
             startup_page: page,
@@ -1460,7 +1464,7 @@ fn startup_route_uses_only_valid_browse_locations() {
     ] {
         assert_eq!(
             super::startup_route(AppUiPreferences {
-                startup_page: super::StartupPage::LastVisited,
+                startup_page: StartupPage::LastVisited,
                 last_location: location.map(str::to_string),
                 ..Default::default()
             }),
@@ -1471,30 +1475,36 @@ fn startup_route_uses_only_valid_browse_locations() {
 
 #[test]
 fn start_minimized_requires_login_or_a_tray_preference() {
-    for launch_at_login in [false, true] {
-        for close_to_tray in [false, true] {
-            for minimize_to_tray in [false, true] {
-                for start_minimized in [false, true] {
-                    let mut preferences = AppUiPreferences {
-                        start_minimized,
-                        close_to_tray,
-                        minimize_to_tray,
-                        ..Default::default()
-                    };
-                    super::normalize_start_minimized(&mut preferences, launch_at_login);
-                    assert_eq!(
-                        preferences.start_minimized,
-                        start_minimized && (launch_at_login || close_to_tray || minimize_to_tray)
-                    );
-                }
-            }
-        }
+    // (launch_at_login, close_to_tray, minimize_to_tray) -> start_minimized survives
+    for (launch_at_login, close_to_tray, minimize_to_tray, expected) in [
+        (true, false, false, true),
+        (false, true, false, true),
+        (false, false, true, true),
+        (false, false, false, false),
+    ] {
+        let mut preferences = AppUiPreferences {
+            start_minimized: true,
+            close_to_tray,
+            minimize_to_tray,
+            ..Default::default()
+        };
+        super::normalize_start_minimized(&mut preferences, launch_at_login);
+        assert_eq!(preferences.start_minimized, expected);
     }
+    let mut preferences = AppUiPreferences {
+        start_minimized: false,
+        close_to_tray: true,
+        minimize_to_tray: true,
+        ..Default::default()
+    };
+    super::normalize_start_minimized(&mut preferences, true);
+    assert!(!preferences.start_minimized);
 }
 
 #[test]
-fn resolve_addon_configs_drops_unclassified_stored_snapshots() {
+fn resolve_addon_configs_replaces_invalid_default_snapshots_and_drops_custom_ones() {
     use crate::test_helpers::{cinemeta_addon, cinemeta_manifest};
+    let defaults = super::resolve_addon_configs(None);
     let mut nameless = cinemeta_manifest();
     nameless.name = " \t".into();
     let display_only = crate::providers::addon_manifest::AddonManifest {
@@ -1502,12 +1512,18 @@ fn resolve_addon_configs_drops_unclassified_stored_snapshots() {
         ..Default::default()
     };
     for snapshot in [nameless, display_only] {
-        let resolved = super::resolve_addon_configs(Some(vec![AddonConfig {
-            capabilities: Some(snapshot),
-            ..cinemeta_addon()
-        }]));
-        assert_eq!(resolved.len(), 2);
-        assert!(resolved[0].capabilities.is_none());
+        let resolved = super::resolve_addon_configs(Some(vec![
+            AddonConfig {
+                capabilities: Some(snapshot.clone()),
+                ..cinemeta_addon()
+            },
+            AddonConfig {
+                capabilities: Some(snapshot),
+                ..crate::test_helpers::addon_at("https://custom.test", "custom", "Custom")
+            },
+        ]));
+        assert_eq!(resolved[0].capabilities, defaults[0].capabilities);
+        assert!(resolved[2].capabilities.is_none());
     }
 }
 

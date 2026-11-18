@@ -8,11 +8,11 @@ use crate::commands::episode_navigation::{
     additional_episode_video_id, build_source_episode_coordinates, SourceEpisodeCoordinates,
 };
 use crate::commands::{normalize_media_id, now_unix_millis, DurableStore};
-use crate::providers::Episode;
+use crate::providers::{Episode, MediaDetails};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use tauri::AppHandle;
 
@@ -115,20 +115,101 @@ pub(super) fn max_mapped_canonical_season<'a>(
 
 /// Digest plus the last details-open that verified it. `seen_at` feeds the cap prune's
 /// recency so actively opened titles outlive browsed-once ones.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct EpisodeMappingDigestRecord {
     pub(super) digest: u64,
     pub(super) seen_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    premiere_year: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end_year: Option<u16>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    season_years: BTreeMap<u32, (u16, u16)>,
 }
 
 /// Reads both the current record shape and legacy bare-u64 digests (seen_at 0 keeps them prune-able).
-fn read_episode_mapping_digest(value: serde_json::Value) -> Option<(u64, u64)> {
+fn read_episode_mapping_digest(value: serde_json::Value) -> Option<EpisodeMappingDigestRecord> {
     if let Some(digest) = value.as_u64() {
-        return Some((digest, 0));
+        return Some(EpisodeMappingDigestRecord {
+            digest,
+            ..Default::default()
+        });
     }
-    serde_json::from_value::<EpisodeMappingDigestRecord>(value)
-        .ok()
-        .map(|record| (record.digest, record.seen_at))
+    serde_json::from_value::<EpisodeMappingDigestRecord>(value).ok()
+}
+
+fn parse_work_year(value: &str) -> Option<u16> {
+    let value = value.trim();
+    (value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<u16>().ok())
+        .flatten()
+        .filter(|year| (1900..=2099).contains(year))
+}
+
+fn release_year(date: &str) -> Option<u16> {
+    let date = date.trim();
+    if date.len() > 4 && !date.get(4..)?.starts_with('-') {
+        return None;
+    }
+    parse_work_year(date.get(..4)?)
+}
+
+fn metadata_work_years(
+    year: Option<&str>,
+    release_date: Option<&str>,
+) -> (Option<u16>, Option<u16>) {
+    let (premiere, end) = year.map_or((None, None), |year| {
+        year.split_once(['-', '–']).map_or_else(
+            || (parse_work_year(year), None),
+            |(start, end)| (parse_work_year(start), parse_work_year(end)),
+        )
+    });
+    (
+        premiere.or_else(|| release_date.and_then(release_year)),
+        end,
+    )
+}
+
+fn episode_season_years(episodes: &[Episode]) -> BTreeMap<u32, (u16, u16)> {
+    let mut years = BTreeMap::new();
+    for episode in episodes {
+        if let Some(year) = episode.release_date.as_deref().and_then(release_year) {
+            years
+                .entry(episode.season)
+                .and_modify(|(min, max): &mut (u16, u16)| {
+                    *min = (*min).min(year);
+                    *max = (*max).max(year);
+                })
+                .or_insert((year, year));
+        }
+    }
+    years
+}
+
+fn accepted_work_years(
+    premiere_year: Option<u16>,
+    end_year: Option<u16>,
+    season_years: &BTreeMap<u32, (u16, u16)>,
+    media_type: &str,
+    season: Option<u32>,
+) -> Vec<u16> {
+    let mut years: Vec<_> = premiere_year.into_iter().collect();
+    if matches!(media_type, "series" | "anime") {
+        let range = season
+            .and_then(|season| season_years.get(&season).copied())
+            .filter(|&(start, end)| end >= start && end - start <= 20)
+            .or_else(|| {
+                premiere_year
+                    .zip(end_year)
+                    .filter(|&(start, end)| end >= start && end - start <= 30)
+            });
+        if let Some((start, end)) = range {
+            years.extend(start..=end);
+        }
+    }
+    years.sort_unstable();
+    years.dedup();
+    years
 }
 
 /// Fingerprint of each coordinate's first episode mapping, so a re-open
@@ -150,6 +231,7 @@ pub(super) fn episode_mappings_digest(
             continue;
         }
         episode.id.hash(&mut hasher);
+        episode.alternate_video_id.hash(&mut hasher);
         episode.season.hash(&mut hasher);
         episode.episode.hash(&mut hasher);
         episode.stream_lookup_id.hash(&mut hasher);
@@ -163,21 +245,19 @@ pub(super) fn episode_mappings_digest(
 pub(super) fn stored_episode_mapping_digest_matches(
     store: &DurableStore,
     digest_key: &str,
-    digest: u64,
-    updated_at: u64,
+    record: &EpisodeMappingDigestRecord,
 ) -> bool {
     let matches = store
         .get(digest_key)
         .and_then(read_episode_mapping_digest)
-        .is_some_and(|(stored_digest, _)| stored_digest == digest);
+        .is_some_and(|stored| {
+            stored.digest == record.digest
+                && stored.premiere_year == record.premiere_year
+                && stored.end_year == record.end_year
+                && stored.season_years == record.season_years
+        });
     if matches {
-        store.set(
-            digest_key,
-            json!(EpisodeMappingDigestRecord {
-                digest,
-                seen_at: updated_at,
-            }),
-        );
+        store.set(digest_key, json!(record));
     }
     matches
 }
@@ -276,7 +356,7 @@ pub(super) fn prune_episode_mapping_index(
             let seen_at = store
                 .get(playback_episode_mapping_digest_item_key(scope))
                 .and_then(read_episode_mapping_digest)
-                .map(|(_, seen_at)| seen_at)
+                .map(|record| record.seen_at)
                 .unwrap_or(0);
             scope_seen_at.insert(scope.to_string(), seen_at);
         }
@@ -374,6 +454,50 @@ fn mapped_canonical_season_is_final(
 }
 
 impl PlaybackStateService {
+    pub(crate) fn work_years_from_details(details: &MediaDetails) -> (Option<u16>, Option<u16>) {
+        metadata_work_years(details.year.as_deref(), details.release_date.as_deref())
+    }
+
+    pub(crate) fn accepted_work_years_from_details(
+        details: &MediaDetails,
+        season: Option<u32>,
+    ) -> Vec<u16> {
+        let (premiere, end) = Self::work_years_from_details(details);
+        accepted_work_years(
+            premiere,
+            end,
+            &episode_season_years(details.episodes.as_deref().unwrap_or_default()),
+            &details.type_,
+            season,
+        )
+    }
+
+    pub(crate) fn accepted_work_years(
+        &self,
+        app: &AppHandle,
+        media_type: &str,
+        media_id: &str,
+        season: Option<u32>,
+    ) -> Vec<u16> {
+        let Some(scope) = super::playback_title_scope_key(Some(media_type), Some(media_id)) else {
+            return Vec::new();
+        };
+        let record = self
+            .open_state_store(app)
+            .ok()
+            .and_then(|store| store.get(playback_episode_mapping_digest_item_key(&scope)))
+            .and_then(read_episode_mapping_digest);
+        record.map_or_else(Vec::new, |record| {
+            accepted_work_years(
+                record.premiere_year,
+                record.end_year,
+                &record.season_years,
+                media_type,
+                season,
+            )
+        })
+    }
+
     /// Caches the canonical→source coordinate mapping for every episode and returns
     /// the resolved snapshots so callers skip a second store pass. `None` = the
     /// scope inputs failed normalization.
@@ -387,6 +511,7 @@ impl PlaybackStateService {
         media_id: &str,
         fallback_lookup_id: Option<&str>,
         episodes: &[Episode],
+        work_years: (Option<u16>, Option<u16>),
     ) -> Result<Option<Vec<PlaybackEpisodeMappingSnapshot>>, String> {
         let Some((media_type, media_id)) = normalize_title_scope(media_type, media_id) else {
             return Ok(None);
@@ -421,6 +546,13 @@ impl PlaybackStateService {
         );
         let scope_key = format!("{media_type}:{media_id}");
         let digest_key = playback_episode_mapping_digest_item_key(&scope_key);
+        let digest_record = EpisodeMappingDigestRecord {
+            digest,
+            seen_at: updated_at,
+            premiere_year: work_years.0,
+            end_year: work_years.1,
+            season_years: episode_season_years(episodes),
+        };
 
         let start_generation = self.history_generation();
         let store = self.open_state_store(app)?;
@@ -434,7 +566,7 @@ impl PlaybackStateService {
 
         // Digest match proves every item was already written. The seen_at refresh
         // lands in the in-memory map and rides the next writer's flush — no save of its own.
-        if stored_episode_mapping_digest_matches(&store, &digest_key, digest, updated_at) {
+        if stored_episode_mapping_digest_matches(&store, &digest_key, &digest_record) {
             return Ok(Some(snapshots));
         }
 
@@ -471,13 +603,7 @@ impl PlaybackStateService {
         changed |= pruned;
 
         if !digest_invalidated {
-            store.set(
-                digest_key,
-                json!(EpisodeMappingDigestRecord {
-                    digest,
-                    seen_at: updated_at,
-                }),
-            );
+            store.set(digest_key, json!(digest_record));
         }
         if changed {
             store.set(

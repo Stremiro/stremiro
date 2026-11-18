@@ -259,7 +259,6 @@ export function PlayerEpisodesPanel({
         : 0;
       const isResume =
         !isCurrent && resumeTarget?.season === ep.season && resumeTarget?.episode === ep.episode;
-      const thumbnail = ep.thumbnail || backdrop;
       const episodeTitle = getEpisodeTitle(isSpoiler ? undefined : ep.title, ep.episode);
 
       return (
@@ -284,7 +283,8 @@ export function PlayerEpisodesPanel({
           )}
           <EpisodeThumb
             episode={ep.episode}
-            src={thumbnail}
+            src={ep.thumbnail}
+            fallbackSrc={backdrop}
             isSpoiler={isSpoiler}
             progressPercent={progressPercent}
             className='aspect-video w-[120px] rounded-[5px] ring-1 ring-white/[0.06]'

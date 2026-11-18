@@ -16,7 +16,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, NavigationType, useLocation, useNavigationType, useParams } from 'react-router';
 import { EpisodeCard, type EpisodeEmphasis } from '@/components/details-episode-card';
 import { DetailsCredits } from '@/components/details-credits';
-import { creditsMediaType, DetailsSections, NextAiringChip } from '@/components/details-sections';
+import {
+  creditsMediaType,
+  DETAILS_RAIL_BUTTON_CLASS,
+  DetailsSections,
+  NextAiringChip,
+} from '@/components/details-sections';
 import { SeasonProgressRail, SeasonSwitcher } from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
 import { DetailsTrailer } from '@/components/details-trailer-dialog';
@@ -38,7 +43,12 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useNearViewport } from '@/hooks/use-near-viewport';
-import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
+import {
+  DRAG_SCROLL_CLASS,
+  scrollEdgeMask,
+  useHorizontalDragScroll,
+  useScrollEdgeIndicators,
+} from '@/hooks/use-scroll-edge-indicators';
 import { useDetailsStreamSelector } from '@/hooks/use-details-stream-selector';
 import { useDetailsWatchStatus } from '@/hooks/use-details-watch-status';
 import {
@@ -102,9 +112,6 @@ const EPISODE_SKELETON_TILES = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((index) => (
 const ICON_ACTION_CLASS =
   'group/action flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.06] text-white/75 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] transition-[background-color,border-color,color] duration-150 ease-out hover:border-white/[0.18] hover:bg-white/[0.1] hover:text-white not-aria-disabled:active:bg-white/[0.14] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50 aria-disabled:cursor-default motion-reduce:transition-none';
 
-const EPISODE_PAGE_BUTTON_CLASS =
-  'flex h-9 w-9 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35';
-
 const DETAILS_COLUMN_CLASS = `mx-auto w-full max-w-[1440px] ${SIDEBAR_PAGE_COLUMN_INSETS}`;
 const DETAILS_HERO_CLASS = 'relative -mt-8 w-full pb-7 pt-16 sm:pb-9 sm:pt-20 lg:pt-24';
 const DETAILS_STATUS_STRIP_CLASS = 'inline-flex max-w-full flex-wrap items-center gap-1';
@@ -142,11 +149,17 @@ function DetailsContent() {
   const baseRouteType = type || 'series';
   const baseRouteId = id || '';
   const location = useLocation();
+  // Handoff cleanup replaces the history entry, not the user's episode-pane navigation.
+  const detailsEntryKey =
+    typeof location.state?.detailsEntryKey === 'string'
+      ? location.state.detailsEntryKey
+      : location.key;
   const navigationType = useNavigationType();
   const queryClient = useQueryClient();
   // Playback preference writes must not re-render the whole page.
   const { preferences: spoilerProtection, isHydrating: isHydratingSpoilerProtection } =
     useAppUiPreferences((preferences) => preferences.spoilerProtection);
+  const effectiveSpoilerProtection = isHydratingSpoilerProtection || spoilerProtection;
 
   // Observe late prefetch results without issuing a second metadata request.
   const { data: cardDetails } = useQuery({
@@ -155,7 +168,6 @@ function DetailsContent() {
   });
   const {
     data: item,
-    isFetched,
     isLoading,
     isFetching,
     isPaused,
@@ -278,7 +290,7 @@ function DetailsContent() {
   } = useDetailsEpisodePane({
     item,
     effectiveRouteId: baseRouteId,
-    locationKey: location.key,
+    locationKey: detailsEntryKey,
     locationSeason,
     locationEpisode,
     resumeSeason: resumeEpisodeCoords?.season ?? latestSeriesProgress?.absolute_season ?? undefined,
@@ -300,9 +312,10 @@ function DetailsContent() {
         today: localToday,
       });
       return new Set(
-        indices.map((index) =>
-          episodeProgressKey(baseRouteId, episodes[index]!.season, episodes[index]!.episode),
-        ),
+        indices.flatMap((index) => {
+          const episode = episodes[index];
+          return episode ? [episodeProgressKey(baseRouteId, episode.season, episode.episode)] : [];
+        }),
       );
     },
     enabled: hasEpisodesSection && !isPlaceholderData,
@@ -412,12 +425,19 @@ function DetailsContent() {
   const episodeScrollerRef = useRef<HTMLDivElement>(null);
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
   const episodePageDirectionRef = useRef<'previous' | 'next' | null>(null);
+  const episodeDragProps = useHorizontalDragScroll<HTMLDivElement>();
   const {
     bind: bindEpisodeScroller,
+    hasOverflow: episodeHasOverflow,
     canScrollLeft,
     canScrollRight,
     syncScrollState: syncEpisodeScroll,
   } = useScrollEdgeIndicators(episodeScrollerRef);
+  const episodeEdgeMask = scrollEdgeMask({
+    hasOverflow: episodeHasOverflow,
+    canScrollLeft,
+    canScrollRight,
+  });
   const browseEpisodes = (direction: 'previous' | 'next') => {
     const scroller = episodeScrollerRef.current;
     if (scroller && (direction === 'next' ? canScrollRight : canScrollLeft)) {
@@ -427,7 +447,7 @@ function DetailsContent() {
       const count = Math.max(1, Math.floor(scroller.clientWidth / step));
       scroller.scrollBy({
         left: (direction === 'next' ? 1 : -1) * count * step,
-        behavior: 'instant',
+        behavior: scrollBehavior(),
       });
     } else if (direction === 'next' ? hasMoreEpisodes : hasPreviousEpisodes) {
       episodePageDirectionRef.current = direction;
@@ -509,7 +529,8 @@ function DetailsContent() {
     baseRouteType,
     baseRouteId,
     locationState: location.state,
-    spoilerProtection,
+    detailsEntryKey,
+    spoilerProtection: effectiveSpoilerProtection,
     titleProgress,
   });
 
@@ -688,7 +709,7 @@ function DetailsContent() {
 
   if (isLoading && errorUpdatedAt === 0 && !showOfflineDetails) return <DetailsSkeleton />;
 
-  if ((showOfflineDetails || error || (isFetched && isLoading)) && !item) {
+  if ((showOfflineDetails || error) && !item) {
     const missingAddon = !showOfflineDetails && isNoCapableAddonError(error);
     return (
       <div
@@ -787,7 +808,7 @@ function DetailsContent() {
             <RemoteImage
               src={posterSrc}
               alt=''
-              className='hidden aspect-2/3 w-full rounded-lg border border-white/10 object-cover shadow-xl sm:block'
+              className='hidden aspect-2/3 w-full rounded-lg object-cover ring-1 ring-white/10 shadow-[0_24px_48px_-24px_rgb(0_0_0/0.9)] sm:block'
               loading='eager'
               fadeIn
               onError={onPosterError}
@@ -877,13 +898,15 @@ function DetailsContent() {
                       <span className='min-w-0 break-words'>{item.country}</span>
                     </span>
                   )}
-                  {titleCredits?.nextAiringEpisode && (
+                </div>
+                {titleCredits?.nextAiringEpisode && (
+                  <div className='mt-2.5'>
                     <NextAiringChip
                       key={titleCredits.nextAiringEpisode.airingAt}
                       episode={titleCredits.nextAiringEpisode}
                     />
-                  )}
-                </div>
+                  </div>
+                )}
                 {item.awards && (
                   <div className='mt-3 flex max-w-3xl items-start gap-2 text-[13px] leading-5 text-zinc-200'>
                     <Trophy
@@ -918,7 +941,7 @@ function DetailsContent() {
                   id='details-description'
                   ref={descriptionRef}
                   className={cn(
-                    'max-w-3xl text-pretty break-words text-[14px] font-normal leading-6 text-zinc-300',
+                    'max-w-[68ch] text-pretty break-words text-[15px] font-normal leading-7 text-zinc-300',
                     !descriptionExpanded && 'line-clamp-3',
                   )}
                 >
@@ -1249,7 +1272,7 @@ function DetailsContent() {
                       onRetry={retryEpisodeSearch}
                     />
                   )}
-                  <div className='flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2'>
+                  <div className='flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-3'>
                     <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2'>
                       <p
                         aria-live='polite'
@@ -1280,7 +1303,7 @@ function DetailsContent() {
                                 resumeEpisodeCoords.episode,
                               );
                             }}
-                            className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+                            className='accent-lattice-soft flex h-9 items-center gap-1.5 rounded-md border px-2.5 text-[13px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
                           >
                             <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
                             Jump to{' '}
@@ -1308,7 +1331,7 @@ function DetailsContent() {
                                 });
                               }
                             }}
-                            className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
+                            className='flex h-9 items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.04] px-2.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
                           >
                             <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
                             {seasonActionMarksWatched
@@ -1347,7 +1370,7 @@ function DetailsContent() {
                                   .querySelector<HTMLButtonElement>('#details-episodes-grid button')
                                   ?.focus();
                               }}
-                              className='h-8 rounded-full border-transparent bg-white/[0.05] text-[12px] text-white shadow-none placeholder:text-zinc-500 transition-colors hover:bg-white/[0.08] focus-visible:border-white/[0.14] focus-visible:bg-white/[0.07] focus-visible:ring-white/20'
+                              className='h-9 rounded-md border-white/[0.12] bg-black/20 text-[13px] text-white shadow-none placeholder:text-zinc-400 transition-colors hover:bg-white/[0.06] focus-visible:border-white/25 focus-visible:bg-white/[0.07] focus-visible:ring-white/20'
                             />
                           </div>
                         )}
@@ -1358,7 +1381,7 @@ function DetailsContent() {
                               // aria-disabled, not disabled: an edge page would drop the focused button to <body>.
                               aria-disabled={(!hasPreviousEpisodes && !canScrollLeft) || undefined}
                               onClick={() => browseEpisodes('previous')}
-                              className={EPISODE_PAGE_BUTTON_CLASS}
+                              className={DETAILS_RAIL_BUTTON_CLASS}
                               aria-label='Show previous episodes'
                             >
                               <ChevronLeft className='h-4 w-4' />
@@ -1372,7 +1395,7 @@ function DetailsContent() {
                               type='button'
                               aria-disabled={(!hasMoreEpisodes && !canScrollRight) || undefined}
                               onClick={() => browseEpisodes('next')}
-                              className={EPISODE_PAGE_BUTTON_CLASS}
+                              className={DETAILS_RAIL_BUTTON_CLASS}
                               aria-label='Show next episodes'
                             >
                               <ChevronRight className='h-4 w-4' />
@@ -1399,9 +1422,16 @@ function DetailsContent() {
                       isLoadingWatchHistoryForItem ||
                       (!episodeSearchError && isEpisodeSearchPending)
                     }
+                    style={
+                      episodeEdgeMask
+                        ? { maskImage: episodeEdgeMask, WebkitMaskImage: episodeEdgeMask }
+                        : undefined
+                    }
+                    {...episodeDragProps}
                     className={cn(
                       'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30',
                       visibleEpisodes.length > 0 ? EPISODE_ROW_CLASS : 'grid',
+                      visibleEpisodes.length > 0 && episodeHasOverflow && DRAG_SCROLL_CLASS,
                     )}
                   >
                     {!episodeSearchError &&
@@ -1465,7 +1495,7 @@ function DetailsContent() {
                             emphasis={emphasis}
                             isSpoiler={isEpisodeSpoiler(
                               ep,
-                              isHydratingSpoilerProtection || spoilerProtection,
+                              effectiveSpoilerProtection,
                               titleProgress?.watchedEpisodeCeiling,
                               epProgress,
                             )}

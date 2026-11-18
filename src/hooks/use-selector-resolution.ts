@@ -161,8 +161,6 @@ export function useSelectorResolution({
       }
       const feedback = attempt.feedback;
 
-      // One request object feeds the prime and the route state — the
-      // canonical-season fold must match or the replay misses the primed entry.
       const resolvedRequest = {
         mediaId: id,
         mediaType: streamMediaType,
@@ -194,7 +192,7 @@ export function useSelectorResolution({
       if (!isCurrentLaunch()) {
         return;
       }
-      // The pick supplies the replayed key plus identity fallback for a failover winner.
+      // Keep the original pick so a restored route can resolve it again.
       launchResolvedStream(navigate, resolvedRequest, data, routeExtras, stream);
       closeSelector();
     };

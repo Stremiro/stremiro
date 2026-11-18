@@ -52,6 +52,9 @@ fn decode_recommendations(
 ) -> Result<(Vec<AnimeRecommendation>, bool), String> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| INVALID.to_string())?;
+    if value.is_null() {
+        return Ok((Vec::new(), true));
+    }
     if let Some(errors) = value.get("errors") {
         if !errors.as_array().is_some_and(Vec::is_empty) {
             return Err(INVALID.to_string());
@@ -175,5 +178,16 @@ mod tests {
                 .unwrap()
                 .1
         );
+    }
+
+    #[tokio::test]
+    async fn missing_anilist_recommendations_share_one_cached_empty_response() {
+        let server = crate::test_helpers::TestHttpServer::new(vec![(404, "", None)]);
+        let mut client = EnrichmentClient::new(None);
+        client.set_base_url(Source::AniList, server.url.clone());
+        for id in ["anilist:21", "anilist:21:1:2"] {
+            assert!(anime_recommendations(&client, id).await.unwrap().is_empty());
+        }
+        assert_eq!(server.finish().len(), 1);
     }
 }

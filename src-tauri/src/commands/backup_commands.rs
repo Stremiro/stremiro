@@ -554,9 +554,8 @@ async fn import_app_data(
     let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
     let export = parse_backup(deadline, data).await?;
     let service = playback_state.inner().clone();
-    let app_owned = app.clone();
     run_store_op_at(deadline, move || {
-        let app = &app_owned;
+        let app = &app;
         let result = import_app_data_entries(app, &service, export);
         if result.as_ref().map_or(true, |result| {
             result.addons_imported > 0 || result.settings_restored
@@ -897,7 +896,7 @@ fn read_backup_file(source_path: &str) -> Result<String, BackupError> {
     })?;
     let mut limited = file.take(limit.saturating_add(1));
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut limited, &mut bytes).map_err(|e| {
+    limited.read_to_end(&mut bytes).map_err(|e| {
         log_warn(
             "backup",
             "read-file",

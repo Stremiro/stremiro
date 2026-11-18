@@ -482,11 +482,11 @@ function SortableItemRow({
             {item.title}
           </span>
           <span className='flex items-center gap-1.5 mt-0.5'>
-            <span className='text-[10px] text-zinc-500 capitalize'>{item.type}</span>
+            <span className='text-[11px] text-zinc-500 capitalize'>{item.type}</span>
             {item.displayYear && (
               <>
-                <span className='text-zinc-700 text-[10px]'>·</span>
-                <span className='text-[10px] text-zinc-500'>{item.displayYear}</span>
+                <span className='text-zinc-700 text-[11px]'>·</span>
+                <span className='text-[11px] text-zinc-500'>{item.displayYear}</span>
               </>
             )}
           </span>
@@ -1079,7 +1079,7 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
             )}
           </div>
         </div>
-      ) : (isError && lists.length === 0) || (isFetched && isLoading) ? (
+      ) : isError && lists.length === 0 ? (
         retryBanner
       ) : lists.length === 0 ? (
         <div className='flex flex-col items-center justify-center px-6 py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015]'>

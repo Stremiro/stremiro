@@ -22,6 +22,7 @@ import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clearTimer,
   cn,
+  formatRuntime,
   GENRE_LINK_CLASS,
   isHttpUrl,
   mediaTypeLabel,
@@ -35,6 +36,12 @@ const HERO_CONTAINER_CLASS =
   'relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden';
 const HERO_CONTENT_CLASS =
   'absolute inset-0 flex items-end px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16';
+
+const HERO_META_DOT = (
+  <span aria-hidden='true' className='text-white/30'>
+    ·
+  </span>
+);
 
 const ARROW_BUTTON_CLASS_NAME =
   'group/step flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/45 transition-colors duration-150 hover:text-white focus-visible:outline-none focus-visible:text-white focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none';
@@ -76,14 +83,26 @@ function HeroCarouselIndicators({
         <span className='font-light text-white/30'>/</span>
         <span className='font-medium text-white/45'>{pad2(itemCount)}</span>
       </span>
-      <span
-        aria-hidden='true'
-        className='relative mx-1 h-px w-12 overflow-hidden rounded bg-white/20 sm:w-20'
-      >
-        <span
-          className='absolute inset-y-0 left-0 w-full origin-left rounded bg-(--accent-art) transition-transform duration-300 ease-out motion-reduce:transition-none'
-          style={{ transform: `scaleX(${(activeIndex + 1) / itemCount})` }}
-        />
+      <span role='group' aria-label='Featured titles' className='mx-1 flex items-center gap-0.5'>
+        {Array.from({ length: itemCount }, (_, index) => (
+          <button
+            key={`feature-${index + 1}`}
+            type='button'
+            aria-label={`Show feature ${index + 1}`}
+            aria-current={index === activeIndex || undefined}
+            onClick={() => onStep(index - activeIndex)}
+            className='group/segment flex h-6 w-6 items-center justify-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          >
+            <span
+              className={cn(
+                'h-[3px] w-full rounded-full transition-colors duration-200 motion-reduce:transition-none',
+                index === activeIndex
+                  ? 'bg-(--accent-art)'
+                  : 'bg-white/25 group-hover/segment:bg-white/50',
+              )}
+            />
+          </button>
+        ))}
       </span>
       <button
         type='button'
@@ -276,6 +295,7 @@ export function Hero({ items }: HeroProps) {
   }, [activeIndex, isHeroDetailsFetched, isOffscreen, isOnline, items, queryClient]);
 
   const heroRating = heroDetails?.rating ?? null;
+  const heroRuntime = formatRuntime(heroDetails?.runtime);
   const heroLogo = item?.logo || heroDetails?.logo;
   const { isInLibrary, libraryActionLabel, libraryError, libraryReady } = useLibraryMembership(
     item?.id,
@@ -457,15 +477,31 @@ export function Hero({ items }: HeroProps) {
                   />
                 </Link>
 
-                <div className='flex items-center flex-wrap gap-x-3 gap-y-1.5 text-[13px] font-medium text-white/85'>
-                  {item.displayYear && <span>{item.displayYear}</span>}
+                <div className='flex items-center flex-wrap gap-x-2.5 gap-y-1.5 text-[13px] font-medium text-white/85'>
+                  {item.displayYear && (
+                    <>
+                      <span>{item.displayYear}</span>
+                      {HERO_META_DOT}
+                    </>
+                  )}
                   <span>{typeLabel}</span>
-                  {/* A late rating stays at the row's edge without shifting year/type. */}
+                  {/* Late rating/runtime stay at the row's edge without shifting year/type. */}
                   {heroRating && (
-                    <span className='flex items-center gap-1.5 font-semibold text-white'>
-                      <Star className='h-3 w-3 fill-amber-400 text-amber-400' />
-                      {heroRating}
-                    </span>
+                    <>
+                      {HERO_META_DOT}
+                      <span className='flex items-center gap-1.5 font-semibold text-white'>
+                        <Star className='h-3 w-3 fill-amber-400 text-amber-400' />
+                        {heroRating}
+                      </span>
+                    </>
+                  )}
+                  {heroRuntime && (
+                    <>
+                      {HERO_META_DOT}
+                      <span className='tabular-nums animate-in fade-in duration-300 motion-reduce:animate-none'>
+                        {heroRuntime}
+                      </span>
+                    </>
                   )}
                 </div>
 

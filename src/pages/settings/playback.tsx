@@ -99,10 +99,10 @@ function SecondsSelect({
       <SettingsSelect
         ariaLabel={label}
         valueLabel={`${seconds} seconds`}
-        value={String(seconds)}
-        options={options.map((option) => ({ value: String(option), label: `${option} seconds` }))}
+        value={seconds}
+        options={options.map((option) => ({ value: option, label: `${option} seconds` }))}
         disabled={disabled}
-        onChange={(value) => onChange(Number(value))}
+        onChange={onChange}
       />
     </SettingsRow>
   );
@@ -456,65 +456,6 @@ export function PlaybackSettings() {
           </SettingsGroup>
           <SettingsGroup>
             <SettingsGroupHeader
-              icon={Volume2}
-              title='Sound'
-              description='Applied to all videos.'
-            />
-            <SettingsCard>
-              <SettingsBody rows>
-                <AppUiPreferenceToggle
-                  appUiPreferences={appUiPreferences}
-                  field='nightMode'
-                  icon={Moon}
-                  label='Night mode'
-                  description='Boost quiet audio and smooth volume changes. Off keeps the original sound.'
-                />
-                <SettingsRow
-                  icon={AudioLines}
-                  label='Audio sync'
-                  description='Positive delays audio; negative plays it earlier.'
-                >
-                  <span className='flex max-w-full items-center gap-2.5'>
-                    <AudioSyncStepper
-                      audioDelay={preferences.audioDelay}
-                      isHydrating={isHydrating}
-                      updatePreferences={updatePreferences}
-                      buttonClassName={STEP_BUTTON_CLASS}
-                      resetClassName={cn(STEP_BUTTON_CLASS, 'ml-0.5')}
-                      outputClassName='w-14 shrink-0 text-center text-[14px] font-medium tabular-nums text-zinc-100'
-                      resetContent={<RotateCcw aria-hidden='true' className='size-3.5' />}
-                      resetTitle='Reset audio sync'
-                    />
-                  </span>
-                </SettingsRow>
-              </SettingsBody>
-            </SettingsCard>
-          </SettingsGroup>
-          <SettingsGroup>
-            <SettingsGroupHeader icon={Compass} title='Browsing' />
-            <SettingsCard>
-              <SettingsBody rows>
-                <AppUiPreferenceToggle
-                  appUiPreferences={appUiPreferences}
-                  field='spoilerProtection'
-                  icon={EyeOff}
-                  label='Spoiler protection'
-                  description='Blur unwatched episode thumbnails and descriptions.'
-                />
-                <AppUiPreferenceToggle
-                  appUiPreferences={appUiPreferences}
-                  field='trailerPreviews'
-                  icon={Film}
-                  label='Trailer previews'
-                  description='Play a muted trailer when hovering a title card.'
-                />
-              </SettingsBody>
-            </SettingsCard>
-          </SettingsGroup>
-        </div>
-        <div className='min-w-0 space-y-8'>
-          <SettingsGroup>
-            <SettingsGroupHeader
               icon={Captions}
               title='Subtitles'
               description='Appearance for all videos.'
@@ -547,6 +488,44 @@ export function PlaybackSettings() {
                     onPatch={updatePreferences}
                   />
                 </div>
+              </SettingsBody>
+            </SettingsCard>
+          </SettingsGroup>
+        </div>
+        <div className='min-w-0 space-y-8'>
+          <SettingsGroup>
+            <SettingsGroupHeader
+              icon={Volume2}
+              title='Sound'
+              description='Applied to all videos.'
+            />
+            <SettingsCard>
+              <SettingsBody rows>
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='nightMode'
+                  icon={Moon}
+                  label='Night mode'
+                  description='Boost quiet audio and smooth volume changes. Off keeps the original sound.'
+                />
+                <SettingsRow
+                  icon={AudioLines}
+                  label='Audio sync'
+                  description='Positive delays audio; negative plays it earlier.'
+                >
+                  <span className='flex max-w-full items-center gap-2.5'>
+                    <AudioSyncStepper
+                      audioDelay={preferences.audioDelay}
+                      isHydrating={isHydrating}
+                      updatePreferences={updatePreferences}
+                      buttonClassName={STEP_BUTTON_CLASS}
+                      resetClassName={cn(STEP_BUTTON_CLASS, 'ml-0.5')}
+                      outputClassName='w-14 shrink-0 text-center text-[14px] font-medium tabular-nums text-zinc-100'
+                      resetContent={<RotateCcw aria-hidden='true' className='size-3.5' />}
+                      resetTitle='Reset audio sync'
+                    />
+                  </span>
+                </SettingsRow>
               </SettingsBody>
             </SettingsCard>
           </SettingsGroup>
@@ -589,6 +568,27 @@ export function PlaybackSettings() {
                   icon={FastForward}
                   label='Auto-skip intros & recaps'
                   description='Skip detected intros and recaps. Outros stay manual.'
+                />
+              </SettingsBody>
+            </SettingsCard>
+          </SettingsGroup>
+          <SettingsGroup>
+            <SettingsGroupHeader icon={Compass} title='Browsing' />
+            <SettingsCard>
+              <SettingsBody rows>
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='spoilerProtection'
+                  icon={EyeOff}
+                  label='Spoiler protection'
+                  description='Blur unwatched episode thumbnails and descriptions.'
+                />
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='trailerPreviews'
+                  icon={Film}
+                  label='Trailer previews'
+                  description='Play a muted trailer when hovering a title card.'
                 />
               </SettingsBody>
             </SettingsCard>

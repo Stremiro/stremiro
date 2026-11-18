@@ -18,10 +18,11 @@ const EOF_CARD_SLOT_CLASS =
 const EOF_GLASS_CLASS = 'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60';
 const EOF_EYEBROW_CLASS = 'text-[11px] font-medium leading-none text-white/65';
 
-function EofCardThumbnail({ src }: { src: string }) {
+function EofCardThumbnail({ src, fallbackSrc }: { src: string; fallbackSrc?: string }) {
   return (
     <RemoteImage
       src={src}
+      fallbackSrc={fallbackSrc}
       alt=''
       className='h-14 w-24 shrink-0 rounded-lg object-cover'
       loading='lazy'
@@ -358,6 +359,7 @@ export function PlayerPauseResumeButton({ visible, onResume }: PlayerPauseResume
 interface PlayerUpNextCardProps {
   episode: Episode;
   thumbnail?: string;
+  fallbackThumbnail?: string;
   /** Null snapshots keep the card manual-only. */
   autoPlayCountdown: SubscribableStore<number | null>;
   autoPlayDurationSeconds: number;
@@ -373,11 +375,13 @@ const UP_NEXT_RING_CIRCUMFERENCE = 2 * Math.PI * UP_NEXT_RING_RADIUS;
 export function PlayerUpNextCard({
   episode,
   thumbnail,
+  fallbackThumbnail,
   autoPlayCountdown,
   autoPlayDurationSeconds,
   onCancelAutoPlay,
   onPlayNext,
 }: PlayerUpNextCardProps) {
+  const imageSrc = thumbnail || fallbackThumbnail;
   const playNextButtonRef = useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = (button: HTMLButtonElement | null) => {
     if (!button) return;
@@ -410,7 +414,7 @@ export function PlayerUpNextCard({
           'group/upnext flex min-w-0 max-w-md items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-zinc-900/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
         )}
       >
-        {thumbnail && <EofCardThumbnail src={thumbnail} />}
+        {imageSrc && <EofCardThumbnail src={imageSrc} fallbackSrc={fallbackThumbnail} />}
         <div className='min-w-0'>
           <p className={EOF_EYEBROW_CLASS}>Up Next</p>
           <p className='mt-1 truncate text-sm font-semibold leading-snug text-white'>
@@ -477,6 +481,7 @@ export function PlayerUpNextCard({
 interface PlayerEndCardProps {
   title: string;
   thumbnail?: string;
+  fallbackThumbnail?: string;
   /** 'card' floats above the expanded chrome (the Up Next slot); 'strip' docks inside the mini video surface. */
   variant?: 'card' | 'strip';
   onReplay: () => void;
@@ -488,10 +493,12 @@ interface PlayerEndCardProps {
 export function PlayerEndCard({
   title,
   thumbnail,
+  fallbackThumbnail,
   variant,
   onReplay,
   onBackToTitle,
 }: PlayerEndCardProps) {
+  const imageSrc = thumbnail || fallbackThumbnail;
   if (variant === 'strip') {
     return (
       <div
@@ -506,9 +513,10 @@ export function PlayerEndCard({
           }}
           className='flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 text-left transition-colors duration-200 hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
         >
-          {thumbnail && (
+          {imageSrc && (
             <RemoteImage
-              src={thumbnail}
+              src={imageSrc}
+              fallbackSrc={fallbackThumbnail}
               alt=''
               className='h-7 w-12 shrink-0 rounded object-cover'
             />
@@ -539,7 +547,7 @@ export function PlayerEndCard({
       data-player-interactive
       className={cn(EOF_CARD_SLOT_CLASS, EOF_GLASS_CLASS, 'w-[420px] gap-3 rounded-2xl p-4')}
     >
-      {thumbnail && <EofCardThumbnail src={thumbnail} />}
+      {imageSrc && <EofCardThumbnail src={imageSrc} fallbackSrc={fallbackThumbnail} />}
       <div className='min-w-0 flex-1'>
         <p className={EOF_EYEBROW_CLASS}>Playback finished</p>
         <p

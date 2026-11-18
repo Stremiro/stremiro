@@ -309,13 +309,13 @@ type EpisodeRangeClaim = (Option<(u32, u32)>, u32, u32);
 /// the numberless "final season" marker. The multi-regex battery runs at most
 /// once per field — each (season, final-flag) target then evaluates for free.
 #[derive(Debug, Clone)]
-struct SeasonClaims {
+pub(super) struct SeasonClaims {
     ranges: Vec<(u32, u32)>,
     final_season_marker: bool,
 }
 
 impl SeasonClaims {
-    fn of(text: &str) -> Self {
+    pub(super) fn of(text: &str) -> Self {
         Self {
             ranges: explicit_season_ranges(text).collect(),
             final_season_marker: FINAL_SEASON_MARKER_REGEX.is_match(text),
@@ -324,7 +324,7 @@ impl SeasonClaims {
 
     /// `None` = no season claim; `Some(false)` = a different season claimed.
     /// A numberless "final season" claim needs the caller's final-season fact.
-    fn matches(&self, requested_season: u32, final_season: bool) -> Option<bool> {
+    pub(super) fn matches(&self, requested_season: u32, final_season: bool) -> Option<bool> {
         if self
             .ranges
             .iter()
@@ -337,18 +337,6 @@ impl SeasonClaims {
         }
         (!self.ranges.is_empty()).then_some(false)
     }
-}
-
-/// `None` = no season claim; `Some(false)` = a different season claimed.
-/// A numberless "final season" claim needs the caller's final-season fact.
-/// Test-only: production reads the memoized `SeasonClaims` on `StreamMatchText`.
-#[cfg(test)]
-pub(super) fn text_matches_requested_season(
-    text: &str,
-    requested_season: u32,
-    final_season: bool,
-) -> Option<bool> {
-    SeasonClaims::of(text).matches(requested_season, final_season)
 }
 
 /// Blanks every episode-range claim so only standalone episode tokens remain.
@@ -429,7 +417,7 @@ fn episode_range_claims(text: &str) -> impl Iterator<Item = (Option<(u32, u32)>,
     seasons.chain(x_seasons).chain(loose)
 }
 
-/// `season_context` is the caller's `text_matches_requested_season` result.
+/// `season_context` is the caller's `SeasonClaims::matches` result.
 fn episode_range_claims_cover(
     claims: &[EpisodeRangeClaim],
     season: u32,
@@ -512,7 +500,7 @@ fn absolute_episode_claims(text: &str) -> impl Iterator<Item = u32> + '_ {
 }
 
 /// True when lowered stream text names the requested episode (handles ep 1000+
-/// forms). `season_context` is the caller's `text_matches_requested_season` result.
+/// forms). `season_context` is the caller's `SeasonClaims::matches` result.
 pub(super) fn episode_matches_lowered(
     t: &str,
     season: u32,
@@ -582,11 +570,11 @@ fn episode_matches_lowered_with_scratch(
 
 /// `_` defeats `\b` (it's a word char) but groups use it as a separator —
 /// map to a space once so every probe sees the same token boundaries.
-pub(crate) fn normalize_separators(text: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn normalize_separators(text: &str) -> Cow<'_, str> {
     if text.contains('_') {
-        std::borrow::Cow::Owned(text.replace('_', " "))
+        Cow::Owned(text.replace('_', " "))
     } else {
-        std::borrow::Cow::Borrowed(text)
+        Cow::Borrowed(text)
     }
 }
 
@@ -1158,31 +1146,17 @@ pub(crate) fn stream_episode_match_texts(
     episode: u32,
     final_season: bool,
 ) -> StreamEpisodeMatch {
-    let fields = texts.fields_with_season_context(season, final_season);
-    // Same conflict rule as `stream_conflicts_with_episode_targets`, reusing the season context.
-    // `claims` runs (filename, title, name); `fields` is reversed into the same order.
-    let claimed = texts
-        .claims
-        .iter()
-        .enumerate()
-        .zip(fields.iter().rev())
-        .find_map(|((index, profile), field)| Some((index, profile.as_ref()?, (*field)?)));
-    if claimed.is_some_and(|(index, profile, (text, season_context, _))| {
-        !numeric_episode_claim_matches(
-            profile,
-            text,
-            texts.field_stripped_ranges(index, text).0,
-            texts.field_episode_ranges(index),
-            season,
-            episode,
-            season_context,
-        )
-    }) {
+    if stream_conflicts_with_episode_targets(
+        texts,
+        &[(season, episode)],
+        final_season.then_some(season),
+    ) {
         return StreamEpisodeMatch {
             kind: StreamEpisodeMatchKind::None,
             season_claim_verified: false,
         };
     }
+    let fields = texts.fields_with_season_context(season, final_season);
 
     // Keep scanning matching fields until one carries a verified season claim.
     let mut matched_exact = false;
@@ -1318,6 +1292,7 @@ fn episode_claim_profile(
             &*BARE_SEASON_TOKEN_REGEX,
             &*ORDINAL_SEASON_DIGIT_REGEX,
             &*ORDINAL_SEASON_WORD_REGEX,
+            &*FINAL_SEASON_MARKER_REGEX,
         ]
         .iter()
         .any(|regex| regex.is_match(text));
@@ -1372,37 +1347,336 @@ pub(crate) fn stream_conflicts_with_episode_targets(
     targets: &[(u32, u32)],
     final_season_season: Option<u32>,
 ) -> bool {
-    if targets.is_empty() {
-        return false;
-    }
+    !targets.is_empty()
+        && targets.iter().all(|&(season, episode)| {
+            let mut season_claimed = false;
+            let mut numeric_season_claimed = false;
+            for (index, (text, profile)) in [
+                texts.filename.as_deref(),
+                texts.title.as_deref(),
+                texts.name.as_deref(),
+            ]
+            .into_iter()
+            .zip(&texts.claims)
+            .enumerate()
+            {
+                let (Some(text), Some(profile)) = (text, profile) else {
+                    continue;
+                };
+                let season_claims = texts.field_season_claims(index, text);
+                let season_context =
+                    season_claims.matches(season, final_season_season == Some(season));
+                if season_claimed && season_context == Some(false) {
+                    // Numeric seasons retain authority; numberless claims need a supplied source alias.
+                    return !numeric_season_claimed
+                        && !targets.iter().any(|&(source_season, source_episode)| {
+                            numeric_episode_claim_matches(
+                                profile,
+                                text,
+                                texts.field_stripped_ranges(index, text).0,
+                                texts.field_episode_ranges(index),
+                                source_season,
+                                source_episode,
+                                season_claims.matches(
+                                    source_season,
+                                    final_season_season == Some(source_season),
+                                ),
+                            )
+                        });
+                }
+                if !numeric_episode_claim_matches(
+                    profile,
+                    text,
+                    texts.field_stripped_ranges(index, text).0,
+                    texts.field_episode_ranges(index),
+                    season,
+                    episode,
+                    season_context,
+                ) {
+                    return true;
+                }
+                // Season-only labels constrain the target; the first episode/range claim decides it.
+                if profile.has_episode {
+                    return false;
+                }
+                season_claimed = true;
+                numeric_season_claimed |= !season_claims.ranges.is_empty();
+            }
+            false
+        })
+}
 
-    for (index, (text, profile)) in [
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamYearMatch {
+    None,
+    Verified,
+    Conflicting,
+}
+
+static WORK_YEAR_WORD_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\p{L}\p{N}]+|#").expect("valid work year word regex"));
+static WORK_YEAR_EXPLICIT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\(\s*((?:19|20)\d{2})(?:\s*[-–]\s*((?:19|20)\d{2}))?\s*\)|\[\s*((?:19|20)\d{2})\s*\]",
+    )
+    .expect("valid explicit work year regex")
+});
+static WORK_YEAR_DIMENSION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b\d{3,4}\s*[x×]\s*\d{3,4}\b").expect("valid work year dimension regex")
+});
+static WORK_YEAR_EPISODE_BOUNDARY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:s\d{1,2}(?:e\d{1,4})*|season[.\s-]*\d+|\d{1,2}x\d{1,4}|(?:episode|ep|e)[.\s-]*\d{1,4})\b")
+        .expect("valid work year episode boundary regex")
+});
+
+fn work_year_token(token: &str) -> Option<u16> {
+    (token.len() == 4 && token.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| token.parse::<u16>().ok())
+        .flatten()
+        .filter(|year| (1900..=2099).contains(year))
+}
+
+fn work_year_technical_token(token: &str) -> bool {
+    matches!(
+        token,
+        "480p"
+            | "576p"
+            | "720p"
+            | "1080p"
+            | "1440p"
+            | "2160p"
+            | "4k"
+            | "8k"
+            | "web"
+            | "webdl"
+            | "webrip"
+            | "bluray"
+            | "bdrip"
+            | "brrip"
+            | "remux"
+            | "hdr"
+            | "hdr10"
+            | "dv"
+            | "dovi"
+            | "x264"
+            | "x265"
+            | "h264"
+            | "h265"
+            | "hevc"
+            | "av1"
+            | "xvid"
+            | "aac"
+            | "ac3"
+            | "eac3"
+            | "ddp"
+            | "dts"
+            | "truehd"
+            | "atmos"
+            | "nf"
+            | "amzn"
+            | "dsnp"
+            | "hmax"
+            | "atvp"
+            | "hulu"
+            | "cr"
+            | "baha"
+            | "proper"
+            | "repack"
+            | "internal"
+            | "complete"
+            | "multi"
+            | "dual"
+    )
+}
+
+fn strip_work_year_group_tags(mut line: &str) -> &str {
+    loop {
+        line = line.trim_start();
+        let close = match line.as_bytes().first() {
+            Some(b'[') => ']',
+            Some(b'(') => ')',
+            _ => return line,
+        };
+        let Some(end) = line.find(close) else {
+            return line;
+        };
+        if WORK_YEAR_EXPLICIT_REGEX
+            .find(line)
+            .is_some_and(|claim| claim.start() == 0 && claim.end() == end + 1)
+        {
+            return line;
+        }
+        line = &line[end + 1..];
+    }
+}
+
+fn contains_potential_work_year(line: &str) -> bool {
+    line.as_bytes().windows(4).any(|window| {
+        matches!(window[..2], [b'1', b'9'] | [b'2', b'0'])
+            && window[2].is_ascii_digit()
+            && window[3].is_ascii_digit()
+    })
+}
+
+fn line_work_year_claims(
+    line: &str,
+    title_years: &[u16],
+    episode_targets: &[(u32, u32)],
+) -> Vec<(u16, u16)> {
+    let line = strip_work_year_group_tags(line);
+    if !contains_potential_work_year(line) {
+        return Vec::new();
+    }
+    let words: Vec<_> = WORK_YEAR_WORD_REGEX.find_iter(line).collect();
+    let technical_boundary = words
+        .iter()
+        .find(|word| work_year_technical_token(word.as_str()))
+        .map_or(line.len(), |word| word.start());
+    let episode_boundary = WORK_YEAR_EPISODE_BOUNDARY_REGEX.find(line);
+    let prefix_boundary = episode_boundary.map_or(technical_boundary, |claim| {
+        claim.start().min(technical_boundary)
+    });
+    let explicit: Vec<_> = WORK_YEAR_EXPLICIT_REGEX.captures_iter(line).collect();
+    let mut remaining_title_years = title_years.to_vec();
+    let mut claims = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        let Some(year) = work_year_token(word.as_str()) else {
+            continue;
+        };
+        if let Some(position) = remaining_title_years
+            .iter()
+            .position(|title| *title == year)
+        {
+            remaining_title_years.remove(position);
+            continue;
+        }
+        let previous = index.checked_sub(1).map(|index| words[index]);
+        let next = words.get(index + 1);
+        let dimension = WORK_YEAR_DIMENSION_REGEX
+            .find_iter(line)
+            .any(|dimension| dimension.range().contains(&word.start()));
+        if dimension
+            || previous.is_some_and(|word| {
+                matches!(word.as_str(), "ep" | "episode" | "e" | "part" | "pt" | "#")
+            })
+            || next.is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "b" | "kb"
+                        | "kib"
+                        | "mb"
+                        | "mib"
+                        | "gb"
+                        | "gib"
+                        | "tb"
+                        | "tib"
+                        | "kbps"
+                        | "mbps"
+                        | "hz"
+                        | "khz"
+                        | "fps"
+                        | "bit"
+                )
+            })
+            || episode_targets
+                .iter()
+                .any(|&(_, episode)| episode == u32::from(year))
+        {
+            continue;
+        }
+        if let Some(captures) = explicit.iter().find(|captures| {
+            captures
+                .get(0)
+                .is_some_and(|claim| claim.range().contains(&word.start()))
+        }) {
+            let claim = captures.get(0).expect("explicit work year match");
+            let start = captures
+                .get(1)
+                .or_else(|| captures.get(3))
+                .expect("start year");
+            if word.start() != start.start()
+                || (claim.as_str().starts_with('[') && claim.start() >= technical_boundary)
+            {
+                continue;
+            }
+            let end = captures
+                .get(2)
+                .and_then(|end| work_year_token(end.as_str()))
+                .unwrap_or(year);
+            if end >= year && end - year <= 40 {
+                claims.push((year, end));
+            }
+        } else if (word.start() < prefix_boundary
+            && words[..index]
+                .iter()
+                .any(|word| word.as_str().chars().any(char::is_alphabetic)))
+            || (episode_boundary.is_some_and(|claim| {
+                claim.end() <= word.start()
+                    && word.start() < technical_boundary
+                    && !line[claim.end()..word.start()]
+                        .chars()
+                        .any(char::is_alphanumeric)
+            }) && next.is_some_and(|next| work_year_technical_token(next.as_str())))
+        {
+            claims.push((year, year));
+        }
+    }
+    claims
+}
+
+pub(crate) fn stream_year_match(
+    texts: &StreamMatchText,
+    accepted_years: &[u16],
+    reference_title: Option<&str>,
+    episode_targets: &[(u32, u32)],
+) -> StreamYearMatch {
+    if accepted_years.is_empty() {
+        return StreamYearMatch::None;
+    }
+    let title_years: Vec<_> = reference_title
+        .into_iter()
+        .flat_map(|title| WORK_YEAR_WORD_REGEX.find_iter(title))
+        .filter_map(|word| work_year_token(word.as_str()))
+        .collect();
+    for field in [
         texts.filename.as_deref(),
         texts.title.as_deref(),
         texts.name.as_deref(),
     ]
     .into_iter()
-    .zip(&texts.claims)
-    .enumerate()
+    .flatten()
     {
-        // No season/episode markers at all: no target can claim this text.
-        let (Some(text), Some(profile)) = (text, profile) else {
-            continue;
-        };
-        // One season/range/strip battery serves every target sharing this text.
-        let season_claims = texts.field_season_claims(index, text);
-        let stripped = texts.field_stripped_ranges(index, text).0;
-        return targets.iter().all(|&(season, episode)| {
-            !numeric_episode_claim_matches(
-                profile,
-                text,
-                stripped,
-                texts.field_episode_ranges(index),
-                season,
-                episode,
-                season_claims.matches(season, final_season_season == Some(season)),
-            )
-        });
+        let mut claimed = false;
+        for (start, end) in field
+            .lines()
+            .flat_map(|line| line_work_year_claims(line, &title_years, episode_targets))
+        {
+            claimed = true;
+            if accepted_years
+                .iter()
+                .any(|year| (start..=end).contains(year))
+            {
+                return StreamYearMatch::Verified;
+            }
+        }
+        if claimed {
+            return StreamYearMatch::Conflicting;
+        }
     }
-    false
+    StreamYearMatch::None
 }
+
+pub(crate) fn stream_conflicts_with_work_years(
+    texts: &StreamMatchText,
+    accepted_years: &[u16],
+    reference_title: Option<&str>,
+    episode_targets: &[(u32, u32)],
+) -> bool {
+    matches!(
+        stream_year_match(texts, accepted_years, reference_title, episode_targets),
+        StreamYearMatch::Conflicting
+    )
+}
+
+#[cfg(test)]
+mod tests;

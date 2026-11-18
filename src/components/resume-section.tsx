@@ -57,7 +57,8 @@ export function ResumeSection() {
           renderItem={renderResumeEntry}
           skeletonCount={5}
           headerContent={isError && <div className='mt-3'>{retryBanner}</div>}
-          scrollerClassName='pt-4 relative z-0'
+          sectionClassName='pb-6 md:pb-7'
+          scrollerClassName='pt-2 relative z-0'
         />
       )}
     </section>

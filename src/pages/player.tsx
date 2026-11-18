@@ -119,6 +119,7 @@ import { createPlaybackClock } from '@/lib/player-clock';
 import {
   blurActivePlayerControl,
   createWheelSeekAccumulator,
+  hasOpenPlayerPopover,
   isPlayerInteractiveTarget,
   restorePlayerBackground,
   setPlayerDocumentBackground,
@@ -240,6 +241,7 @@ export function Player() {
     routeEpisode,
     routeSeason,
     requestedStreamKey: routeRequestedStreamKey,
+    resolvedLaunchId,
     selectedStreamKey: routeSelectedStreamKey,
     streamSourceId: routeSourceId,
     streamSourceName: routeSourceName,
@@ -256,6 +258,7 @@ export function Player() {
 
   // -- State --
   const stream = usePlayerStreamSession({
+    resolvedLaunchId,
     routeSourceId,
     routeSourceName,
     routeStreamFamily,
@@ -331,6 +334,8 @@ export function Player() {
     CLOSED_STREAM_SELECTOR_STATE,
   );
   const showStreamSelector = streamSelectorState.open;
+  const playbackIntact = !error && !isLoading && !isResolving;
+  const panelsOwnSurface = showStreamSelector || showEpisodes || showShortcuts;
   // The pick target persists through the close animation so it doesn't revert mid-exit.
   const selectedEpisodeStreamTarget = streamSelectorState.target;
 
@@ -426,7 +431,7 @@ export function Player() {
       windowActiveRef.current &&
       document.visibilityState !== 'hidden' &&
       ((captured !== null && captured.target.hasPointerCapture(captured.pointerId)) ||
-        document.querySelector('[data-player-popover][data-state="open"]') !== null)
+        hasOpenPlayerPopover())
     );
   };
   const isPlayerChromeTarget = (
@@ -453,14 +458,7 @@ export function Player() {
     controlsHideDelayMs: appUiPreferences.controlsHideDelayMs,
     isPlayingRef,
     mountedRef,
-    osdEnabled:
-      isExpanded &&
-      !isResolving &&
-      !error &&
-      !hasEnded &&
-      !showStreamSelector &&
-      !showEpisodes &&
-      !showShortcuts,
+    osdEnabled: isExpanded && !isResolving && !error && !hasEnded && !panelsOwnSurface,
     setShowControls,
     shouldHoldControls: isPlayerChromeEngaged,
   });
@@ -746,10 +744,7 @@ export function Player() {
     resolvedAbsoluteEpisode,
     currentEpisode?.title,
   );
-  useDocumentTitle(
-    title ? `${title}${currentEpisodeLabel ? ` · ${currentEpisodeLabel}` : ''}` : undefined,
-    isExpanded,
-  );
+  useDocumentTitle(`${title}${currentEpisodeLabel ? ` · ${currentEpisodeLabel}` : ''}`, isExpanded);
 
   const queryClient = useQueryClient();
   const playbackLanguagePreferencesRef = useRef<PlaybackLanguagePreferences>({});
@@ -779,6 +774,7 @@ export function Player() {
   });
 
   const { saveProgress } = usePlaybackProgressPersistence({
+    activeStreamLoadKey,
     mediaId: id,
     mediaType: type,
     title,
@@ -870,6 +866,7 @@ export function Player() {
       onUserSeek: handleUserSeek,
       triggerOsd,
     });
+  const pendingSeekTarget = () => getSeekTarget() ?? getResumeSeekTarget();
 
   // -- Addon subtitles (manifest-routed) --
   const {
@@ -891,6 +888,7 @@ export function Player() {
     id,
     menuOpen: isExpanded && !isPip && openSettingsMenu === 'subtitles',
     mountedRef,
+    resolvedAbsoluteEpisode,
     resolvedStreamEpisode,
     resolvedStreamSeason,
     selectAddonSubtitle,
@@ -999,14 +997,10 @@ export function Player() {
   const { requestMarginApply: requestSurfaceRefresh, getExpandedVideoRect } =
     usePlayerSurfaceLayout({
       playerContainerRef,
-      topChromeRef,
-      bottomChromeRef,
       activeStreamUrl,
       mpvSurfaceReady,
       isFullscreen,
       isPip,
-      isLoading,
-      isResolving,
       showErrorOverlay,
       presentation: isExpanded ? 'expanded' : 'mini',
     });
@@ -1295,7 +1289,7 @@ export function Player() {
     onEndedChange: handleEndedChange,
     observeTimeUpdate,
     isSeekPending,
-    getSeekTarget: () => getSeekTarget() ?? getResumeSeekTarget(),
+    getSeekTarget: pendingSeekTarget,
     retryFailedSeek: (position) => {
       if (retryInFlightRef.current) return true;
       if (
@@ -1334,9 +1328,7 @@ export function Player() {
       !isResolving &&
       !isBuffering &&
       !error &&
-      !showStreamSelector &&
-      !showEpisodes &&
-      !showShortcuts &&
+      !panelsOwnSurface &&
       openSettingsMenu === null,
     mountedRef,
   });
@@ -1552,10 +1544,8 @@ export function Player() {
 
   // One EOF gate for both cards; the variant depends on whether an episode follows.
   // Auto-play counts down to the same silent resolve `N` runs — a gate flip disarms the timer.
-  const playbackIntact = !error && !isLoading && !isResolving;
-  const panelsOwnSurface = showStreamSelector || showEpisodes || showShortcuts;
-  const eofCardOpen =
-    hasEnded && playbackIntact && !panelsOwnSurface && !isLoadingEpisodeNavigation;
+  const eofGate = hasEnded && playbackIntact && !isLoadingEpisodeNavigation;
+  const eofCardOpen = eofGate && !panelsOwnSurface;
   const showUpNextCard = eofCardOpen && !!nextEpisode;
   const showEndCard = eofCardOpen && !nextEpisode;
   useEffect(() => {
@@ -1621,7 +1611,7 @@ export function Player() {
   // OS media keys; stays mounted when docked so they keep driving playback.
   // `previoustrack` restarts the title — no playlist-back concept.
   useMediaSession({
-    title: activeStreamUrl ? (title ?? '') : '',
+    title: activeStreamUrl ? title : '',
     artist: currentEpisodeHeading || undefined,
     artworkSrcs: [poster, backdrop, logo],
     duration,
@@ -1635,7 +1625,8 @@ export function Player() {
       );
     },
     onPause: () => {
-      // An explicit pause owns the pause, so resume finalization must not undo it.
+      // An explicit pause owns the pause, so resume finalization and seek-failure retry must not undo it.
+      seekWasPlayingRef.current = false;
       takeResumePause();
       if (playbackEndedRef.current) cancelAutoPlayNext();
       void setMpvProperty('pause', true).catch(() => undefined);
@@ -1809,40 +1800,36 @@ export function Player() {
   const handleRetryFailedStream = () => {
     // Failed range reads can jump time-pos to duration; retry the intended target instead.
     const position =
-      getSeekTarget()?.seconds ??
-      getResumeSeekTarget()?.seconds ??
-      observedPositionRef.current ??
-      currentTimeRef.current;
+      pendingSeekTarget()?.seconds ?? observedPositionRef.current ?? currentTimeRef.current;
     retryPlayback(position, true);
   };
 
   // `cycleTrack` runs switch-flag + persist bookkeeping a bare `cycle` skips — without it the language auto-apply reverts.
-  const cycleSubtitles = async () => {
-    // Cycling with no tracks lands on 'no' and would persist "subtitles off" as the global preference.
-    if (subTracks.length === 0) {
-      announce('No subtitle tracks', 'subtitles');
+  const cycleTracks = async (kind: 'audio' | 'sub') => {
+    const tracks = kind === 'audio' ? audioTracks : subTracks;
+    // Audio needs a second track to move to; sub cycling can land on 'no', and
+    // cycling with no tracks would persist "subtitles off" as the global preference.
+    if (tracks.length < (kind === 'audio' ? 2 : 1)) {
+      announce(
+        kind === 'audio' ? 'No other audio tracks' : 'No subtitle tracks',
+        kind === 'audio' ? 'audio' : 'subtitles',
+      );
       return;
     }
-    const landed = await cycleTrack('sub');
+    const landed = await cycleTrack(kind);
     if (landed === null) return;
+    const channel = kind === 'audio' ? 'audio' : 'subtitles';
     announce(
-      landed === 'no' ? 'Subtitles off' : `Subtitles: ${trackDisplayLabel(subTracks, landed)}`,
-      'subtitles',
+      landed === 'no'
+        ? kind === 'audio'
+          ? 'Audio off'
+          : 'Subtitles off'
+        : `${kind === 'audio' ? 'Audio' : 'Subtitles'}: ${trackDisplayLabel(tracks, landed)}`,
+      channel,
     );
   };
-
-  const cycleAudioTrack = async () => {
-    if (audioTracks.length < 2) {
-      announce('No other audio tracks', 'audio');
-      return;
-    }
-    const landed = await cycleTrack('audio');
-    if (landed === null) return;
-    announce(
-      landed === 'no' ? 'Audio off' : `Audio: ${trackDisplayLabel(audioTracks, landed)}`,
-      'audio',
-    );
-  };
+  const cycleSubtitles = () => cycleTracks('sub');
+  const cycleAudioTrack = () => cycleTracks('audio');
 
   const handleSpeedSelect = (speed: number) => {
     setPlaybackSpeed(speed);
@@ -1948,6 +1935,7 @@ export function Player() {
     mountedRef,
     resolvedAbsoluteEpisode,
     resolvedAbsoluteSeason,
+    resolvedLaunchId,
     resolvedStreamEpisode,
     resolvedStreamSeason,
     routeRequestedStreamKey,
@@ -2029,7 +2017,7 @@ export function Player() {
 
   const [accumulateWheelSeek] = useState(createWheelSeekAccumulator);
   const handlePlayerWheel = (event: WheelEvent<HTMLElement>) => {
-    if (showStreamSelector || showEpisodes || showShortcuts) return;
+    if (panelsOwnSurface) return;
     if (isPlayerInteractiveTarget(event.target)) return;
     if (event.deltaY === 0) return;
     if (event.shiftKey) {
@@ -2303,7 +2291,6 @@ export function Player() {
       />
     ) : null;
 
-  const nextEpisodeThumbnail = nextEpisode?.thumbnail ?? backdrop ?? poster;
   const canGoPrevious = !!previousEpisode && !isResolving;
   const canGoNext = !!nextEpisode && !isResolving;
 
@@ -2316,8 +2303,7 @@ export function Player() {
 
   if (!isExpanded) {
     // Docked EOF strips stay inert during resolution or stream selection.
-    const miniEofOpen =
-      hasEnded && playbackIntact && !showStreamSelector && !isLoadingEpisodeNavigation;
+    const miniEofOpen = eofGate && !showStreamSelector;
     const miniPlayerUpNext =
       miniEofOpen && nextEpisode
         ? {
@@ -2542,7 +2528,7 @@ export function Player() {
             aria-hidden='true'
             className={cn(
               chromeScrimClass,
-              'bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent',
+              'bottom-0 h-44 bg-linear-to-t from-black/90 via-black/65 to-transparent',
             )}
           />
           <div
@@ -2591,7 +2577,8 @@ export function Player() {
               {showUpNextCard && nextEpisode && (
                 <PlayerUpNextCard
                   episode={nextEpisode}
-                  thumbnail={nextEpisodeThumbnail}
+                  thumbnail={nextEpisode.thumbnail}
+                  fallbackThumbnail={backdrop ?? poster}
                   autoPlayCountdown={autoPlayCountdown}
                   autoPlayDurationSeconds={appUiPreferences.nextEpisodeCountdownSecs}
                   onCancelAutoPlay={cancelAutoPlayNext}
@@ -2600,8 +2587,9 @@ export function Player() {
               )}
               {showEndCard && (
                 <PlayerEndCard
-                  title={currentEpisodeHeading || title || ''}
-                  thumbnail={currentEpisode?.thumbnail ?? backdrop ?? poster}
+                  title={currentEpisodeHeading || title}
+                  thumbnail={currentEpisode?.thumbnail}
+                  fallbackThumbnail={backdrop ?? poster}
                   onReplay={replayFromStart}
                   onBackToTitle={backToTitle}
                 />

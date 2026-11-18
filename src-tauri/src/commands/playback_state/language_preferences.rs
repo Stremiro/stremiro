@@ -112,7 +112,7 @@ impl PlaybackStateService {
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn record_playback_language_preference_outcome(
         &self,
         app: &AppHandle,

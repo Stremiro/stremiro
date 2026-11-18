@@ -25,14 +25,14 @@ fn episode_matches_text(text: &str, season: u32, episode: u32) -> bool {
 
 /// `final_season` mirrors the backend's mapping-index fact for the request:
 /// the battery needs it to resolve a numberless "final season" naming
-/// claim (see `text_matches_requested_season`).
+/// claim (see `SeasonClaims::matches`).
 fn episode_matches_text_final(text: &str, season: u32, episode: u32, final_season: bool) -> bool {
     let t = normalize_separators(text).to_lowercase();
     episode_matches_lowered(
         &t,
         season,
         episode,
-        text_matches_requested_season(&t, season, final_season),
+        SeasonClaims::of(&t).matches(season, final_season),
     )
 }
 
@@ -205,10 +205,8 @@ fn season_claim_verified_separates_titled_from_bare_dash_matches() {
     // A final-season request in a mixed pool: both files Exact-match the
     // dash form; the titled one carries the verified claim while the bare
     // S1-style file stays an assumed match.
-    let mut bare = mk_stream(None, Some("magnet:?xt=urn:btih:bare"), false);
-    bare.name = Some("Shingeki no Kyojin - 04 [2160p]".to_string());
-    let mut titled = mk_stream(None, Some("magnet:?xt=urn:btih:titled"), false);
-    titled.name = Some("Shingeki no Kyojin - The Final Season - 04 [1080p]".to_string());
+    let bare = named_pack("Shingeki no Kyojin - 04 [2160p]");
+    let titled = named_pack("Shingeki no Kyojin - The Final Season - 04 [1080p]");
 
     let bare_match = stream_episode_match(&bare, 4, 4, true);
     assert_eq!(bare_match.kind, StreamEpisodeMatchKind::Exact);
@@ -243,17 +241,7 @@ batch_regex_tests! {
 }
 
 #[test]
-fn stream_contains_batch_works_for_name_or_title() {
-    let stream = AddonStream {
-        name: Some("Butter".to_string()),
-        title: Some("Complete Season Pack".to_string()),
-        ..test_stream()
-    };
-    assert!(stream_contains_batch(&stream));
-}
-
-#[test]
-fn stream_matches_episode_works_for_name_or_title() {
+fn match_texts_read_episode_claims_from_name_and_pack_words_from_title() {
     let stream = AddonStream {
         name: Some("Show.S03E07".to_string()),
         title: Some("Other text".to_string()),
@@ -263,19 +251,13 @@ fn stream_matches_episode_works_for_name_or_title() {
         stream_episode_match_kind(&stream, 3, 7),
         StreamEpisodeMatchKind::Exact
     );
-}
 
-#[test]
-fn stream_episode_match_kind_detects_episode_ranges() {
     let stream = AddonStream {
-        name: Some("One.Piece.E1000-E1010.1080p".to_string()),
+        name: Some("Butter".to_string()),
+        title: Some("Complete Season Pack".to_string()),
         ..test_stream()
     };
-
-    assert_eq!(
-        stream_episode_match_kind(&stream, 21, 1004),
-        StreamEpisodeMatchKind::EpisodeRange
-    );
+    assert!(stream_contains_batch(&stream));
 }
 
 #[test]
@@ -428,16 +410,27 @@ fn cross_season_x_ranges_compare_complete_endpoints() {
 }
 
 #[test]
-fn stream_episode_match_kind_detects_targeted_season_packs() {
-    let stream = AddonStream {
-        name: Some("Show Complete Season 3 Pack 1080p".to_string()),
-        ..test_stream()
-    };
-
-    assert_eq!(
-        stream_episode_match_kind(&stream, 3, 7),
-        StreamEpisodeMatchKind::SeasonPack
-    );
+fn stream_episode_match_kind_detects_episode_ranges_and_targeted_packs() {
+    for (name, season, episode, expected) in [
+        (
+            "One.Piece.E1000-E1010.1080p",
+            21,
+            1004,
+            StreamEpisodeMatchKind::EpisodeRange,
+        ),
+        (
+            "Show Complete Season 3 Pack 1080p",
+            3,
+            7,
+            StreamEpisodeMatchKind::SeasonPack,
+        ),
+    ] {
+        assert_eq!(
+            stream_episode_match_kind(&named_stream(name), season, episode),
+            expected,
+            "{name}"
+        );
+    }
 }
 
 fn stream_conflicts(s: &AddonStream, targets: &[(u32, u32)]) -> bool {
@@ -481,26 +474,18 @@ fn episode_claim_gate_rejects_conflicting_numeric_claims() {
 
 #[test]
 fn episode_claim_gate_evaluates_episode_ranges() {
-    let range = named_stream("Show.S01E03-E07.1080p");
-    assert!(!stream_conflicts(&range, &[(1, 5)]));
-    assert!(stream_conflicts(&range, &[(1, 8)]));
-
-    let bare = named_stream("Show.E03-E07.1080p");
-    assert!(!stream_conflicts(&bare, &[(1, 5)]));
-    assert!(stream_conflicts(&bare, &[(1, 8)]));
-
+    for (name, admitted, rejected) in [
+        ("Show.S01E03-E07.1080p", (1, 5), (1, 8)),
+        ("Show.E03-E07.1080p", (1, 5), (1, 8)),
+        ("Show.S01E05E06.1080p", (1, 6), (1, 7)),
+        ("Show.S01E03-E07.S01E08.1080p", (1, 8), (1, 9)),
+    ] {
+        let stream = named_stream(name);
+        assert!(!stream_conflicts(&stream, &[admitted]), "{name}");
+        assert!(stream_conflicts(&stream, &[rejected]), "{name}");
+    }
     let double = named_stream("Show.S01E05E06.1080p");
-    assert!(!stream_conflicts(&double, &[(1, 6)]));
-    assert!(stream_conflicts(&double, &[(1, 7)]));
     assert!(stream_conflicts(&double, &[(2, 5)]));
-
-    let mixed = named_stream("Show.S01E03-E07.S01E08.1080p");
-    assert!(!stream_conflicts(&mixed, &[(1, 8)]));
-    assert!(stream_conflicts(&mixed, &[(1, 9)]));
-    assert_eq!(
-        stream_episode_match_kind(&mixed, 1, 8),
-        StreamEpisodeMatchKind::Exact
-    );
     for episode in [5, 6] {
         assert_eq!(
             stream_episode_match_kind(&double, 1, episode),
@@ -508,6 +493,11 @@ fn episode_claim_gate_evaluates_episode_ranges() {
             "episode={episode}"
         );
     }
+    let mixed = named_stream("Show.S01E03-E07.S01E08.1080p");
+    assert_eq!(
+        stream_episode_match_kind(&mixed, 1, 8),
+        StreamEpisodeMatchKind::Exact
+    );
     for name in [
         "Show.S01E01-E03.Batch.2160p",
         "Show.S01.Episode.01-03.Batch.2160p",
@@ -550,25 +540,67 @@ fn episode_claim_gate_prioritizes_filename_over_name_and_title() {
 }
 
 #[test]
-fn episode_claim_gate_accepts_any_complete_target_pair() {
-    let targets = [(1u32, 17u32), (2u32, 5u32)];
-    assert!(!stream_conflicts(
-        &named_stream("Show.S01E17.1080p"),
-        &targets
-    ));
-    assert!(!stream_conflicts(
-        &named_stream("Show.S02E05.1080p"),
-        &targets
-    ));
-    assert!(stream_conflicts(
-        &named_stream("Show.S03E05.1080p"),
-        &targets
-    ));
+fn season_only_fields_do_not_hide_explicit_episode_conflicts() {
+    for (filename, title, name) in [
+        (Some("Show.S01.mkv"), Some("Show.S01E06"), "Show.S01E05"),
+        (Some("Show.S01.mkv"), None, "Show.S01E06"),
+        (None, Some("Show.S01.Complete"), "Show.S01E06"),
+    ] {
+        let mut stream = named_stream(name);
+        stream.title = title.map(str::to_string);
+        stream.behavior_hints = Some(BehaviorHints {
+            filename: filename.map(str::to_string),
+            ..Default::default()
+        });
+        assert!(
+            stream_conflicts(&stream, &[(1, 5)]),
+            "{filename:?} {title:?}"
+        );
+        assert_eq!(
+            stream_episode_match_kind(&stream, 1, 5),
+            StreamEpisodeMatchKind::None,
+        );
+        assert!(!stream_conflicts(&stream, &[(1, 6)]));
+        assert_eq!(
+            stream_episode_match_kind(&stream, 1, 6),
+            StreamEpisodeMatchKind::Exact,
+        );
+        // Alternate coordinates must satisfy both the season and episode claims.
+        assert!(stream_conflicts(&stream, &[(1, 5), (2, 6)]));
+        assert!(!stream_conflicts(&stream, &[(2, 5), (1, 6)]));
+    }
 }
 
 #[test]
-fn episode_claim_gate_without_targets_rejects_nothing() {
+fn season_only_filename_preserves_alternate_source_numbering() {
+    let mut stream = named_stream("Show");
+    stream.title = Some("Show.S01E1000".into());
+    stream.behavior_hints = Some(BehaviorHints {
+        filename: Some("Show.S21.mkv".into()),
+        ..Default::default()
+    });
+    assert!(!stream_conflicts(
+        &stream,
+        &[(21, 5), (21, 1000), (1, 1000)]
+    ));
+    assert!(stream_conflicts(&stream, &[(2, 5)]));
+}
+
+#[test]
+fn episode_claim_gate_accepts_complete_pairs_and_empty_targets() {
     assert!(!stream_conflicts(&named_stream("Show.S02E05.1080p"), &[]));
+    let targets = [(1u32, 17u32), (2u32, 5u32)];
+    for (name, conflict) in [
+        ("Show.S01E17.1080p", false),
+        ("Show.S02E05.1080p", false),
+        ("Show.S03E05.1080p", true),
+    ] {
+        assert_eq!(
+            stream_conflicts(&named_stream(name), &targets),
+            conflict,
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -592,6 +624,61 @@ fn episode_claim_gate_honors_final_season_named_claim() {
     ));
 }
 
+#[test]
+fn final_season_only_filename_keeps_authority_over_episode_labels() {
+    let mut stream = named_stream("Show.S01E05");
+    stream.title = Some("Show.S01E05".into());
+    stream.behavior_hints = Some(BehaviorHints {
+        filename: Some("Show.Final.Season.Complete.mkv".into()),
+        ..Default::default()
+    });
+    assert!(stream_conflicts(&stream, &[(1, 5)]));
+    assert_eq!(
+        stream_episode_match_kind(&stream, 1, 5),
+        StreamEpisodeMatchKind::None,
+    );
+    assert!(!stream_conflicts_with_episode_targets(
+        stream.match_texts(),
+        &[(1, 5)],
+        Some(1),
+    ));
+    assert_eq!(
+        stream_episode_match(&stream, 1, 5, true).kind,
+        StreamEpisodeMatchKind::Exact,
+    );
+    let pack = named_stream("Show.Final.Season.Complete");
+    assert!(stream_conflicts(&pack, &[(1, 5)]));
+    assert!(!stream_conflicts_with_episode_targets(
+        pack.match_texts(),
+        &[(1, 5)],
+        Some(1),
+    ));
+}
+
+#[test]
+fn final_season_filename_requires_a_matching_episode_or_supplied_alias() {
+    let target = [(4, 5)];
+    let aliases = [(4, 5), (4, 1000), (1, 1000)];
+    for (title, targets, conflict) in [
+        ("Show.S02E06", target.as_slice(), true),
+        ("Show.S04E05", target.as_slice(), false),
+        ("Show.S01E1000", target.as_slice(), true),
+        ("Show.S01E1000", aliases.as_slice(), false),
+    ] {
+        let mut stream = named_stream("Show");
+        stream.title = Some(title.into());
+        stream.behavior_hints = Some(BehaviorHints {
+            filename: Some("Show.Final.Season.mkv".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            stream_conflicts_with_episode_targets(stream.match_texts(), targets, Some(4)),
+            conflict,
+            "{title} {targets:?}",
+        );
+    }
+}
+
 fn mk_stream(content_hash: Option<&str>, url: Option<&str>, cached: bool) -> AddonStream {
     AddonStream {
         name: Some("src".to_string()),
@@ -612,24 +699,20 @@ fn stream_fixture(name: Option<&str>, url: Option<&str>) -> AddonStream {
 }
 
 #[test]
-fn direct_http_url_is_not_labeled_cached() {
-    let mut stream = stream_fixture(None, Some("https://example.com/file.mp4"));
-    AddonTransport::hydrate_streams(std::slice::from_mut(&mut stream));
-    assert!(!stream.cached);
-}
-
-#[test]
-fn lightning_hint_marks_cached_and_download_arrow_opts_out() {
-    let mut cached = stream_fixture(Some("Release \u{26A1}"), None);
-    AddonTransport::hydrate_streams(std::slice::from_mut(&mut cached));
-    assert!(cached.cached);
-
-    let mut plain = stream_fixture(
-        Some("Release \u{2B07}"),
-        Some("https://example.com/file.mp4"),
-    );
-    AddonTransport::hydrate_streams(std::slice::from_mut(&mut plain));
-    assert!(!plain.cached);
+fn hydration_marks_cached_only_for_lightning_hints() {
+    for (name, url, cached) in [
+        (None, Some("https://example.com/file.mp4"), false),
+        (Some("Release \u{26A1}"), None, true),
+        (
+            Some("Release \u{2B07}"),
+            Some("https://example.com/file.mp4"),
+            false,
+        ),
+    ] {
+        let mut stream = stream_fixture(name, url);
+        AddonTransport::hydrate_streams(std::slice::from_mut(&mut stream));
+        assert_eq!(stream.cached, cached, "{name:?}");
+    }
 }
 
 #[test]
@@ -889,6 +972,7 @@ fn decode_stream_items_discards_spoofed_derived_ranking_inputs() {
     stream.selection_priority = Some(SelectionPriority {
         episode_match: StreamEpisodeMatchKind::Exact,
         season_claim_verified: true,
+        year_not_conflicting: true,
         title_match: 4,
         viability: 4,
         language: 6,
@@ -1092,16 +1176,15 @@ fn sanitize_redacts_signed_query_keys_and_path_config_blobs() {
 }
 
 #[test]
-fn sanitize_preserves_short_protocol_path_segments() {
-    let plain = "https://v3-cinemeta.strem.io/catalog/series/top/skip=50.json";
-    assert_eq!(sanitize_addon_log(plain), plain);
-
-    let meta = "https://v3-cinemeta.strem.io/meta/series/tt1234567.json";
-    assert_eq!(sanitize_addon_log(meta), meta);
-}
-
-#[test]
-fn sanitize_redacts_empty_query_names_and_complete_userinfo() {
+fn sanitize_redacts_userinfo_and_preserves_plain_urls() {
+    for url in [
+        "https://v3-cinemeta.strem.io/catalog/series/top/skip=50.json",
+        "https://v3-cinemeta.strem.io/meta/series/tt1234567.json",
+        // An @ in the path or fragment must not consume the hostname or another URL.
+        "https://cdn.example/a@b#c@d https://other.example/video",
+    ] {
+        assert_eq!(sanitize_addon_log(url), url);
+    }
     assert_eq!(
         sanitize_addon_log("https://cdn.example/video?=secret&other=token"),
         "https://cdn.example/video?=[redacted]&other=[redacted]"
@@ -1110,9 +1193,6 @@ fn sanitize_redacts_empty_query_names_and_complete_userinfo() {
         sanitize_addon_log("failed https://user:pa@ss@cdn.example/video"),
         "failed https://[redacted-userinfo]@cdn.example/video"
     );
-    // An @ in the path or fragment must not consume the hostname or another URL.
-    let plain = "https://cdn.example/a@b#c@d https://other.example/video";
-    assert_eq!(sanitize_addon_log(plain), plain);
 }
 
 #[test]
@@ -1145,13 +1225,6 @@ fn decode_strips_blocked_url_but_keeps_stream_and_magnets() {
         Some("magnet:?xt=urn:btih:abc123")
     );
     assert_eq!(streams[8].url.as_deref(), Some("http://8.8.8.8/video.mp4"));
-}
-
-#[test]
-fn truncate_stream_item_rejects_oversized_content_hash() {
-    let mut stream = mk_stream(Some(&"a".repeat(113)), None, false);
-    truncate_stream_item(&mut stream);
-    assert!(stream.content_hash.is_none());
 }
 
 #[test]
@@ -1273,7 +1346,11 @@ fn proxy_request_headers_enforces_entry_cap() {
 }
 
 #[test]
-fn truncate_stream_item_drops_oversized_proxy_headers() {
+fn truncate_stream_item_drops_oversized_fields() {
+    let mut hashed = mk_stream(Some(&"a".repeat(113)), None, false);
+    truncate_stream_item(&mut hashed);
+    assert!(hashed.content_hash.is_none());
+
     let mut stream = stream_fixture(None, Some("https://example.com/video.mp4"));
     stream.behavior_hints = Some(hints_with_proxy_headers(serde_json::json!({
         "request": {"Authorization": "Bearer kept"}

@@ -47,8 +47,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
   const hasTitles = !!titles && titles.length >= MIN_SIMILAR_TITLES;
   // The deferred skeleton reserves the rail's height so the fetch can't shift the page.
   const showSkeleton = queryEnabled && !hasTitles && (!nearViewport || (isLoading && !isFetched));
-  const showRetry =
-    queryEnabled && nearViewport && (isError || (isFetched && isLoading)) && !hasTitles;
+  const showRetry = queryEnabled && nearViewport && isError && !hasTitles;
 
   return (
     <div ref={anchorRef}>
@@ -56,7 +55,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
         <HorizontalMediaRail<MediaItem>
           title='More like this'
           contentInsetsClassName={contentInsetsClassName}
-          sectionClassName='pt-6 animate-in fade-in duration-500 motion-reduce:animate-none'
+          sectionClassName='pt-8 animate-in fade-in duration-500 motion-reduce:animate-none'
           railId={`similar:${item.type}:${item.id}`}
           items={titles ?? EMPTY_TITLES}
           isLoading={showSkeleton}
@@ -65,8 +64,8 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
           renderItem={renderMediaCardRailItem}
         />
       ) : showRetry ? (
-        <div className={`${contentInsetsClassName} pt-6`}>
-          <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>
+        <div className={`${contentInsetsClassName} pt-8`}>
+          <h2 className='text-xl font-semibold leading-7 tracking-[-0.02em] text-zinc-100'>
             More like this
           </h2>
           <RetryBanner

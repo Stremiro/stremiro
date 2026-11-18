@@ -1,5 +1,5 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { ArrowUpRight, Download, Loader2, RefreshCw } from 'lucide-react';
+import { ArrowUpRight, Clock, Download, Loader2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { SegmentedControl } from '@/components/ui/segmented-control';
@@ -242,7 +242,7 @@ export function UpdatesSection() {
         <SettingsBody className='space-y-4'>
           <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
           <SettingsRow
-            icon={RefreshCw}
+            icon={Clock}
             label='Check for updates automatically'
             description='After launch and every six hours. You choose when to install.'
           >
@@ -290,7 +290,7 @@ export function UpdatesSection() {
           ) : null}
 
           {updateState.errorMessage ? (
-            <div className='rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3'>
+            <div className='rounded-lg border border-red-500/20 bg-red-500/[0.08] px-4 py-3'>
               <p className='text-[13px] font-medium text-red-300'>
                 {updateState.errorOperation === 'install'
                   ? 'Update install failed'

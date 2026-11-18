@@ -606,23 +606,32 @@ fn validate_installable_addon_reference(url: &str) -> AddonUrlInspection {
     }
 }
 
-fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlInspection {
+fn inspect_addon_url_against(
+    url: &str,
+    installed: &[AddonConfig],
+    replacing_id: Option<&str>,
+) -> AddonUrlInspection {
     let mut verdict = validate_installable_addon_reference(url);
     verdict.duplicate_of = verdict.normalized_url.as_ref().and_then(|url| {
         installed
             .iter()
-            .find(|addon| &addon.url == url)
+            .find(|addon| Some(addon.id.as_str()) != replacing_id && &addon.url == url)
             .map(|addon| addon.name.clone())
     });
     verdict
 }
 
 #[command]
-pub async fn inspect_addon_url(app: AppHandle, url: String) -> Result<AddonUrlInspection, String> {
+pub async fn inspect_addon_url(
+    app: AppHandle,
+    url: String,
+    replacing_id: Option<String>,
+) -> Result<AddonUrlInspection, String> {
     super::with_store(app, super::SETTINGS_STORE_FILE, move |store| {
         Ok(inspect_addon_url_against(
             &url,
             &AddonConfig::load_identities(&store),
+            replacing_id.as_deref(),
         ))
     })
     .await
@@ -632,6 +641,7 @@ pub async fn inspect_addon_url(app: AppHandle, url: String) -> Result<AddonUrlIn
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AddonConfigsOp {
     Add { url: String },
+    ReplaceUrl { id: String, url: String },
     Remove { id: String },
     SetEnabled { id: String, enabled: bool },
     Reorder { ids: Vec<String> },
@@ -643,8 +653,12 @@ fn apply_addon_configs_op(
     new_addon_id: &str,
 ) -> Result<bool, String> {
     Ok(match op {
-        AddonConfigsOp::Add { url } => {
-            let verdict = inspect_addon_url_against(&url, configs);
+        AddonConfigsOp::Add { ref url } | AddonConfigsOp::ReplaceUrl { ref url, .. } => {
+            let replacing_id = match &op {
+                AddonConfigsOp::ReplaceUrl { id, .. } => Some(id.as_str()),
+                _ => None,
+            };
+            let verdict = inspect_addon_url_against(url, configs, replacing_id);
             if let Some(error) = verdict.error {
                 return Err(error);
             }
@@ -654,18 +668,27 @@ fn apply_addon_configs_op(
             if let Some(name) = verdict.duplicate_of {
                 return Err(format!("This addon URL is already configured as {name}."));
             }
-            if configs.len() >= MAX_ADDON_CONFIGS {
+            if let Some(id) = replacing_id {
+                let config = configs
+                    .iter_mut()
+                    .find(|config| config.id == id && !is_pinned_default_addon_url(&config.url))
+                    .ok_or_else(|| "This addon link cannot be updated.".to_string())?;
+                config.url = url;
+                config.name.clear();
+                config.capabilities = None;
+            } else if configs.len() >= MAX_ADDON_CONFIGS {
                 return Err(format!(
                     "Too many addon configs. Maximum is {MAX_ADDON_CONFIGS}."
                 ));
+            } else {
+                configs.push(AddonConfig {
+                    id: new_addon_id.to_string(),
+                    url,
+                    name: String::new(),
+                    enabled: true,
+                    capabilities: None,
+                });
             }
-            configs.push(AddonConfig {
-                id: new_addon_id.to_string(),
-                url,
-                name: String::new(),
-                enabled: true,
-                capabilities: None,
-            });
             *configs = resolve_addon_configs(Some(std::mem::take(configs)));
             true
         }
@@ -742,26 +765,52 @@ pub async fn update_addon_configs(
     } else {
         String::new()
     };
-    let classified = if matches!(op, AddonConfigsOp::Add { .. }) {
-        let candidate = super::with_store(app.clone(), super::SETTINGS_STORE_FILE, {
-            let op = op.clone();
-            let new_addon_id = new_addon_id.clone();
-            move |store| {
-                let mut updated = load_addon_configs(&store);
-                apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
-                Ok::<_, String>(updated.pop().into_iter().collect())
-            }
-        })
-        .await?;
-        classify_missing_addon_capabilities(candidate, true).await?
+    let (classified, replaced_url) = if matches!(
+        op,
+        AddonConfigsOp::Add { .. } | AddonConfigsOp::ReplaceUrl { .. }
+    ) {
+        let (candidate, replaced_url) =
+            super::with_store(app.clone(), super::SETTINGS_STORE_FILE, {
+                let op = op.clone();
+                let new_addon_id = new_addon_id.clone();
+                move |store| {
+                    let mut updated = load_addon_configs(&store);
+                    let (id, replaced_url) = if let AddonConfigsOp::ReplaceUrl { id, .. } = &op {
+                        let previous_url = updated
+                            .iter()
+                            .find(|config| &config.id == id)
+                            .map(|config| config.url.clone());
+                        (id.clone(), previous_url)
+                    } else {
+                        (new_addon_id.clone(), None)
+                    };
+                    apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
+                    let candidate = updated
+                        .into_iter()
+                        .find(|config| config.id == id)
+                        .ok_or_else(|| "Could not prepare the addon link.".to_string())?;
+                    Ok::<_, String>((candidate, replaced_url))
+                }
+            })
+            .await?;
+        (
+            classify_missing_addon_capabilities(vec![candidate], true).await?,
+            replaced_url,
+        )
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
 
     // Manifest IO stays off the store gate; only the delta is reapplied at commit.
     let updated = super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut updated = load_addon_configs(&store);
+        if let AddonConfigsOp::ReplaceUrl { id, .. } = &op {
+            let current = updated.iter().find(|config| &config.id == id);
+            if current.map(|config| &config.url) != replaced_url.as_ref() {
+                return Err("The addon link changed while it was being checked. Try again.".into());
+            }
+        }
         let mut changed = apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
         changed |= merge_classified_capabilities(&mut updated, classified, true).0;
         persist_addon_configs(&store, &updated, changed, || {
@@ -1260,6 +1309,60 @@ mod tests {
     }
 
     #[test]
+    fn addon_link_replacement_preserves_identity_position_and_enabled_state() {
+        let mut addons = resolve_addon_configs(Some(vec![
+            AddonConfig {
+                url: "https://original.example".into(),
+                enabled: false,
+                ..test_addon("original", "Original")
+            },
+            AddonConfig {
+                url: "https://other.example".into(),
+                ..test_addon("other", "Other")
+            },
+        ]));
+        let before = addons.clone();
+        let replace = |id: &str, url: &str| AddonConfigsOp::ReplaceUrl {
+            id: id.into(),
+            url: url.into(),
+        };
+        let pinned_id = &before[0].id;
+        let other = before.last().unwrap();
+        for action in [
+            replace(pinned_id, "https://new.example/manifest.json"),
+            replace("original", &other.url),
+            replace("original", "https://new.example/configure"),
+        ] {
+            assert!(apply_addon_configs_op(&mut addons, action, "").is_err());
+            assert_eq!(addons, before);
+        }
+        let original = addons.iter().find(|addon| addon.id == "original").unwrap();
+        assert!(
+            inspect_addon_url_against(&original.url, &addons, Some("original"))
+                .duplicate_of
+                .is_none()
+        );
+
+        assert!(apply_addon_configs_op(
+            &mut addons,
+            replace(
+                "original",
+                "https://new.example/path/manifest.json?key=config"
+            ),
+            "",
+        )
+        .unwrap());
+        assert!(addons
+            .iter()
+            .map(|addon| &addon.id)
+            .eq(before.iter().map(|addon| &addon.id)));
+        let updated = addons.iter().find(|addon| addon.id == "original").unwrap();
+        assert_eq!(updated.url, "https://new.example/path?key=config");
+        assert!(!updated.enabled);
+        assert!(updated.needs_classification());
+    }
+
+    #[test]
     fn addon_url_inspection_matches_the_save_normalizer() {
         let installed = [AddonConfig {
             url: "https://addon.example/abc".to_string(),
@@ -1267,15 +1370,20 @@ mod tests {
         }];
 
         assert_eq!(
-            inspect_addon_url_against("   ", &installed),
+            inspect_addon_url_against("   ", &installed, None),
             AddonUrlInspection::default()
         );
-        assert!(inspect_addon_url_against("ftp://addon.example", &installed)
-            .error
-            .is_some());
+        assert!(
+            inspect_addon_url_against("ftp://addon.example", &installed, None)
+                .error
+                .is_some()
+        );
 
-        let duplicate =
-            inspect_addon_url_against("stremiro://addon.example/abc/manifest.json/", &installed);
+        let duplicate = inspect_addon_url_against(
+            "stremiro://addon.example/abc/manifest.json/",
+            &installed,
+            None,
+        );
         assert_eq!(
             duplicate.display_url.as_deref(),
             Some("https://addon.example/•••")
@@ -1294,6 +1402,7 @@ mod tests {
         let private = inspect_addon_url_against(
             "stremiro://addon.example/AbCdEfGhIjKlMnOpQrStUvWxYz012345/manifest.json?token=sekrit",
             &installed,
+            None,
         );
         assert_eq!(
             private.display_url.as_deref(),
@@ -1304,7 +1413,8 @@ mod tests {
         assert!(!serialized.contains("sekrit"));
         assert!(!serialized.contains("normalizedUrl"));
 
-        let configure = inspect_addon_url_against("https://addon.example/Configure/", &installed);
+        let configure =
+            inspect_addon_url_against("https://addon.example/Configure/", &installed, None);
         assert!(configure.display_url.is_none());
         assert!(configure.configure_page);
         assert_eq!(configure.duplicate_of, None);
@@ -1313,7 +1423,7 @@ mod tests {
             "https://addon.example/{}",
             "a".repeat(MAX_ADDON_URL_INPUT_CHARS)
         );
-        assert!(inspect_addon_url_against(&too_long, &installed)
+        assert!(inspect_addon_url_against(&too_long, &installed, None)
             .error
             .is_some());
     }

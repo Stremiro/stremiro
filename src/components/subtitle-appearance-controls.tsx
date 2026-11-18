@@ -19,6 +19,7 @@ interface SubtitleAppearancePatch {
 // One geometry for the two pickers and the B/I toggles — the row reads as a single strip.
 const CONTROL_CLASS =
   'flex shrink-0 cursor-pointer items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/[0.05] text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) disabled:cursor-wait disabled:opacity-35 motion-reduce:transition-none';
+const FIELD_LABEL_CLASS = 'mb-1.5 text-[12px] font-medium text-zinc-400';
 const CONTROL_OPEN_CLASS = 'bg-white/[0.09] text-white hover:bg-white/[0.09]';
 const CONTROL_PRESSED_CLASS = 'bg-white/[0.14] text-white hover:bg-white/[0.16] hover:text-white';
 const LIST_ITEM_CLASS =
@@ -186,16 +187,39 @@ export function SubtitleAppearanceControls({
       'I',
     ],
   ] as const;
+  const emphasisButtons = emphasisOptions.map(([label, pressed, patch, glyphClass, glyph]) => (
+    <button
+      key={label}
+      type='button'
+      aria-pressed={pressed}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onPatch(patch)}
+      className={cn(
+        CONTROL_CLASS,
+        compact
+          ? 'h-8 w-8 border-transparent bg-white/[0.06] text-[13px]'
+          : 'h-10 w-10 text-[14px]',
+        pressed && CONTROL_PRESSED_CLASS,
+      )}
+    >
+      <span aria-hidden='true' className={glyphClass}>
+        {glyph}
+      </span>
+    </button>
+  ));
+  const fontPicker = picker('font', 'Subtitle font', selectedFont?.label ?? subtitleFont);
+  const edgePicker = picker('edge', 'Subtitle edge style', selectedEdge?.label ?? subtitleEdge);
 
   return (
-    <div className={compact ? 'space-y-2.5' : 'space-y-3'}>
+    <div className={compact ? 'space-y-2' : 'space-y-4'}>
       <div
         aria-hidden='true'
         className={cn(
           // A dim film frame, not a swatch: soft vignette + faint horizon so the
           // sample text reads the way it will over real video.
           'relative flex items-center justify-center overflow-hidden rounded-lg bg-[#0b0b0d] px-3',
-          compact ? 'h-12' : 'h-14 border border-white/[0.06]',
+          compact ? 'h-11' : 'h-14 border border-white/[0.06]',
         )}
       >
         <span className='pointer-events-none absolute inset-0 bg-[radial-gradient(120%_140%_at_50%_-20%,rgba(255,255,255,0.09),transparent_62%)]' />
@@ -213,38 +237,28 @@ export function SubtitleAppearanceControls({
           Subtitles look like this
         </span>
       </div>
-      <div
-        className={cn(
-          'grid items-center',
-          compact
-            ? 'grid-cols-[minmax(0,1.25fr)_minmax(0,0.85fr)_auto_auto] gap-1.5'
-            : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2',
-        )}
-      >
-        {picker('font', 'Subtitle font', selectedFont?.label ?? subtitleFont)}
-        {picker('edge', 'Subtitle edge style', selectedEdge?.label ?? subtitleEdge)}
-        {emphasisOptions.map(([label, pressed, patch, glyphClass, glyph]) => (
-          <button
-            key={label}
-            type='button'
-            aria-pressed={pressed}
-            aria-label={label}
-            disabled={disabled}
-            onClick={() => onPatch(patch)}
-            className={cn(
-              CONTROL_CLASS,
-              compact
-                ? 'h-8 w-8 border-transparent bg-white/[0.06] text-[13px]'
-                : 'h-10 w-10 text-[14px]',
-              pressed && CONTROL_PRESSED_CLASS,
-            )}
-          >
-            <span aria-hidden='true' className={glyphClass}>
-              {glyph}
-            </span>
-          </button>
-        ))}
-      </div>
+      {compact ? (
+        <div className='grid grid-cols-[minmax(0,1.25fr)_minmax(0,0.85fr)_auto_auto] items-center gap-1.5'>
+          {fontPicker}
+          {edgePicker}
+          {emphasisButtons}
+        </div>
+      ) : (
+        <div className='grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-3'>
+          <div className='min-w-0'>
+            <p className={FIELD_LABEL_CLASS}>Font</p>
+            {fontPicker}
+          </div>
+          <div className='min-w-0'>
+            <p className={FIELD_LABEL_CLASS}>Edge</p>
+            {edgePicker}
+          </div>
+          <div>
+            <p className={FIELD_LABEL_CLASS}>Style</p>
+            <div className='flex gap-2'>{emphasisButtons}</div>
+          </div>
+        </div>
+      )}
       <div
         className={cn(
           'grid transition-[grid-template-rows,margin-top] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
@@ -281,31 +295,45 @@ export function SubtitleAppearanceControls({
           )}
         </div>
       </div>
-      <div role='group' aria-label='Subtitle color' className='flex flex-wrap items-center gap-1.5'>
-        {SUBTITLE_COLOR_OPTIONS.map((option) => {
-          const isSelected = subtitleColor === option.value;
-          return (
-            <button
-              key={option.value}
-              type='button'
-              aria-label={`Subtitle color: ${option.label}`}
-              title={option.label}
-              aria-pressed={isSelected}
-              disabled={disabled}
-              onClick={() => onPatch({ subtitleColor: option.value })}
-              className={cn(
-                'cursor-pointer rounded-full shadow-[inset_0_0_0_1px_rgba(0,0,0,0.35)] transition-[transform,box-shadow] duration-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) disabled:cursor-wait disabled:opacity-35 motion-reduce:transition-none',
-                compact ? 'size-4' : 'size-5',
-                isSelected
-                  ? 'ring-2 ring-white/85 ring-offset-2 ring-offset-zinc-950'
-                  : 'hover:scale-110',
-              )}
-              style={{ backgroundColor: option.hex }}
-            />
-          );
-        })}
+      <div>
+        {!compact && <p className={FIELD_LABEL_CLASS}>Color</p>}
+        <div
+          role='group'
+          aria-label='Subtitle color'
+          className={cn('flex flex-wrap items-center', compact ? 'gap-1.5' : 'gap-2.5')}
+        >
+          {SUBTITLE_COLOR_OPTIONS.map((option) => {
+            const isSelected = subtitleColor === option.value;
+            return (
+              <button
+                key={option.value}
+                type='button'
+                aria-label={`Subtitle color: ${option.label}`}
+                title={option.label}
+                aria-pressed={isSelected}
+                disabled={disabled}
+                onClick={() => onPatch({ subtitleColor: option.value })}
+                className={cn(
+                  'cursor-pointer rounded-full shadow-[inset_0_0_0_1px_rgba(0,0,0,0.35)] transition-[filter,box-shadow] duration-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) disabled:cursor-wait disabled:opacity-35 motion-reduce:transition-none',
+                  compact ? 'size-4' : 'size-6',
+                  isSelected
+                    ? 'ring-2 ring-white/85 ring-offset-2 ring-offset-zinc-950'
+                    : 'hover:brightness-125',
+                )}
+                style={{ backgroundColor: option.hex }}
+              />
+            );
+          })}
+        </div>
       </div>
-      <p className='text-[12px] leading-relaxed text-zinc-500'>
+      <p
+        className={cn(
+          'leading-snug',
+          compact
+            ? 'text-[11px] text-zinc-500'
+            : 'border-t border-white/[0.06] pt-3 text-[12px] text-zinc-400',
+        )}
+      >
         Plain-text subtitles only. Styled (ASS) subtitles keep their own look.
       </p>
     </div>

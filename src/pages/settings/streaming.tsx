@@ -11,6 +11,7 @@ import {
   GripVertical,
   Link2,
   Loader2,
+  Pencil,
   Plus,
   Puzzle,
   SlidersHorizontal,
@@ -36,7 +37,7 @@ import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
-import { cn, orderByIds, queryNeedsRetry, scrollBehavior } from '@/lib/utils';
+import { cn, orderByIds, queryNeedsRetry } from '@/lib/utils';
 import {
   SETTINGS_HEADER_STATUS_CLASS,
   SettingsBody,
@@ -50,7 +51,6 @@ import {
 // Long enough to skip per-keystroke IPC, short enough to read as live.
 const ADDON_URL_INSPECT_DEBOUNCE_MS = 150;
 const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremiro:// addon URL.';
-const ADDED_ROW_HIGHLIGHT_MS = 2400;
 
 interface AddonRowProps {
   addon: AddonConfig;
@@ -60,6 +60,7 @@ interface AddonRowProps {
   onToggle: (id: string) => void;
   /** Only unpinned rows render a remove affordance. */
   onRemove?: (id: string) => void;
+  onReplaceUrl?: (id: string) => void;
 }
 
 const ADDON_ICON_BUTTON_CLASS =
@@ -90,7 +91,7 @@ async function copyAddonShareLink(addonId: string): Promise<boolean> {
   }
 }
 
-function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProps) {
+function AddonRow({ addon, handle, isWorking, onToggle, onRemove, onReplaceUrl }: AddonRowProps) {
   const [addonLogoSrc, onAddonLogoError] = useFailedSrc(addon.logo);
   const [removeOpen, setRemoveOpen] = useState(false);
   const removeConfirmedRef = useRef(false);
@@ -124,7 +125,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
         ) : (
           <span
             aria-hidden='true'
-            className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-linear-to-b from-white/[0.08] to-white/[0.02] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
+            className='flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/[0.06] text-[13px] font-semibold text-zinc-300'
           >
             {addonMonogram(addon.name)}
           </span>
@@ -179,7 +180,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
 
       {/* Fixed slots keep controls column-aligned; pinned rows reserve the remove slot. */}
       <div className='col-start-2 flex shrink-0 items-center justify-self-end gap-1.5'>
-        <div className='flex items-center gap-1 transition-opacity motion-reduce:transition-none md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100'>
+        <div className='flex items-center gap-1'>
           {addon.configurable ? (
             <button
               type='button'
@@ -197,6 +198,24 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
               )}
             >
               <SlidersHorizontal aria-hidden='true' className='h-4 w-4' />
+            </button>
+          ) : (
+            <span aria-hidden='true' className='h-8 w-8' />
+          )}
+          {onReplaceUrl ? (
+            <button
+              type='button'
+              data-addon-control='replace'
+              title='Update addon link'
+              aria-label={`Update ${addon.name} addon link`}
+              disabled={isWorking}
+              onClick={() => onReplaceUrl(addon.id)}
+              className={cn(
+                ADDON_ICON_BUTTON_CLASS,
+                'text-zinc-500 hover:bg-white/[0.06] hover:text-white disabled:opacity-40',
+              )}
+            >
+              <Pencil aria-hidden='true' className='h-3.5 w-3.5' />
             </button>
           ) : (
             <span aria-hidden='true' className='h-8 w-8' />
@@ -335,9 +354,13 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle'>) {
 export function AddonSettings() {
   const queryClient = useQueryClient();
   const [newUrl, setNewUrl] = useState('');
+  const [replacementId, setReplacementId] = useState<string>();
+  const [installFeedback, setInstallFeedback] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [pendingAddonOrder, setPendingAddonOrder] = useState<string[] | null>(null);
   const newUrlInputRef = useRef<HTMLInputElement | null>(null);
+  const addonFormRef = useRef<HTMLFormElement>(null);
+  const manifestSubmitRef = useRef(false);
   const addonRowsRef = useRef<HTMLDivElement>(null);
   const removalFocusRef = useRef<{
     button: HTMLButtonElement;
@@ -350,6 +373,8 @@ export function AddonSettings() {
   const linkedInstallUrl: unknown = location.state?.addonInstallUrl;
   useEffect(() => {
     if (typeof linkedInstallUrl !== 'string') return;
+    setReplacementId(undefined);
+    setInstallFeedback('');
     setNewUrl(linkedInstallUrl);
     newUrlInputRef.current?.focus({ preventScroll: true });
     void navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
@@ -423,10 +448,18 @@ export function AddonSettings() {
       }
       void queryClient.cancelQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY, exact: true });
       queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, savedConfigs);
+      if (action.kind === 'replaceUrl') {
+        void queryClient.invalidateQueries({
+          queryKey: ['addonUrlInspection'],
+          refetchType: 'none',
+        });
+      }
       void invalidateDiscoveryQueries(queryClient);
     },
-    onError: (err: unknown, _action, previous) => {
-      toast.error(getErrorMessage(err));
+    onError: (err: unknown, action, previous) => {
+      if (action.kind !== 'add' && action.kind !== 'replaceUrl') {
+        toast.error(getErrorMessage(err));
+      }
       if (previous) queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, previous);
       // A failed disk save can still leave the registry applied in memory.
       return queryClient
@@ -442,7 +475,10 @@ export function AddonSettings() {
         })
         .catch(() => {});
     },
-    onSettled: () => setPendingAddonOrder(null),
+    onSettled: () => {
+      manifestSubmitRef.current = false;
+      setPendingAddonOrder(null);
+    },
   });
 
   useLayoutEffect(() => {
@@ -474,11 +510,12 @@ export function AddonSettings() {
   // Rust judges the add box with the save path's normalizer, so verdicts can't drift.
   const trimmedNewUrl = newUrl.trim();
   const debouncedNewUrl = useDebounce(trimmedNewUrl, ADDON_URL_INSPECT_DEBOUNCE_MS);
+  const replacement = addons.find((addon) => addon.id === replacementId);
   const installedAddonIds = addons.map((addon) => addon.id);
   const inspectionQuery = useQuery({
-    queryKey: addonUrlInspectionQueryKey(debouncedNewUrl, installedAddonIds),
-    queryFn: () => api.inspectAddonUrl(debouncedNewUrl),
-    enabled: debouncedNewUrl !== '',
+    queryKey: addonUrlInspectionQueryKey(debouncedNewUrl, installedAddonIds, replacement?.id),
+    queryFn: () => api.inspectAddonUrl(debouncedNewUrl, replacement?.id),
+    enabled: debouncedNewUrl !== '' && !saveMutation.isPending,
     staleTime: Infinity,
     gcTime: 0,
     retry: false,
@@ -490,17 +527,18 @@ export function AddonSettings() {
   const isConfigureCandidate = !!inspection?.configurePage;
   const duplicateAddonName = inspection?.duplicateOf;
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
-  useLayoutEffect(() => {
-    if (
-      !isWorking &&
-      saveMutation.isError &&
-      saveMutation.variables?.kind === 'add' &&
-      document.activeElement === document.body
-    ) {
-      newUrlInputRef.current?.focus({ preventScroll: true });
-    }
-  }, [isWorking, saveMutation.isError, saveMutation.variables]);
-  const canSubmitNewAddon = isValidNewUrl && !duplicateAddonName && !isWorking;
+  const manifestAction = saveMutation.variables;
+  const isManifestAction = manifestAction?.kind === 'add' || manifestAction?.kind === 'replaceUrl';
+  const isCheckingManifest = saveMutation.isPending && isManifestAction;
+  const manifestError =
+    isManifestAction &&
+    saveMutation.isError &&
+    manifestAction.url === trimmedNewUrl &&
+    (manifestAction.kind === 'replaceUrl' ? manifestAction.id : undefined) === replacement?.id
+      ? getErrorMessage(saveMutation.error)
+      : undefined;
+  const canSubmitNewAddon =
+    !!trimmedNewUrl && (!inspection || isValidNewUrl) && !duplicateAddonName && !isWorking;
   const addonHintTone = !inspection
     ? 'text-zinc-500'
     : isConfigureCandidate || duplicateAddonName
@@ -514,7 +552,7 @@ export function AddonSettings() {
       ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
       : duplicateAddonName
         ? `Already configured as ${duplicateAddonName}.`
-        : `Ready: ${inspection.displayUrl}`;
+        : inspection.displayUrl;
 
   const handleToggle = (id: string) => {
     if (isWorking) return;
@@ -549,29 +587,37 @@ export function AddonSettings() {
     );
   };
 
+  const handleReplaceUrl = (id: string) => {
+    setReplacementId(id);
+    setNewUrl('');
+    setInstallFeedback('');
+    newUrlInputRef.current?.focus();
+  };
+
   const handleAddUrl = () => {
-    // Enter bypasses the disabled button mid-debounce; Rust re-judges at commit.
-    if (isWorking || !trimmedNewUrl) return;
+    if (!canSubmitNewAddon || manifestSubmitRef.current) return;
+    manifestSubmitRef.current = true;
 
     const knownIds = new Set(addons.map((addon) => addon.id));
     saveMutation.mutate(
-      { kind: 'add', url: trimmedNewUrl },
+      replacement
+        ? { kind: 'replaceUrl', id: replacement.id, url: trimmedNewUrl }
+        : { kind: 'add', url: trimmedNewUrl },
       {
-        onSuccess: (savedConfigs) => {
+        onSuccess: (savedConfigs, action) => {
+          const updated = savedConfigs.find((addon) =>
+            action.kind === 'replaceUrl' ? addon.id === action.id : !knownIds.has(addon.id),
+          );
           setNewUrl((current) => (current === newUrl ? '' : current));
-          requestAnimationFrame(() => newUrlInputRef.current?.focus());
-          const added = savedConfigs.find((addon) => !knownIds.has(addon.id));
-          toast.success(`Added ${added?.name ?? 'Addon'}`);
-          // Land the eye on the new row — it appends below the visible list.
-          requestAnimationFrame(() => {
-            const row = Array.from(
-              addonRowsRef.current?.querySelectorAll<HTMLElement>('[data-addon-row]') ?? [],
-            ).find((el) => el.dataset.addonRow === added?.id);
-            if (!row) return;
-            row.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
-            row.dataset.settingHighlighted = '';
-            window.setTimeout(() => delete row.dataset.settingHighlighted, ADDED_ROW_HIGHLIGHT_MS);
-          });
+          setReplacementId((current) => (current === replacementId ? undefined : current));
+          setInstallFeedback(
+            action.kind === 'replaceUrl'
+              ? `Updated ${updated?.name || 'addon'}`
+              : `Added ${updated?.name || 'addon'}`,
+          );
+          if (addonFormRef.current?.contains(document.activeElement)) {
+            newUrlInputRef.current?.focus({ preventScroll: true });
+          }
         },
       },
     );
@@ -598,7 +644,15 @@ export function AddonSettings() {
 
       <SettingsCard>
         <SettingsBody className='border-b border-white/[0.06]'>
-          <div className='flex flex-col gap-2 sm:flex-row'>
+          <form
+            ref={addonFormRef}
+            aria-label={replacement ? `Update ${replacement.name} addon link` : 'Add addon'}
+            className='flex flex-col gap-2 sm:flex-row'
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleAddUrl();
+            }}
+          >
             <div className='relative flex-1'>
               <Link2
                 aria-hidden='true'
@@ -607,35 +661,75 @@ export function AddonSettings() {
               <Input
                 id='setting-addon-manifest-url'
                 ref={newUrlInputRef}
-                aria-label='Addon manifest URL'
+                aria-label={
+                  replacement ? `New manifest URL for ${replacement.name}` : 'Addon manifest URL'
+                }
                 aria-describedby='addon-url-hint'
                 aria-invalid={!!trimmedNewUrl && !!inspection && !isValidNewUrl}
                 placeholder='https://addon.host/.../manifest.json'
                 value={newUrl}
-                onChange={(e) => setNewUrl(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleAddUrl();
+                onChange={(e) => {
+                  setNewUrl(e.target.value);
+                  setInstallFeedback('');
                 }}
-                disabled={isWorking}
+                readOnly={isWorking}
                 className='h-10 rounded-lg border-white/[0.08] bg-white/[0.04] pl-10 pr-3.5 font-mono text-[14px] transition-colors placeholder:text-zinc-600 focus-visible:border-(--accent-nav)/35 focus-visible:ring-1 focus-visible:ring-(--accent-nav)/25 focus-visible:ring-offset-0'
               />
             </div>
             <Button
               size='sm'
-              onClick={handleAddUrl}
-              disabled={!canSubmitNewAddon}
-              className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[14px] font-medium text-black hover:bg-zinc-200'
+              type='submit'
+              aria-disabled={!canSubmitNewAddon || undefined}
+              aria-busy={isCheckingManifest || undefined}
+              className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[14px] font-medium text-black hover:bg-zinc-200 aria-disabled:opacity-50'
             >
-              {saveMutation.isPending && saveMutation.variables?.kind === 'add' ? (
-                <Loader2 className='h-4 w-4 animate-spin motion-reduce:animate-none' />
+              {isCheckingManifest ? (
+                <Loader2
+                  aria-hidden='true'
+                  className='h-4 w-4 animate-spin motion-reduce:animate-none'
+                />
+              ) : replacement ? (
+                <Pencil aria-hidden='true' className='h-3.5 w-3.5' />
               ) : (
-                <Plus className='h-4 w-4' />
+                <Plus aria-hidden='true' className='h-4 w-4' />
               )}
-              Add addon
+              {replacement ? 'Update link' : 'Add addon'}
             </Button>
-          </div>
+            {replacement && (
+              <Button
+                size='sm'
+                type='button'
+                variant='ghost'
+                disabled={isWorking}
+                className='h-10'
+                onClick={() => {
+                  setReplacementId(undefined);
+                  setNewUrl('');
+                  newUrlInputRef.current?.focus({ preventScroll: true });
+                }}
+              >
+                Cancel
+              </Button>
+            )}
+          </form>
 
-          {inspectionCurrent && !inspection && queryNeedsRetry(inspectionQuery) ? (
+          {manifestError ? (
+            <p
+              id='addon-url-hint'
+              role='alert'
+              className='mt-2.5 text-[12px] leading-relaxed text-red-400 [overflow-wrap:anywhere]'
+            >
+              {manifestError}
+            </p>
+          ) : isCheckingManifest || (!trimmedNewUrl && installFeedback) ? (
+            <p
+              id='addon-url-hint'
+              role='status'
+              className='mt-2.5 text-[12px] leading-relaxed text-zinc-300'
+            >
+              {isCheckingManifest ? 'Checking addon manifest…' : installFeedback}
+            </p>
+          ) : inspectionCurrent && !inspection && queryNeedsRetry(inspectionQuery) ? (
             <div id='addon-url-hint' className='mt-2.5'>
               <SettingsQueryError
                 query={inspectionQuery}
@@ -651,6 +745,11 @@ export function AddonSettings() {
               )}
             >
               {addonHintText}
+            </p>
+          ) : replacement ? (
+            <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
+              Paste the new install link for{' '}
+              <span className='text-zinc-200'>{replacement.name}</span>.
             </p>
           ) : (
             <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
@@ -684,7 +783,7 @@ export function AddonSettings() {
                 </div>
               ))}
             </SettingsBody>
-          ) : isLoadingError || (isFetched && isLoading) ? (
+          ) : isLoadingError ? (
             <SettingsBody>
               <RetryBanner
                 message="Couldn't load your addons."
@@ -732,6 +831,7 @@ export function AddonSettings() {
                           isWorking={isWorking}
                           onToggle={handleToggle}
                           onRemove={handleRemove}
+                          onReplaceUrl={handleReplaceUrl}
                         />
                       ))}
                     </div>

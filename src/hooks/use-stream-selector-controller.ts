@@ -175,27 +175,27 @@ export function useStreamSelectorController({
     queryKey: selectorQueryKey,
     // Do not consume signal: TanStack would cancel and revert this fetch on unmount.
     queryFn: () => {
-      // The backend emits a merged+ranked snapshot per addon — cache each so rows appear progressively.
-      const generation = ++selectorFetchGenerationRef.current;
-      let settled = false;
+      // Refresh atomically: the existing rows stay visible until the settled result.
       const hasCachedStreams =
         !!queryClient.getQueryData<StreamSelectorData>(selectorQueryKey)?.streams.length;
-      const onProgress = new Channel<StreamSelectorData>();
-      // Channel is not an EventTarget — onmessage is its only surface.
-      // eslint-disable-next-line unicorn/prefer-add-event-listener
-      onProgress.onmessage = (snapshot) => {
-        // Refresh atomically: partial source snapshots must not shrink an already populated list.
-        if (
-          !settled &&
-          !hasCachedStreams &&
-          selectorOpenRef.current &&
-          generation === selectorFetchGenerationRef.current
-        ) {
-          queryClient.setQueryData<StreamSelectorData>(selectorQueryKey, (previous) =>
-            previous?.streams.length && snapshot.streams.length === 0 ? previous : snapshot,
-          );
-        }
-      };
+      const generation = ++selectorFetchGenerationRef.current;
+      let settled = false;
+      const onProgress = hasCachedStreams ? undefined : new Channel<StreamSelectorData>();
+      if (onProgress) {
+        // Channel exposes progress through onmessage.
+        // eslint-disable-next-line unicorn/prefer-add-event-listener
+        onProgress.onmessage = (snapshot) => {
+          if (
+            !settled &&
+            selectorOpenRef.current &&
+            generation === selectorFetchGenerationRef.current
+          ) {
+            queryClient.setQueryData<StreamSelectorData>(selectorQueryKey, (previous) =>
+              previous?.streams.length && snapshot.streams.length === 0 ? previous : snapshot,
+            );
+          }
+        };
+      }
       return api
         .getStreamSelectorData(
           type,
@@ -212,7 +212,8 @@ export function useStreamSelectorController({
     },
     structuralSharing: shareStreamSelectorData,
     enabled: open && !!lookupId?.trim() && isOnline,
-    staleTime: 1000 * 60 * 3,
+    // Empty results expire with Rust's 30 s empty/failure caches so a reopen retries transient misses.
+    staleTime: (query) => (query.state.data?.streams.length ? 1000 * 60 * 3 : 1000 * 30),
     gcTime: STREAM_SELECTOR_GC_TIME_MS,
     retry: 0,
   });
@@ -257,7 +258,7 @@ export function useStreamSelectorController({
   // segment counts always reflect the other filters and batch toggles reuse the same cache.
   const indexFilters: StreamSelectorPreferences =
     effectiveFilters.batch === 'all' ? effectiveFilters : { ...effectiveFilters, batch: 'all' };
-  const selectorViewResetKey = JSON.stringify([effectiveFilters, requestedSearchQuery]);
+  const listResetKey = JSON.stringify([effectiveFilters, requestedSearchQuery]);
   const unfilteredView =
     effectiveFilters.quality === 'all' &&
     effectiveFilters.source === 'all' &&
@@ -326,7 +327,6 @@ export function useStreamSelectorController({
           ),
     [effectiveFilters.batch, matchingStreams],
   );
-  const listResetKey = selectorViewResetKey;
   const isSearchPending = normalizedSearchQuery !== requestedSearchQuery || isFetchingSelectorView;
 
   const [retryState, setRetryState] = useState<{
@@ -357,7 +357,9 @@ export function useStreamSelectorController({
     if (isRetrying) return;
     const retry = { sessionKey: selectorSessionKey, error: fatalAddonError };
     setRetryState(retry);
-    const request = selectorViewError ? refetchSelectorView() : refetchStreamSelectorData();
+    const request = selectorViewError
+      ? refetchSelectorView({ cancelRefetch: false })
+      : refetchStreamSelectorData({ cancelRefetch: false });
     void request.then(() => {
       setRetryState((current) => (current === retry ? null : current));
     });

@@ -86,7 +86,8 @@ export const storeApi = {
     }),
   getAddonShareLink: (id: string) => safeInvoke<AddonShareLink>('get_addon_share_link', { id }),
   openAddonConfigurePage: (id: string) => safeInvoke<void>('open_addon_configure_page', { id }),
-  inspectAddonUrl: (url: string) => safeInvoke<AddonUrlInspection>('inspect_addon_url', { url }),
+  inspectAddonUrl: (url: string, replacingId?: string) =>
+    safeInvoke<AddonUrlInspection>('inspect_addon_url', { url, replacingId }),
   updateAddonConfigs: (op: AddonConfigsOp) =>
     // Track the full write incl. cache-clear so a close/export during save waits on it — and sees failure.
     trackPendingAppWrite(

@@ -19,7 +19,7 @@ export function StatePanel({
   description?: ReactNode;
   descriptionClassName?: string;
   icon?: ReactNode;
-  /** Extra chrome on the icon slot (e.g. ICON_CHIP_CLASS tile); 'h-auto w-auto' hugs the icon. */
+  /** Extra chrome on the icon slot; 'h-auto w-auto' hugs the icon. */
   iconClassName?: string;
   role?: string;
   title: ReactNode;

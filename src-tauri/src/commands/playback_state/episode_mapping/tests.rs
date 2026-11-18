@@ -124,7 +124,11 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     let digest = episode_mappings_digest("series", "tt2560140", None, &episodes);
     store.set(
         &digest_key,
-        json!(EpisodeMappingDigestRecord { digest, seen_at: 2 }),
+        json!(EpisodeMappingDigestRecord {
+            digest,
+            seen_at: 2,
+            ..Default::default()
+        }),
     );
     assert!(mapped_canonical_season_is_final(
         store,
@@ -135,8 +139,11 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     assert!(stored_episode_mapping_digest_matches(
         store,
         &digest_key,
-        digest,
-        3
+        &EpisodeMappingDigestRecord {
+            digest,
+            seen_at: 3,
+            ..Default::default()
+        }
     ));
     let unchanged_index = index.clone();
     let (writes, deletes, changed) =
@@ -148,10 +155,13 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     assert!(stored_episode_mapping_digest_matches(
         store,
         &digest_key,
-        digest,
-        4
+        &EpisodeMappingDigestRecord {
+            digest,
+            seen_at: 4,
+            ..Default::default()
+        }
     ));
-    episodes[0].id = "tt999:4:12".into();
+    episodes[0].id = "video:4:12".into();
     assert_ne!(
         digest,
         episode_mappings_digest("series", "tt2560140", None, &episodes)
@@ -166,7 +176,7 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     );
     assert_eq!(writes.len(), 1);
     let (key, cached) = &writes[0];
-    assert_eq!(cached.video_id.as_deref(), Some("tt999:4:12"));
+    assert_eq!(cached.video_id.as_deref(), Some("video:4:12"));
     assert_eq!(cached.snapshot.source_lookup_id, "tt2560140");
     store.set(playback_episode_mapping_item_key(key), json!(cached));
     assert_eq!(
@@ -184,7 +194,7 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
         &mut index,
     );
     assert!(unchanged.is_empty());
-    episodes[0].id = "tt999:4:13".into();
+    episodes[0].id = "video:4:13".into();
     let (changed, _, _) = collect_episode_mapping_writes(
         store,
         "series",
@@ -193,7 +203,7 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
         &snapshots,
         &mut index,
     );
-    assert_eq!(changed[0].1.video_id.as_deref(), Some("tt999:4:13"));
+    assert_eq!(changed[0].1.video_id.as_deref(), Some("video:4:13"));
 }
 
 #[test]
@@ -223,119 +233,62 @@ fn episode_mapping_key_merge_matches_single_insert_semantics() {
     }
 }
 
-// ── mapping_index_key_canonical_season ────────────────────────────────
-
-fn mapping_index_key_canonical_season(key: &str) -> Option<u32> {
-    split_episode_snapshot_key(key)?.1.parse::<u32>().ok()
-}
-
-#[test]
-fn reads_season_from_the_right_of_an_index_key() {
-    assert_eq!(
-        mapping_index_key_canonical_season("series:tt2560140:1:4"),
-        Some(1)
-    );
-    assert_eq!(
-        mapping_index_key_canonical_season("series:tt2560140:12:9"),
-        Some(12)
-    );
-    // Media ids may themselves contain `:`: the season is read from the
-    // right, so only the two trailing coordinate segments are stripped.
-    assert_eq!(
-        mapping_index_key_canonical_season("series:tt:2560:140:4:1"),
-        Some(4)
-    );
-    // Not a snapshot key: no two trailing coordinate segments.
-    assert_eq!(mapping_index_key_canonical_season("series:tt1"), None);
-    assert_eq!(mapping_index_key_canonical_season(""), None);
-}
-
 // ── max_mapped_canonical_season ───────────────────────────────────────
 
 #[test]
-fn max_mapped_season_takes_the_highest_canonical_season() {
-    let index = vec![
-        "series:tt2560140:1:1".to_string(),
-        "series:tt2560140:4:1".to_string(),
-        "series:tt2560140:3:1".to_string(),
-    ];
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt2560140"),
-        Some(4)
-    );
-}
-
-#[test]
-fn max_mapped_season_scope_prefix_cannot_nibble_a_longer_id() {
-    // Opaque ids may include colons: neither spelling belongs to the
-    // shorter title, even when the longer id starts at a `:` boundary.
-    let mut index = vec![
-        "series:tt25601409:1:1".to_string(),
-        "series:tt2560140:cut:9:1".to_string(),
-    ];
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt2560140"),
-        None
-    );
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt25601409"),
-        Some(1)
-    );
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt2560140:cut"),
-        Some(9)
-    );
-    index.push("series:tt2560140:4:1".to_string());
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt2560140"),
-        Some(4)
-    );
-}
-
-#[test]
-fn max_mapped_season_is_type_scoped() {
-    let index = vec![
-        "series:tt2560140:4:1".to_string(),
-        "movie:tt2560140:1:1".to_string(),
-    ];
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt2560140"),
-        Some(4)
-    );
-    assert_eq!(
-        max_mapped_canonical_season(&index, "movie", "tt2560140"),
-        Some(1)
-    );
-}
-
-#[test]
-fn max_mapped_season_canonicalizes_the_watch_progress_scope() {
-    // Watch-progress types funnel through the normalizers: anime is a
-    // series here, and an unknown type is no scope at all.
-    let index = vec!["series:tt2560140:4:1".to_string()];
-    assert_eq!(
-        max_mapped_canonical_season(&index, "anime", "tt2560140"),
-        Some(4)
-    );
-    assert_eq!(
-        max_mapped_canonical_season(&index, "short", "tt2560140"),
-        None
-    );
-}
-
-#[test]
-fn max_mapped_season_degrades_to_none_when_unmapped() {
-    // An unmapped title yields `None`, which the final-season fact caller
-    // turns into "not final": never a false positive.
-    let index = vec!["series:tt2560140:4:1".to_string()];
-    assert_eq!(
-        max_mapped_canonical_season(&index, "series", "tt9999999"),
-        None
-    );
-    assert_eq!(
-        max_mapped_canonical_season(&[], "series", "tt2560140"),
-        None
-    );
+fn max_mapped_season_reads_only_the_titles_own_scope() {
+    // (index keys, lookups of (type, id, expected))
+    for (index, lookups) in [
+        (
+            vec![
+                "series:tt2560140:1:1",
+                "series:tt2560140:4:1",
+                "series:tt2560140:3:1",
+            ],
+            vec![("series", "tt2560140", Some(4))],
+        ),
+        // Opaque ids may include colons: neither spelling belongs to the
+        // shorter title, even when the longer id starts at a `:` boundary.
+        (
+            vec!["series:tt25601409:1:1", "series:tt2560140:cut:9:1"],
+            vec![
+                ("series", "tt2560140", None),
+                ("series", "tt25601409", Some(1)),
+                ("series", "tt2560140:cut", Some(9)),
+            ],
+        ),
+        (
+            vec!["series:tt2560140:4:1", "movie:tt2560140:1:1"],
+            vec![
+                ("series", "tt2560140", Some(4)),
+                ("movie", "tt2560140", Some(1)),
+            ],
+        ),
+        // Watch-progress types funnel through the normalizers: anime is a
+        // series here, and an unknown type is no scope at all.
+        (
+            vec!["series:tt2560140:4:1"],
+            vec![
+                ("anime", "tt2560140", Some(4)),
+                ("short", "tt2560140", None),
+            ],
+        ),
+        // An unmapped title yields `None`, which the final-season fact caller
+        // turns into "not final": never a false positive.
+        (
+            vec!["series:tt2560140:4:1"],
+            vec![("series", "tt9999999", None)],
+        ),
+        (vec![], vec![("series", "tt2560140", None)]),
+    ] {
+        let index: Vec<String> = index.iter().map(|key| key.to_string()).collect();
+        for (media_type, id, expected) in lookups {
+            assert_eq!(
+                max_mapped_canonical_season(&index, media_type, id),
+                expected
+            );
+        }
+    }
 }
 
 #[test]
@@ -382,7 +335,8 @@ fn partial_mapping_eviction_cannot_promote_a_surviving_season_to_final() {
         json!(7),
         json!(EpisodeMappingDigestRecord {
             digest: 7,
-            seen_at: 0
+            seen_at: 0,
+            ..Default::default()
         }),
     ] {
         store.set(&digest_key, digest);
@@ -415,4 +369,109 @@ fn partial_mapping_eviction_cannot_promote_a_surviving_season_to_final() {
         "tt2560140",
         1
     ));
+}
+
+#[test]
+fn accepted_work_years_use_premiere_and_bounded_season_or_completed_work_ranges() {
+    let seasons = BTreeMap::from([(1, (2005, 2006)), (3, (2007, 2008)), (4, (2000, 2050))]);
+    assert_eq!(
+        accepted_work_years(Some(2005), Some(2008), &seasons, "series", Some(1)),
+        [2005, 2006]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), Some(2008), &seasons, "anime", Some(3)),
+        [2005, 2007, 2008]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), Some(2008), &seasons, "series", Some(4)),
+        [2005, 2006, 2007, 2008]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), None, &BTreeMap::new(), "series", Some(2)),
+        [2005]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), Some(2050), &BTreeMap::new(), "series", None),
+        [2005]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), Some(2004), &BTreeMap::new(), "series", None),
+        [2005]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), Some(2008), &seasons, "movie", Some(1)),
+        [2005]
+    );
+}
+
+#[test]
+fn work_year_metadata_parsing_and_season_ranges_share_the_persisted_rules() {
+    for (year, expected) in [
+        ("2005", (Some(2005), None)),
+        ("2005–2008", (Some(2005), Some(2008))),
+        ("2005-2008", (Some(2005), Some(2008))),
+        ("2005–", (Some(2005), None)),
+    ] {
+        assert_eq!(metadata_work_years(Some(year), None), expected, "{year}");
+    }
+    let mut episodes = [
+        test_episode("a", 1, 1),
+        test_episode("b", 1, 2),
+        test_episode("c", 3, 1),
+    ];
+    episodes[0].release_date = Some("2006-01-01".into());
+    episodes[1].release_date = Some("2005-02-01".into());
+    episodes[2].release_date = Some("2007-01-01".into());
+    let seasons = episode_season_years(&episodes);
+    assert_eq!(
+        accepted_work_years(Some(2005), None, &seasons, "series", Some(1)),
+        [2005, 2006]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), None, &seasons, "series", Some(3)),
+        [2005, 2007]
+    );
+    assert_eq!(
+        accepted_work_years(Some(2005), None, &seasons, "series", Some(2)),
+        [2005]
+    );
+    assert_eq!(
+        metadata_work_years(None, Some("2005-02-21")),
+        (Some(2005), None)
+    );
+}
+
+#[test]
+fn legacy_mapping_digests_remain_readable_but_need_a_refresh_for_canonical_years() {
+    let fixture = crate::test_helpers::test_store();
+    let store = &fixture.store;
+    let key = playback_episode_mapping_digest_item_key("series:tt0417299");
+    let next = EpisodeMappingDigestRecord {
+        digest: 42,
+        seen_at: 10,
+        premiere_year: Some(2005),
+        end_year: Some(2008),
+        season_years: BTreeMap::from([(1, (2005, 2006))]),
+    };
+    for legacy in [json!(42), json!({"digest": 42, "seen_at": 1})] {
+        assert_eq!(
+            read_episode_mapping_digest(legacy.clone()).unwrap().digest,
+            42
+        );
+        store.set(&key, legacy);
+        assert!(!stored_episode_mapping_digest_matches(store, &key, &next));
+    }
+    store.set(&key, json!(next));
+    assert!(stored_episode_mapping_digest_matches(store, &key, &next));
+    let stored = read_episode_mapping_digest(store.get(&key).unwrap()).unwrap();
+    assert_eq!(stored.premiere_year, Some(2005));
+    assert_eq!(stored.end_year, Some(2008));
+    assert_eq!(stored.season_years, next.season_years);
+    assert_eq!(stored.seen_at, 10);
+    let old = serde_json::to_value(EpisodeMappingDigestRecord::default()).unwrap();
+    assert!(
+        old.get("premiere_year").is_none()
+            && old.get("end_year").is_none()
+            && old.get("season_years").is_none()
+    );
 }

@@ -19,15 +19,9 @@ const FULLSCREEN_VERIFY_DELAY_MS = 50;
 const VIEWPORT_CURTAIN_FADE_IN_MS = 90;
 const VIEWPORT_SETTLE_TIMEOUT_MS = 100;
 
-function nextFrames(count: number): Promise<void> {
+function nextTwoFrames(): Promise<void> {
   return new Promise((resolve) => {
-    let remaining = count;
-    const nextFrame = () => {
-      remaining -= 1;
-      if (remaining > 0) requestAnimationFrame(nextFrame);
-      else resolve();
-    };
-    requestAnimationFrame(nextFrame);
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   });
 }
 
@@ -142,7 +136,7 @@ export function usePlayerViewportMode(
       await sleep(VIEWPORT_CURTAIN_FADE_IN_MS);
     }
     await withFinally(operation(), async () => {
-      if (animate) await withTimeout(nextFrames(2), VIEWPORT_SETTLE_TIMEOUT_MS, () => undefined);
+      if (animate) await withTimeout(nextTwoFrames(), VIEWPORT_SETTLE_TIMEOUT_MS, () => undefined);
       if (!viewportCleanupHandledRef.current) setViewportTransition(null);
     });
   };

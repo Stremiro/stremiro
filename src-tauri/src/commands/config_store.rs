@@ -16,15 +16,16 @@ pub use app_ui::{
 pub use profile::{ProfilePreferences, ProfilePreferencesPatch};
 pub use stream_selector::StreamSelectorPreferences;
 
+#[cfg(test)]
+pub(super) use addons::LEGACY_INSTALL_SCHEME;
 pub(crate) use addons::{
     addon_configs_generation, load_addon_configs, normalize_addon_url, opaque_addon_id,
     resolve_addon_configs, save_addon_configs_to_store,
 };
 pub(super) use addons::{
-    addon_display_url, is_pinned_default_addon_url, strip_ascii_prefix_ignore_case,
+    addon_display_url, is_default_cinemeta_url, is_pinned_default_addon_url,
+    strip_ascii_prefix_ignore_case,
 };
-#[cfg(test)]
-pub(super) use addons::{parse_stored_addon_configs, LEGACY_INSTALL_SCHEME};
 pub(crate) use app_ui::{
     apply_app_ui_preferences_patch, default_player_keybindings, load_app_ui_preferences,
     normalize_audio_delay, normalize_start_minimized, normalize_subtitle_delay,
@@ -42,25 +43,6 @@ pub(crate) use stream_selector::{
     save_stream_selector_preferences_to_store, StreamSelectorBatch, StreamSelectorPreferencesPatch,
     StreamSelectorQuality, StreamSelectorSort, StreamSelectorSource,
 };
-
-#[cfg(test)]
-pub(crate) use app_ui::sanitize_app_ui_preferences;
-#[cfg(test)]
-pub use app_ui::StartupPage;
-#[cfg(test)]
-use app_ui::{
-    normalize_last_location, normalize_stored_app_ui_preferences, StoredAppUiPreferences,
-};
-#[cfg(test)]
-use keybindings::{normalize_player_binding_key, resolve_player_keybindings};
-#[cfg(test)]
-use profile::{normalize_stored_profile_preferences, StoredProfilePreferences};
-#[cfg(test)]
-pub(crate) use profile::{sanitize_local_profile, sanitize_profile_preferences};
-#[cfg(test)]
-pub use profile::{AccentTargets, LocalProfile, ProfileViewMode};
-#[cfg(test)]
-pub(crate) use stream_selector::sanitize_stream_selector_preferences;
 
 pub(super) const ADDON_CONFIGS_KEY: &str = "addon_configs";
 /// First pinned default. Order matters: index = pinned registry slot.

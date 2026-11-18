@@ -695,28 +695,28 @@ fn history_title_count_collapses_episodes_but_keeps_media_types_distinct() {
 
 #[test]
 fn watched_marks_do_not_overwrite_another_canonical_episode_at_a_raw_key() {
+    let prior = WatchProgress {
+        type_: "series".to_string(),
+        season: Some(1),
+        episode: Some(4),
+        absolute_season: Some(1),
+        absolute_episode: Some(14),
+        ..sample_progress(1_000, 120.0)
+    };
+    let key = crate::commands::history_helpers::build_history_key(
+        &prior.type_,
+        &prior.id,
+        prior.season,
+        prior.episode,
+    );
+    assert_eq!(key, "series:tt1234567:1:4");
+    let item = crate::test_helpers::test_media_item("tt1234567", "series");
     for requested in [vec![4], vec![4, 15], vec![14, 4], vec![4, 14]] {
         let path = TempPath::file("remapped-key-collision");
         let mut store = ResumeStore::open(&path).expect("open db");
-        let prior = WatchProgress {
-            type_: "series".to_string(),
-            season: Some(1),
-            episode: Some(4),
-            absolute_season: Some(1),
-            absolute_episode: Some(14),
-            ..sample_progress(1_000, 120.0)
-        };
-        let key = crate::commands::history_helpers::build_history_key(
-            &prior.type_,
-            &prior.id,
-            prior.season,
-            prior.episode,
-        );
-        assert_eq!(key, "series:tt1234567:1:4");
         store
             .upsert_progress(&key, &prior)
             .expect("seed remapped episode");
-        let item = crate::test_helpers::test_media_item("tt1234567", "series");
         let episodes: Vec<_> = requested
             .iter()
             .map(|&episode| WatchedEpisode { season: 1, episode })
@@ -1006,19 +1006,17 @@ fn torn_init_without_version_stamp_heals_instead_of_bricking() {
 fn stale_progress_write_does_not_regress_resume() {
     let path = TempPath::file("recency");
     let mut store = ResumeStore::open(&path).expect("fresh db opens");
-    let wrote = store
-        .upsert_progress("movie:tt1234567", &sample_progress(2000, 900.0))
-        .expect("newer write ok");
     assert_eq!(
-        wrote,
+        store
+            .upsert_progress("movie:tt1234567", &sample_progress(2000, 900.0))
+            .expect("newer write ok"),
         ProgressWrite::Written { pruned: false },
         "newer row lands"
     );
-    let wrote = store
-        .upsert_progress("movie:tt1234567", &sample_progress(1000, 100.0))
-        .expect("stale write is a no-op, not an error");
     assert_eq!(
-        wrote,
+        store
+            .upsert_progress("movie:tt1234567", &sample_progress(1000, 100.0))
+            .expect("stale write is a no-op, not an error"),
         ProgressWrite::Skipped,
         "recency guard reports no row written"
     );
@@ -1247,6 +1245,70 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
 }
 
 #[test]
+fn history_merge_rejects_per_title_growth_without_losing_local_or_incoming_progress() {
+    let limit = u32::try_from(super::MAX_RESUME_ROWS_PER_TITLE).unwrap();
+    for is_backup_import in [false, true] {
+        for incoming_time in [10, 1_000] {
+            let path = TempPath::file("merge-title-cap");
+            let mut store = ResumeStore::open(&path).unwrap();
+            let episode_row = |episode, last_watched, position| {
+                (
+                    format!("series:tt1234567:1:{episode}"),
+                    WatchProgress {
+                        type_: "series".into(),
+                        season: Some(1),
+                        episode: Some(episode),
+                        ..sample_progress(last_watched, position)
+                    },
+                )
+            };
+            store
+                .merge_entries(
+                    (1..=limit)
+                        .map(|episode| episode_row(episode, 100, 600.0))
+                        .collect(),
+                    is_backup_import,
+                    Vec::new(),
+                )
+                .unwrap();
+            let before = serde_json::to_value(store.load_entries().unwrap()).unwrap();
+            let mut incoming: Vec<_> = (limit + 1..=limit * 2)
+                .map(|episode| episode_row(episode, incoming_time, 300.0))
+                .collect();
+            incoming.push(episode_row(1, 2_000, 900.0));
+            let error = store
+                .merge_entries(incoming, is_backup_import, Vec::new())
+                .expect_err("a bulk merge must not silently discard either device's progress");
+            assert!(matches!(
+                error,
+                super::HistoryMergeError::CapacityExceeded(_)
+            ));
+            assert_eq!(
+                serde_json::to_value(store.load_entries().unwrap()).unwrap(),
+                before,
+                "failed merge must roll back inserts and same-key updates"
+            );
+
+            let update = episode_row(1, 2_000, 900.0);
+            let (imported, pruned) = store
+                .merge_entries(vec![update.clone(), update], is_backup_import, Vec::new())
+                .expect("same-key updates fit at the per-title limit");
+            assert!(!imported.is_empty() && !pruned);
+            let (imported, pruned) = store
+                .merge_entries(
+                    vec![episode_row(limit + 1, 3_000, 3_600.0)],
+                    is_backup_import,
+                    Vec::new(),
+                )
+                .expect("completed watched marks do not consume the in-progress limit");
+            assert_eq!(imported.len(), 1);
+            assert!(!pruned);
+            assert_eq!(store.counts().unwrap().0, limit as usize + 1);
+        }
+    }
+}
+
+#[test]
 fn history_undo_rejects_growth_after_other_titles_fill_the_store() {
     let path = TempPath::file("undocap");
     let mut store = ResumeStore::open(&path).unwrap();
@@ -1333,8 +1395,10 @@ fn total_history_is_bounded_to_newest_entries() {
             .expect("newest write triggers prune"),
         ProgressWrite::Written { pruned: true }
     );
-    let count = store.counts().expect("count ok").0;
-    assert_eq!(count as i64, super::MAX_RESUME_TOTAL_ENTRIES);
+    assert_eq!(
+        store.counts().expect("count ok").0 as i64,
+        super::MAX_RESUME_TOTAL_ENTRIES
+    );
     assert!(store.get_entry("movie:tt9999999").expect("read").is_some());
     assert!(store.get_entry("movie:tt0000000").expect("read").is_none());
 }

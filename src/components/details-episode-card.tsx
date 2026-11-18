@@ -114,11 +114,29 @@ export function EpisodeCard({
 
           <span
             aria-hidden='true'
-            className='absolute inset-0 z-10 flex items-center justify-center rounded-lg bg-black/0 ring-1 ring-inset ring-white/[0.07] transition-[background-color,box-shadow] duration-200 ease-out group-hover/card:bg-black/45 group-hover/card:ring-white/15 motion-reduce:transition-none'
+            className='pointer-events-none absolute inset-0 z-10 rounded-lg bg-black/0 ring-1 ring-inset ring-white/[0.07] transition-[background-color,box-shadow] duration-200 ease-out group-hover/card:bg-black/25 group-hover/card:ring-white/15 group-has-[:focus-visible]/card:bg-black/25 motion-reduce:transition-none'
+          />
+          {/* One hover treatment: a compact play badge with a synopsis capped at 4 lines.
+              The badge and text fade through color/background-color only. Opacity, translate or
+              backdrop-blur on them would promote a compositing layer mid-fade: text loses subpixel
+              antialiasing (soft, then snaps sharp) and the blur samples a dark stand-in backdrop
+              (badge flashes dark, then snaps). The text-free gradient is safe to fade by opacity. */}
+          <span
+            aria-hidden='true'
+            className={cn(
+              'pointer-events-none absolute inset-x-0 bottom-0 z-[15] flex items-center gap-2.5 px-3 pb-2.5 pt-10',
+              remainingText && !isWatched && 'pr-20',
+            )}
           >
-            <span className='flex h-11 w-11 scale-90 items-center justify-center rounded-full bg-white/15 opacity-0 ring-1 ring-inset ring-white/20 backdrop-blur-md transition-[opacity,transform] duration-200 ease-out group-hover/card:scale-100 group-hover/card:opacity-100 motion-reduce:transition-none'>
-              <Play className='ml-0.5 h-4 w-4 fill-white text-white' />
+            <span className='absolute inset-0 bg-linear-to-t from-black/90 via-black/60 to-transparent opacity-0 transition-opacity duration-200 ease-out group-hover/card:opacity-100 group-has-[:focus-visible]/card:opacity-100 motion-reduce:transition-none' />
+            <span className='relative flex size-8 shrink-0 items-center justify-center rounded-full bg-white/0 text-transparent ring-1 ring-inset ring-white/0 transition-[color,background-color,box-shadow] duration-200 ease-out group-hover/card:bg-white/20 group-hover/card:text-white group-hover/card:ring-white/25 group-has-[:focus-visible]/card:bg-white/20 group-has-[:focus-visible]/card:text-white group-has-[:focus-visible]/card:ring-white/25 motion-reduce:transition-none'>
+              <Play className='ml-px size-3.5 fill-current' />
             </span>
+            {description && (
+              <span className='relative line-clamp-4 min-w-0 text-[12.5px] leading-[18px] text-transparent transition-colors duration-200 ease-out group-hover/card:text-zinc-100 group-has-[:focus-visible]/card:text-zinc-100 motion-reduce:transition-none'>
+                {description}
+              </span>
+            )}
           </span>
           {remainingText && !isWatched && (
             <span className='absolute bottom-2.5 right-2 z-20 rounded-md bg-black/70 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-white/90'>
@@ -130,7 +148,7 @@ export function EpisodeCard({
         <span className={cn('block px-0.5 pb-1 pt-2.5', menu.presence.mounted && 'opacity-0')}>
           <span
             title={title}
-            className='line-clamp-2 text-[15px] font-medium leading-5 text-zinc-100'
+            className='line-clamp-2 text-[15px] font-semibold leading-5 text-zinc-100'
           >
             {title}
           </span>
@@ -143,7 +161,7 @@ export function EpisodeCard({
                 <span aria-hidden='true'>·</span>
               </>
             )}
-            <span className='shrink-0 font-medium text-zinc-400'>Episode {episode.episode}</span>
+            <span className='shrink-0 font-semibold text-zinc-400'>Episode {episode.episode}</span>
             {releaseLabel && (
               <>
                 <span aria-hidden='true'>·</span>
@@ -152,10 +170,7 @@ export function EpisodeCard({
             )}
           </span>
           {description && (
-            <span
-              id={descriptionId}
-              className='mt-2 line-clamp-2 text-[13px] leading-5 text-zinc-400'
-            >
+            <span id={descriptionId} className='sr-only'>
               {description}
             </span>
           )}

@@ -1,5 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bookmark, Flame, Puzzle, Sparkles, WifiOff, X } from 'lucide-react';
+import {
+  Bookmark,
+  Clapperboard,
+  Flame,
+  type LucideIcon,
+  Puzzle,
+  Sparkles,
+  Tv,
+  WifiOff,
+  X,
+} from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { Hero } from '@/components/hero';
@@ -36,6 +46,19 @@ export const homeTrendingQueryOptions = {
   queryFn: () => api.querySearchCatalogPage({}).then((page) => page.items),
   staleTime: MEDIA_ROW_STALE_TIME_MS,
 };
+
+// Below-the-fold discovery rows; Trending already unions every type, so these go deeper per type.
+const discoveryRow = (mediaType: 'movie' | 'series', title: string, icon: LucideIcon) => ({
+  mediaType,
+  title,
+  icon,
+  queryKey: trendingRowQueryKey('catalog', mediaType),
+  queryFn: () => api.querySearchCatalogPage({ mediaType }).then((page) => page.items),
+});
+const DISCOVERY_ROWS = [
+  discoveryRow('movie', 'Popular Movies', Clapperboard),
+  discoveryRow('series', 'Popular Series', Tv),
+];
 
 const recentWatchSeedQueryOptions = {
   queryKey: RECENT_WATCH_SEED_QUERY_KEY,
@@ -169,6 +192,8 @@ function RecentWatchRecommendations() {
 
 export function Home() {
   const isOnline = useOnlineStatus();
+  // One gate for both discovery rows keeps their catalog requests off the launch path.
+  const { anchorRef: discoveryRef, nearViewport: discoveryNear } = useNearViewport();
 
   // Same key/queryFn/staleTime as the Trending rail — hero and row share one fetch.
   const { data: heroItems, isPending: isHeroPending } = useQuery({
@@ -223,6 +248,25 @@ export function Home() {
           queryFn={homeTrendingQueryOptions.queryFn}
           enabled={isOnline}
         />
+
+        <div ref={discoveryRef}>
+          {discoveryNear ? (
+            DISCOVERY_ROWS.map(({ mediaType, title, icon, queryKey, queryFn }) => (
+              <MediaRow
+                key={mediaType}
+                icon={icon}
+                title={title}
+                titleHref={`/search?type=${mediaType}`}
+                queryKey={queryKey}
+                queryFn={queryFn}
+                enabled={isOnline}
+                minItems={4}
+              />
+            ))
+          ) : (
+            <HomeRowPlaceholder />
+          )}
+        </div>
       </div>
     </div>
   );

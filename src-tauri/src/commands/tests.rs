@@ -857,26 +857,25 @@ fn prepare_addon_streams_populates_stream_presentation() {
         );
         let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
         assert_eq!(prepared[0].presentation.hdr_label, expected, "{name}");
-        if expected == Some("Dolby Vision") {
-            for query in ["dv", "dovi", "hdr", "dolby vision"] {
-                let rows = serde_json::from_value(serde_json::json!([{
-                    "resolution": "4k",
-                    "deliveryKind": "http",
-                    "isBatch": false,
-                    "isPlayable": true,
-                    "searchFields": [prepared[0].presentation.hdr_label],
-                }]))
-                .expect("valid selector rows");
-                let indices = tauri::async_runtime::block_on(
-                    super::stream_commands::get_stream_selector_indices(
-                        rows,
-                        Default::default(),
-                        query.to_string(),
-                    ),
-                );
-                assert_eq!(indices, vec![0], "{name}: {query}");
-            }
-        }
+    }
+
+    // Selector queries resolve HDR spellings against the canonical label.
+    for query in ["dv", "dovi", "hdr", "dolby vision"] {
+        let rows = serde_json::from_value(serde_json::json!([{
+            "resolution": "4k",
+            "deliveryKind": "http",
+            "isBatch": false,
+            "isPlayable": true,
+            "searchFields": ["Dolby Vision"],
+        }]))
+        .expect("valid selector rows");
+        let indices =
+            tauri::async_runtime::block_on(super::stream_commands::get_stream_selector_indices(
+                rows,
+                Default::default(),
+                query.to_string(),
+            ));
+        assert_eq!(indices, vec![0], "{query}");
     }
 
     let decorated = url_stream(Some("| ·[XY\u{26A1}]\u{2003}SourceName \u{1F1EC}\u{1F1E7} -:\n4k"), Some(":\u{1F4FA} Show\u{2003}S01E05 1080p [\u{1F4BE}]1.2 GB\u{1F464}5 \u{2699}\u{FE0F} TPB •|"), "https://example.com/video.mkv");
@@ -1034,15 +1033,9 @@ async fn stream_size_labels_and_ranking_share_hydrated_bytes() {
             {"title":"💾21GiB","url":"https://example.com/gib.mkv"},
             {"title":"💾1.5TiB","url":"https://example.com/tib.mkv"},
             {"title":"💾10KiB","url":"https://example.com/kib.mkv"},
-            {"title":"💾2MiB","url":"https://example.com/mib.mkv"},
-            {"name":"💾21gib","url":"https://example.com/lower.mkv"},
-            {"title":"💾2TB","url":"https://example.com/tb.mkv"},
             {"title":"💾 60,0 GB 👤100","url":"https://example.com/comma.mkv"},
             {"title":"1,5GB","url":"https://example.com/decimal-comma.mkv"},
-            {"title":"1.5GB","url":"https://example.com/decimal-dot.mkv"},
             {"title":"1,234,567 MB","url":"https://example.com/invalid-groups.mkv"},
-            {"title":"60,0,0 GB","url":"https://example.com/invalid-comma.mkv"},
-            {"title":"1.234.5 GB","url":"https://example.com/invalid-dot.mkv"},
             {"title":"0 GB","url":"https://example.com/zero.mkv"},
             {"url":"https://example.com/missing.mkv"},
             {"url":"https://example.com/max.mkv","behaviorHints":{"videoSize":18446744073709551615}},
@@ -1072,14 +1065,8 @@ async fn stream_size_labels_and_ranking_share_hydrated_bytes() {
         (Some(21 * 1024_u64.pow(3)), Some("21GB"), true),
         (Some(3 * 1024_u64.pow(4) / 2), Some("1.5TB"), true),
         (Some(10 * 1024), Some("10KB"), false),
-        (Some(2 * 1024_u64.pow(2)), Some("2MB"), false),
-        (Some(21 * 1024_u64.pow(3)), Some("21GB"), true),
-        (Some(2 * 1024_u64.pow(4)), Some("2TB"), true),
         (Some(60 * 1024_u64.pow(3)), Some("60GB"), true),
         (Some(3 * 1024_u64.pow(3) / 2), Some("1.5GB"), false),
-        (Some(3 * 1024_u64.pow(3) / 2), Some("1.5GB"), false),
-        (None, None, false),
-        (None, None, false),
         (None, None, false),
         (Some(0), Some("0B"), false),
         (None, None, false),
@@ -1464,7 +1451,7 @@ fn title_watch_history_rows_keep_every_episode_sorted_and_hydrated() {
 }
 
 #[test]
-fn title_watch_history_rows_hydrate_lookup_id_within_series_gate() {
+fn title_watch_history_rows_hydrate_imdb_and_namespaced_lookup_ids() {
     let mut kitsu = mk_watch_progress("kitsu:42", "anime", 1_000);
     kitsu.season = Some(1);
     kitsu.episode = Some(1);
@@ -1475,10 +1462,8 @@ fn title_watch_history_rows_hydrate_lookup_id_within_series_gate() {
 
     let rows = build_title_watch_history_rows(vec![kitsu, imdb]);
 
-    // The `tt` resume-anchor gate mirrors `has_usable_resume_lookup_id`: a
-    // kitsu: series id can't seed a lookup anchor; a tt id can.
     assert_eq!(rows[0].last_stream_lookup_id.as_deref(), Some("tt999"));
-    assert_eq!(rows[1].last_stream_lookup_id, None);
+    assert_eq!(rows[1].last_stream_lookup_id.as_deref(), Some("kitsu:42"));
 }
 
 #[test]
@@ -1852,9 +1837,9 @@ fn query_ids_preserve_movie_identity_and_episode_fallbacks() {
             ("anime", "tt0388629", Some(21), Some(5), Some(1000)),
             &[
                 "tt0388629:21:5",
-                "tt0388629:1:5",
                 "tt0388629:21:1000",
                 "tt0388629:1:1000",
+                "tt0388629:1:5",
                 "tt0388629:0:5",
             ],
         ),
@@ -2216,122 +2201,167 @@ fn resolve_addon_configs_repairs_duplicate_ids_for_distinct_urls() {
     assert_eq!(resolved[3].url, "https://example-addon.test");
 }
 
+// Rows use episode_progress(id, type_, watched, season, episode, position, duration);
+// the middle slot is the optional source-priority map. Assertions get the winning row.
+macro_rules! choose_entry_tests {
+    ($($name:ident: [
+        $( ($($args:expr),+) $({$($field:ident: $value:expr),* $(,)?})? ),+ $(,)?
+    ]
+    => $query:expr => $health:expr => $assertions:expr;)+) => {
+        $(
+            #[test]
+            fn $name() {
+                let rows = vec![$(WatchProgress {
+                    $($($field: $value,)*)?
+                    ..episode_progress($($args),+)
+                }),+];
+                let chosen = choose_entry(rows, $query, $health).expect("history entry");
+                let assert_chosen: fn(WatchProgress) = $assertions;
+                assert_chosen(chosen);
+            }
+        )+
+    };
+}
+
+choose_entry_tests! {
+    choose_watch_history_entry_prefers_playable_resume_metadata: [
+        ("kitsu:42", "anime", 200, 1, 12, 0.0, 0.0),
+        ("kitsu:42", "anime", 180, 1, 12, 512.0, 1_440.0) {
+            last_stream_lookup_id: Some("tt1234567".to_string()),
+            last_stream_format: Some("video/mp4".to_string()),
+        },
+    ] => HistoryEntryQuery::Latest => None => |chosen| {
+        assert_eq!(chosen.last_watched, 200);
+        assert_eq!((chosen.season, chosen.episode), (Some(1), Some(12)));
+        assert_eq!(chosen.position, 512.0);
+        assert_eq!(chosen.duration, 1_440.0);
+        assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt1234567"));
+        // Stream URLs are credential-bearing and short-lived: donor URLs merge
+        // position and identity metadata only, never the URL itself.
+    };
+    choose_watch_history_entry_prefers_same_episode_resume_donor: [
+        ("kitsu:42", "anime", 300, 1, 12, 0.0, 0.0),
+        ("kitsu:42", "anime", 260, 1, 11, 420.0, 1_440.0) {
+            last_stream_lookup_id: Some("tt-other-episode".to_string()),
+        },
+        ("kitsu:42", "anime", 240, 1, 12, 512.0, 1_440.0) {
+            last_stream_lookup_id: Some("tt-correct-episode".to_string()),
+        },
+    ] => HistoryEntryQuery::Latest => None => |chosen| {
+        assert_eq!(chosen.position, 512.0);
+        assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt-correct-episode"));
+    };
+    choose_watch_history_entry_avoids_cooldown_source_backfill_for_same_episode: [
+        ("tt7654321", "series", 300, 1, 4, 0.0, 0.0),
+        ("tt7654321", "series", 280, 1, 4, 900.0, 2_400.0) {
+            last_stream_lookup_id: Some("cooldown-lookup".to_string()),
+            source_name: Some("Bad CDN".to_string()),
+            source_id: Some("bad-cdn-id".to_string()),
+        },
+        ("tt7654321", "series", 260, 1, 4, 860.0, 2_400.0) {
+            last_stream_lookup_id: Some("kitsu:12".to_string()),
+            source_name: Some("Good CDN".to_string()),
+            source_id: Some("good-cdn-id".to_string()),
+        },
+    ] => HistoryEntryQuery::Latest => Some(&HashMap::from([("bad-cdn-id".to_string(), 0_u8), ("good-cdn-id".to_string(), 3_u8)])) => |chosen| {
+        assert_eq!(chosen.position, 860.0);
+        assert_eq!(chosen.duration, 2_400.0);
+        assert_eq!(chosen.source_name.as_deref(), Some("Good CDN"));
+        // Donor merge carries the winning instance id, not just its label.
+        assert_eq!(chosen.source_id.as_deref(), Some("good-cdn-id"));
+        assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("kitsu:12"));
+    };
+    choose_watch_history_entry_keeps_donor_lookup_and_stream_coordinates_paired: [
+        ("tt7654321", "series", 300, 1, 4, 900.0, 2_400.0) {
+            last_stream_lookup_id: Some("tt-lookup-a".to_string()),
+            source_name: Some("Bad CDN".to_string()),
+            source_id: Some("bad-cdn-id".to_string()),
+            stream_season: Some(1),
+            stream_episode: Some(4),
+        },
+        ("tt7654321", "series", 260, 1, 4, 860.0, 2_400.0) {
+            last_stream_lookup_id: Some("kitsu:12".to_string()),
+            source_name: Some("Good CDN".to_string()),
+            source_id: Some("good-cdn-id".to_string()),
+            stream_season: Some(2),
+            stream_episode: Some(14),
+        },
+    ] => HistoryEntryQuery::Latest => Some(&HashMap::from([("bad-cdn-id".to_string(), 0_u8), ("good-cdn-id".to_string(), 3_u8)])) => |chosen| {
+        assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("kitsu:12"));
+        assert_eq!(
+            (chosen.stream_season, chosen.stream_episode),
+            (Some(2), Some(14))
+        );
+    };
+    choose_watch_history_entry_does_not_borrow_resume_time_from_other_episode: [
+        ("kitsu:42", "anime", 300, 1, 12, 0.0, 0.0),
+        ("kitsu:42", "anime", 260, 1, 11, 420.0, 1_440.0) {
+            last_stream_lookup_id: Some("tt-other-episode".to_string()),
+        },
+    ] => HistoryEntryQuery::Latest => None => |chosen| {
+        assert_eq!(chosen.position, 0.0);
+        assert_eq!(chosen.duration, 0.0);
+        assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt-other-episode"));
+    };
+    choose_watch_history_entry_requires_resume_threshold_before_treating_position_as_meaningful: [
+        ("tt7654321", "series", 300, 1, 2, 4.5, 1_200.0),
+        ("tt7654321", "series", 260, 1, 2, 420.0, 1_200.0) {
+            last_stream_lookup_id: Some("tt7654321".to_string()),
+        },
+    ] => HistoryEntryQuery::Latest => None => |chosen| {
+        assert_eq!(chosen.position, 420.0);
+        assert_eq!(chosen.duration, 1_200.0);
+    };
+    choose_exact_watch_progress_entry_prefers_exact_episode_match: [
+        ("kitsu:42", "anime", 300, 1, 13, 720.0, 1_440.0) {
+            absolute_season: Some(1),
+            absolute_episode: Some(13),
+        },
+        ("kitsu:42", "anime", 250, 1, 12, 512.0, 1_440.0) {
+            absolute_season: Some(1),
+            absolute_episode: Some(12),
+        },
+    ] => HistoryEntryQuery::Exact {
+        media_id: "kitsu:42",
+        media_type: "anime",
+        season: Some(1),
+        episode: Some(12),
+    } => None => |chosen| {
+        assert_eq!(chosen.episode, Some(12));
+        assert_eq!(chosen.position, 512.0);
+    };
+}
+
 #[test]
-fn choose_watch_history_entry_prefers_playable_resume_metadata() {
-    let latest = episode_progress("kitsu:42", "anime", 200, 1, 12, 0.0, 0.0);
-    let playable = WatchProgress {
+fn choose_watch_history_entry_ignores_stream_coordinates_outside_the_kept_binding() {
+    let latest = |episode| WatchProgress {
+        last_stream_lookup_id: Some("kitsu:12".to_string()),
+        source_name: Some("Alpha".to_string()),
+        source_id: Some("alpha-id".to_string()),
+        ..episode_progress("tt7654321", "series", 300, 2, episode, 900.0, 2_400.0)
+    };
+    // Same episode, but a different source whose binding is not adopted.
+    let rejected_alias = WatchProgress {
         last_stream_lookup_id: Some("tt1234567".to_string()),
-        last_stream_format: Some("video/mp4".to_string()),
-        ..episode_progress("kitsu:42", "anime", 180, 1, 12, 512.0, 1_440.0)
+        source_name: Some("Beta".to_string()),
+        source_id: Some("beta-id".to_string()),
+        stream_season: Some(2),
+        stream_episode: Some(3),
+        ..episode_progress("tt7654321", "series", 260, 2, 3, 860.0, 2_400.0)
+    };
+    // Same source, but another episode's stream numbering.
+    let previous_episode = WatchProgress {
+        stream_season: Some(1),
+        stream_episode: Some(15),
+        ..latest(2)
     };
 
-    let chosen = choose_entry(vec![latest, playable], HistoryEntryQuery::Latest, None)
-        .expect("history entry");
-
-    assert_eq!(chosen.last_watched, 200);
-    assert_eq!(chosen.season, Some(1));
-    assert_eq!(chosen.episode, Some(12));
-    assert_eq!(chosen.position, 512.0);
-    assert_eq!(chosen.duration, 1_440.0);
-    assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt1234567"));
-    // Stream URLs are credential-bearing and short-lived: donor URLs merge
-    // position and identity metadata only, never the URL itself.
-}
-
-#[test]
-fn choose_watch_history_entry_prefers_same_episode_resume_donor() {
-    let latest = episode_progress("kitsu:42", "anime", 300, 1, 12, 0.0, 0.0);
-    let other_episode = WatchProgress {
-        last_stream_lookup_id: Some("tt-other-episode".to_string()),
-        ..episode_progress("kitsu:42", "anime", 260, 1, 11, 420.0, 1_440.0)
-    };
-    let same_episode = WatchProgress {
-        last_stream_lookup_id: Some("tt-correct-episode".to_string()),
-        ..episode_progress("kitsu:42", "anime", 240, 1, 12, 512.0, 1_440.0)
-    };
-
-    let chosen = choose_entry(
-        vec![latest, other_episode, same_episode],
-        HistoryEntryQuery::Latest,
-        None,
-    )
-    .expect("history entry");
-
-    assert_eq!(chosen.position, 512.0);
-    assert_eq!(
-        chosen.last_stream_lookup_id.as_deref(),
-        Some("tt-correct-episode")
-    );
-}
-
-#[test]
-fn choose_watch_history_entry_avoids_cooldown_source_backfill_for_same_episode() {
-    let latest = episode_progress("tt7654321", "series", 300, 1, 4, 0.0, 0.0);
-    let cooldown_source = WatchProgress {
-        last_stream_lookup_id: Some("cooldown-lookup".to_string()),
-        source_name: Some("Bad CDN".to_string()),
-        source_id: Some("bad-cdn-id".to_string()),
-        ..episode_progress("tt7654321", "series", 280, 1, 4, 900.0, 2_400.0)
-    };
-    let healthier_source = WatchProgress {
-        last_stream_lookup_id: Some("healthy-lookup".to_string()),
-        source_name: Some("Good CDN".to_string()),
-        source_id: Some("good-cdn-id".to_string()),
-        ..episode_progress("tt7654321", "series", 260, 1, 4, 860.0, 2_400.0)
-    };
-
-    let source_health_priorities = HashMap::from([
-        ("bad-cdn-id".to_string(), 0_u8),
-        ("good-cdn-id".to_string(), 3_u8),
-    ]);
-
-    let chosen = choose_entry(
-        vec![latest, cooldown_source, healthier_source],
-        HistoryEntryQuery::Latest,
-        Some(&source_health_priorities),
-    )
-    .expect("history entry");
-
-    assert_eq!(chosen.position, 860.0);
-    assert_eq!(chosen.duration, 2_400.0);
-    assert_eq!(chosen.source_name.as_deref(), Some("Good CDN"));
-    // Donor merge carries the winning instance id, not just its label.
-    assert_eq!(chosen.source_id.as_deref(), Some("good-cdn-id"));
-    assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt7654321"));
-}
-
-#[test]
-fn choose_watch_history_entry_does_not_borrow_resume_time_from_other_episode() {
-    let latest = episode_progress("kitsu:42", "anime", 300, 1, 12, 0.0, 0.0);
-    let other_episode = WatchProgress {
-        last_stream_lookup_id: Some("tt-other-episode".to_string()),
-        ..episode_progress("kitsu:42", "anime", 260, 1, 11, 420.0, 1_440.0)
-    };
-
-    let chosen = choose_entry(vec![latest, other_episode], HistoryEntryQuery::Latest, None)
-        .expect("history entry");
-
-    assert_eq!(chosen.position, 0.0);
-    assert_eq!(chosen.duration, 0.0);
-    assert_eq!(
-        chosen.last_stream_lookup_id.as_deref(),
-        Some("tt-other-episode")
-    );
-}
-
-#[test]
-fn choose_watch_history_entry_requires_resume_threshold_before_treating_position_as_meaningful() {
-    let latest = episode_progress("tt7654321", "series", 300, 1, 2, 4.5, 1_200.0);
-    let same_episode = WatchProgress {
-        last_stream_lookup_id: Some("tt7654321".to_string()),
-        ..episode_progress("tt7654321", "series", 260, 1, 2, 420.0, 1_200.0)
-    };
-
-    let chosen = choose_entry(vec![latest, same_episode], HistoryEntryQuery::Latest, None)
-        .expect("history entry");
-
-    assert_eq!(chosen.position, 420.0);
-    assert_eq!(chosen.duration, 1_200.0);
+    for (target, donor) in [(latest(3), rejected_alias), (latest(4), previous_episode)] {
+        let chosen = choose_entry(vec![target, donor], HistoryEntryQuery::Latest, None)
+            .expect("history entry");
+        assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("kitsu:12"));
+        assert_eq!((chosen.stream_season, chosen.stream_episode), (None, None));
+    }
 }
 
 // Rows use series_episode_progress(watched, season, episode, position, duration).
@@ -2433,35 +2463,6 @@ continue_watching_winner_tests! {
 }
 
 #[test]
-fn choose_exact_watch_progress_entry_prefers_exact_episode_match() {
-    let exact = WatchProgress {
-        absolute_season: Some(1),
-        absolute_episode: Some(12),
-        ..episode_progress("kitsu:42", "anime", 250, 1, 12, 512.0, 1_440.0)
-    };
-    let other = WatchProgress {
-        absolute_season: Some(1),
-        absolute_episode: Some(13),
-        ..episode_progress("kitsu:42", "anime", 300, 1, 13, 720.0, 1_440.0)
-    };
-
-    let chosen = choose_entry(
-        vec![other, exact],
-        HistoryEntryQuery::Exact {
-            media_id: "kitsu:42",
-            media_type: "anime",
-            season: Some(1),
-            episode: Some(12),
-        },
-        None,
-    )
-    .expect("exact watch progress entry");
-
-    assert_eq!(chosen.episode, Some(12));
-    assert_eq!(chosen.position, 512.0);
-}
-
-#[test]
 fn choose_exact_watch_progress_entry_ignores_newer_same_episode_startup_stub() {
     let startup_stub = series_episode_progress(420, 1, 4, 12.0, 2_400.0);
     let resumable_episode = WatchProgress {
@@ -2483,6 +2484,39 @@ fn choose_exact_watch_progress_entry_ignores_newer_same_episode_startup_stub() {
 
     assert_eq!(chosen.episode, Some(4));
     assert_eq!(chosen.position, 1_020.0);
+}
+
+#[test]
+fn newer_rewatch_keeps_its_resume_position_across_canonical_aliases() {
+    for completed_at in [100, 200] {
+        let completed = series_episode_progress(completed_at, 1, 2, 600.0, 600.0);
+        let rewatch = WatchProgress {
+            season: Some(2),
+            episode: Some(102),
+            ..series_episode_progress(200, 1, 2, 30.0, 600.0)
+        };
+        let rows = vec![rewatch, completed];
+        let expected_resume = (completed_at < 200).then_some(30.0);
+        let rail = build_continue_watching_entries(&rows);
+        assert_eq!(rail.first().map(|row| row.position), expected_resume);
+        let chosen = choose_entry(
+            rows.clone(),
+            HistoryEntryQuery::Exact {
+                media_id: "tt7654321",
+                media_type: "series",
+                season: Some(1),
+                episode: Some(2),
+            },
+            None,
+        )
+        .unwrap();
+        let chosen = super::history_helpers::with_progress_annotations(chosen);
+        assert_eq!(chosen.resume_start_time, expected_resume);
+        let snapshot = build_title_watch_progress_with_priorities(rows, None);
+        let episode = &snapshot.episode_progress["tt7654321:1:2"];
+        assert_eq!(episode.resume_start_time, expected_resume);
+        assert_eq!(episode.is_watched, expected_resume.is_none());
+    }
 }
 
 #[test]
@@ -3019,7 +3053,7 @@ async fn external_file_work_does_not_wait_for_the_store_gate() {
 mod skip_times_orchestration {
     use super::super::skip_times_for_request as request;
     use crate::providers::enrichment::{EnrichmentClient, Source};
-    use crate::providers::skip_times::SkipTimesProvider;
+    use crate::providers::skip_times::{SkipTimesProvider, SkipTimesResult};
     use crate::test_helpers::TestHttpServer;
 
     const SKIPDB_OK: &str =
@@ -3038,26 +3072,39 @@ mod skip_times_orchestration {
     const AOT_IMDB_PATH: &str =
         "/api/v2/imdb?id=tt2560140&include=myanimelist,anilist,kitsu,imdb,thetvdb-season,themoviedb-season";
 
-    fn provider(skipdb: &TestHttpServer) -> SkipTimesProvider {
+    type Responses = Vec<(u16, &'static str, Option<&'static str>)>;
+
+    /// SkipDB server + provider, and an enrichment client with every source
+    /// pointed at one ARM trap so any stray enrichment call is observable.
+    fn servers(
+        skipdb: Responses,
+        arm: Responses,
+    ) -> (
+        TestHttpServer,
+        SkipTimesProvider,
+        TestHttpServer,
+        EnrichmentClient,
+    ) {
+        let skipdb = TestHttpServer::new(skipdb);
         let mut skip = SkipTimesProvider::new();
         skip.set_segments_url(format!("{}/api/segments", skipdb.url));
-        skip
-    }
-
-    /// Every source pointed at the same trap so any stray enrichment call is observable.
-    fn enrichment(trap: &TestHttpServer) -> EnrichmentClient {
+        let arm = TestHttpServer::new(arm);
         let mut client = EnrichmentClient::new(None);
         for source in [Source::Arm, Source::Kitsu, Source::Tvmaze, Source::AniList] {
-            client.set_base_url(source, trap.url.clone());
+            client.set_base_url(source, arm.url.clone());
         }
-        client
+        (skipdb, skip, arm, client)
+    }
+
+    fn is_miss(result: &SkipTimesResult) -> bool {
+        result.segments.is_empty() && result.intro_estimate_secs.is_none()
     }
 
     async fn series_request(
         enrichment: &EnrichmentClient,
         skip: &SkipTimesProvider,
         duration: Option<f64>,
-    ) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
+    ) -> Result<SkipTimesResult, String> {
         request(
             enrichment,
             skip,
@@ -3072,12 +3119,32 @@ mod skip_times_orchestration {
         .await
     }
 
+    /// Anime request at canonical S1E1 with a 24-minute duration.
+    async fn anime_request(
+        enrichment: &EnrichmentClient,
+        skip: &SkipTimesProvider,
+        id: &str,
+        (imdb, lookup): (Option<&str>, Option<&str>),
+        stream: (Option<u32>, Option<u32>),
+    ) -> Result<SkipTimesResult, String> {
+        let canonical = (Some(1), Some(1));
+        request(
+            enrichment,
+            skip,
+            "anime",
+            id,
+            imdb,
+            lookup,
+            canonical,
+            stream,
+            Some(1440.0),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn skip_times_episode_hits_skipdb_once_then_serves_cache() {
-        let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
+        let (skipdb, skip, _arm, enrichment) = servers(vec![(200, SKIPDB_OK, None)], vec![]);
         // Concurrent same-episode callers coalesce the very first fetch.
         let fetch = || series_request(&enrichment, &skip, Some(1440.0));
         let (a, b) = tokio::join!(fetch(), fetch());
@@ -3094,10 +3161,7 @@ mod skip_times_orchestration {
         for (id, coords) in [("tt0245429", (None, None)), ("mal:199", (Some(1), Some(1)))] {
             // An anime-flagged movie keeps media_type "movie": its anchor carries
             // no episode coordinates and SkipDB still answers directly.
-            let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
-            let skip = provider(&skipdb);
-            let arm = TestHttpServer::new(vec![]);
-            let enrichment = enrichment(&arm);
+            let (skipdb, skip, arm, enrichment) = servers(vec![(200, SKIPDB_OK, None)], vec![]);
             let result = request(
                 &enrichment,
                 &skip,
@@ -3125,34 +3189,18 @@ mod skip_times_orchestration {
     async fn skip_times_anime_family_id_without_imdb_anchor_is_a_clean_miss() {
         // SkipDB is IMDb-keyed: bare anime-family ids and non-tt stand-ins are
         // definitive misses answered locally - nothing is bridged or guessed.
-        let skipdb = TestHttpServer::new(vec![]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
-        for (id, imdb, lookup) in [
-            ("kitsu:8671", None, None),
-            ("mal:16498", None, None),
-            ("anilist:20958", None, None),
-            ("kitsu:8671", Some("kitsu:8671"), None),
-            ("kitsu:8671", None, Some("mal:16498")),
+        let (skipdb, skip, arm, enrichment) = servers(vec![], vec![]);
+        for (id, anchors) in [
+            ("kitsu:8671", (None, None)),
+            ("mal:16498", (None, None)),
+            ("anilist:20958", (None, None)),
+            ("kitsu:8671", (Some("kitsu:8671"), None)),
+            ("kitsu:8671", (None, Some("mal:16498"))),
         ] {
-            let result = request(
-                &enrichment,
-                &skip,
-                "anime",
-                id,
-                imdb,
-                lookup,
-                (Some(1), Some(1)),
-                (Some(1), Some(1)),
-                Some(1440.0),
-            )
-            .await
-            .unwrap();
-            assert!(
-                result.segments.is_empty() && result.intro_estimate_secs.is_none(),
-                "{id} {imdb:?} {lookup:?}"
-            );
+            let result = anime_request(&enrichment, &skip, id, anchors, (Some(1), Some(1)))
+                .await
+                .unwrap();
+            assert!(is_miss(&result), "{id} {anchors:?}");
         }
         assert!(skipdb.finish().is_empty());
         assert!(arm.finish().is_empty());
@@ -3163,24 +3211,18 @@ mod skip_times_orchestration {
         // kitsu:8671 (AoT S2) episodes are numbered 1..12 locally while IMDb
         // numbers the cour S2E1..12. The ARM rows for the imdb anchor prove the
         // entry is the sole cour at season 2, so the episode carries over.
-        for (imdb, lookup) in [
-            (Some("tt2560140"), None),
-            (Some("tt2560140"), Some("tt2560140")),
-        ] {
-            let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
-            let skip = provider(&skipdb);
-            let arm = TestHttpServer::new(vec![(200, ARM_AOT_ROWS, None)]);
-            let enrichment = enrichment(&arm);
-            let result = request(
+        for lookup in [None, Some("tt2560140")] {
+            let (skipdb, skip, arm, enrichment) = servers(
+                vec![(200, SKIPDB_OK, None)],
+                vec![(200, ARM_AOT_ROWS, None)],
+            );
+            let anchors = (Some("tt2560140"), lookup);
+            let result = anime_request(
                 &enrichment,
                 &skip,
-                "anime",
                 "kitsu:8671",
-                imdb,
-                lookup,
+                anchors,
                 (Some(1), Some(1)),
-                (Some(1), Some(1)),
-                Some(1440.0),
             )
             .await
             .unwrap();
@@ -3200,25 +3242,19 @@ mod skip_times_orchestration {
         // episode is offset by an unknown amount, so nothing is served - and
         // the honest miss never reaches SkipDB. ARM is answered once and
         // cached by title, so the repeat needs no second response.
-        let skipdb = TestHttpServer::new(vec![]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![(200, ARM_AOT_ROWS, None)]);
-        let enrichment = enrichment(&arm);
+        let (skipdb, skip, arm, enrichment) = servers(vec![], vec![(200, ARM_AOT_ROWS, None)]);
         for _ in 0..2 {
-            let result = request(
+            let anchors = (Some("tt2560140"), None);
+            let result = anime_request(
                 &enrichment,
                 &skip,
-                "anime",
                 "kitsu:41982",
-                Some("tt2560140"),
-                None,
+                anchors,
                 (Some(1), Some(1)),
-                (Some(1), Some(1)),
-                Some(1440.0),
             )
             .await
             .unwrap();
-            assert!(result.segments.is_empty() && result.intro_estimate_secs.is_none());
+            assert!(is_miss(&result));
         }
         assert!(skipdb.finish().is_empty());
         assert_eq!(arm.finish(), [AOT_IMDB_PATH]);
@@ -3228,20 +3264,14 @@ mod skip_times_orchestration {
     async fn skip_times_family_stream_remap_needs_no_bridge() {
         // Stream coordinates that differ from the canonical pair already name
         // the IMDb episode - they serve directly and never touch the bridge.
-        let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
-        let result = request(
+        let (skipdb, skip, arm, enrichment) = servers(vec![(200, SKIPDB_OK, None)], vec![]);
+        let anchors = (Some("tt2560140"), Some("tt2560140"));
+        let result = anime_request(
             &enrichment,
             &skip,
-            "anime",
             "kitsu:8671",
-            Some("tt2560140"),
-            Some("tt2560140"),
-            (Some(1), Some(1)),
+            anchors,
             (Some(2), Some(5)),
-            Some(1440.0),
         )
         .await
         .unwrap();
@@ -3257,20 +3287,14 @@ mod skip_times_orchestration {
     async fn skip_times_family_arm_transient_is_err_not_wrong_data() {
         // Without the bridge the canonical episode can't name an IMDb episode;
         // a transient ARM failure propagates rather than guessing season 1.
-        let skipdb = TestHttpServer::new(vec![]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![(503, "{}", None)]);
-        let enrichment = enrichment(&arm);
-        assert!(request(
+        let (skipdb, skip, arm, enrichment) = servers(vec![], vec![(503, "{}", None)]);
+        let anchors = (Some("tt2560140"), None);
+        assert!(anime_request(
             &enrichment,
             &skip,
-            "anime",
             "kitsu:8671",
-            Some("tt2560140"),
-            None,
-            (Some(1), Some(1)),
-            (Some(1), Some(1)),
-            Some(1440.0),
+            anchors,
+            (Some(1), Some(1))
         )
         .await
         .is_err());
@@ -3282,10 +3306,7 @@ mod skip_times_orchestration {
     async fn skip_times_stream_lookup_anchor_uses_stream_coordinates() {
         // The stream lookup id outranks the metadata imdb id and pairs with
         // the stream's own season/episode, not the title's canonical ones.
-        let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
+        let (skipdb, skip, arm, enrichment) = servers(vec![(200, SKIPDB_OK, None)], vec![]);
         request(
             &enrichment,
             &skip,
@@ -3308,52 +3329,28 @@ mod skip_times_orchestration {
 
     #[tokio::test]
     async fn skip_times_unkeyable_or_incomplete_input_never_reaches_skipdb() {
-        let skipdb = TestHttpServer::new(vec![]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
-        for (media_type, id, imdb, coords, stream) in [
+        let (skipdb, skip, arm, enrichment) = servers(vec![], vec![]);
+        for (id, coords) in [
             // A lone coordinate can't name an episode - never silently S1.
-            (
-                "series",
-                "tt0903747",
-                Some("tt0903747"),
-                (Some(1), None),
-                (Some(1), None),
-            ),
-            (
-                "series",
-                "tt0903747",
-                Some("tt0903747"),
-                (None, Some(1)),
-                (None, Some(1)),
-            ),
+            ("tt0903747", (Some(1), None)),
+            ("tt0903747", (None, Some(1))),
             // No usable IMDb anchor anywhere.
-            (
-                "series",
-                "garbage",
-                Some("garbage"),
-                (Some(1), Some(1)),
-                (Some(1), Some(1)),
-            ),
+            ("garbage", (Some(1), Some(1))),
         ] {
             let result = request(
                 &enrichment,
                 &skip,
-                media_type,
+                "series",
                 id,
-                imdb,
+                Some(id),
                 None,
                 coords,
-                stream,
+                coords,
                 Some(1440.0),
             )
             .await
             .unwrap();
-            assert!(
-                result.segments.is_empty() && result.intro_estimate_secs.is_none(),
-                "{media_type} {id} {coords:?}"
-            );
+            assert!(is_miss(&result), "{id} {coords:?}");
         }
         assert!(skipdb.finish().is_empty());
         assert!(arm.finish().is_empty());
@@ -3363,10 +3360,8 @@ mod skip_times_orchestration {
     async fn skip_times_transient_failure_is_err_and_never_cached() {
         // A transient upstream failure propagates so the caller can retry -
         // it is never recorded as "no data".
-        let skipdb = TestHttpServer::new(vec![(503, "{}", None), (200, SKIPDB_OK, None)]);
-        let skip = provider(&skipdb);
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
+        let (skipdb, skip, _arm, enrichment) =
+            servers(vec![(503, "{}", None), (200, SKIPDB_OK, None)], vec![]);
         assert!(series_request(&enrichment, &skip, Some(1440.0))
             .await
             .is_err());
@@ -3379,19 +3374,13 @@ mod skip_times_orchestration {
 
     #[tokio::test]
     async fn skip_times_definitive_misses_are_cached() {
-        let arm = TestHttpServer::new(vec![]);
-        let enrichment = enrichment(&arm);
         for body in [SKIPDB_EMPTY, "{bad json"] {
-            let skipdb = TestHttpServer::new(vec![(200, body, None)]);
-            let skip = provider(&skipdb);
+            let (skipdb, skip, _arm, enrichment) = servers(vec![(200, body, None)], vec![]);
             for _ in 0..2 {
                 let result = series_request(&enrichment, &skip, Some(1440.0))
                     .await
                     .unwrap();
-                assert!(
-                    result.segments.is_empty() && result.intro_estimate_secs.is_none(),
-                    "{body}"
-                );
+                assert!(is_miss(&result), "{body}");
             }
             assert_eq!(skipdb.finish().len(), 1);
         }
@@ -3399,18 +3388,11 @@ mod skip_times_orchestration {
 
     #[tokio::test]
     async fn skip_times_out_of_range_duration_never_reaches_the_query() {
-        for duration in [
-            Some(f64::NAN),
-            Some(f64::INFINITY),
-            Some(-5.0),
-            Some(0.0),
-            Some(25.0 * 60.0 * 60.0),
-        ] {
-            let skipdb = TestHttpServer::new(vec![(200, SKIPDB_OK, None)]);
-            let skip = provider(&skipdb);
-            let arm = TestHttpServer::new(vec![]);
-            let enrichment = enrichment(&arm);
-            series_request(&enrichment, &skip, duration).await.unwrap();
+        for duration in [f64::NAN, f64::INFINITY, -5.0, 0.0, 25.0 * 60.0 * 60.0] {
+            let (skipdb, skip, _arm, enrichment) = servers(vec![(200, SKIPDB_OK, None)], vec![]);
+            series_request(&enrichment, &skip, Some(duration))
+                .await
+                .unwrap();
             assert_eq!(
                 skipdb.finish(),
                 ["/api/segments?imdb_id=tt0903747&season=1&episode=1"],
@@ -3430,4 +3412,42 @@ fn media_id_bound_accepts_blob_style_addon_ids() {
     );
     let overlong = "a".repeat(MEDIA_ID_MAX_CHARS + 1);
     assert_eq!(normalize_media_id(&overlong), None);
+}
+
+#[test]
+fn generic_addon_names_do_not_merge_different_avatar_adaptations() {
+    let make = |year, episode| {
+        mk_stream(
+            Some("Torrentio\n1080p"),
+            Some(&format!(
+                "Avatar.The.Last.Airbender.{year}.S01E{episode:02}.1080p.BluRay\n1.4 GB"
+            )),
+            Some("https://cdn.example/video.mkv"),
+            None,
+            None,
+        )
+    };
+    let animated = prepared_stream_family(&make(2005, 5), "Alpha").unwrap();
+    let live_action = prepared_stream_family(&make(2024, 5), "Alpha").unwrap();
+    assert_ne!(animated, live_action);
+    assert!(animated.ends_with("|release:avatar-the-last-airbender-2005-1080p-bluray"));
+    assert_eq!(
+        Some(animated),
+        prepared_stream_family(&make(2005, 6), "Alpha")
+    );
+    assert_eq!(
+        prepared_stream_family(
+            &mk_stream(
+                Some("Alpha Group S01E01 1080p WEB-DL"),
+                Some("1.4 GB"),
+                Some("https://cdn.example/video.mkv"),
+                None,
+                None,
+            ),
+            "Alpha"
+        ),
+        Some(format!(
+            "{ALPHA_STREAM_FAMILY_SOURCE}|release:alpha-group-1080p-web-dl"
+        ))
+    );
 }

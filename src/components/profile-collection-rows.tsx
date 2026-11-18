@@ -119,19 +119,19 @@ function LibraryListRow({
           <p
             dir='auto'
             title={item.title}
-            className='text-[13px] font-medium text-zinc-100 truncate group-hover:text-white transition-colors'
+            className='text-[14px] font-medium text-zinc-100 truncate group-hover:text-white transition-colors'
           >
             {item.title}
           </p>
           <div className='flex items-center gap-1.5 mt-1 flex-wrap'>
             {item.displayYear && (
-              <span className='text-[11px] text-zinc-500'>{item.displayYear}</span>
+              <span className='text-[12px] text-zinc-500'>{item.displayYear}</span>
             )}
-            <span className='text-[11px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
+            <span className='text-[12px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
             {status && (
               <span className='flex items-center gap-1'>
                 <WatchStatusIcon status={status} className='size-3' />
-                <span className={cn('text-[11px] font-medium', WATCH_STATUS_COLORS[status].text)}>
+                <span className={cn('text-[12px] font-medium', WATCH_STATUS_COLORS[status].text)}>
                   {WATCH_STATUS_LABELS[status]}
                 </span>
               </span>
@@ -143,6 +143,18 @@ function LibraryListRow({
       {!selectionMode && <CollectionRowActions item={item} />}
     </div>
   );
+}
+
+const DAY_MS = 86_400_000;
+
+/** Recency bucket for the list's section headings; rows without a timestamp join the previous group. */
+function historyGroupLabel(lastWatched: number, startOfToday: number): string | null {
+  if (lastWatched <= 0) return null;
+  if (lastWatched >= startOfToday) return 'Today';
+  if (lastWatched >= startOfToday - DAY_MS) return 'Yesterday';
+  if (lastWatched >= startOfToday - 6 * DAY_MS) return 'Last 7 days';
+  if (lastWatched >= startOfToday - 29 * DAY_MS) return 'Last 30 days';
+  return 'Earlier';
 }
 
 export function HistoryListView({
@@ -158,21 +170,44 @@ export function HistoryListView({
   selectedIds?: ReadonlySet<string>;
   onToggleSelect?: (item: WatchProgress, shiftKey?: boolean) => void;
 }) {
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
   return (
     <WindowVirtualizedStack
       items={items}
       getItemKey={watchProgressItemKey}
       estimateSize={() => 78}
-      renderItem={(item, index) => (
-        <HistoryListRow
-          item={item}
-          index={index}
-          onRemove={onRemove}
-          selectionMode={selectionMode}
-          isSelected={selectedIds?.has(watchTitleKey(item))}
-          onToggleSelect={onToggleSelect}
-        />
-      )}
+      renderItem={(item, index) => {
+        const label = historyGroupLabel(item.last_watched, startOfToday);
+        const previous = index > 0 ? items[index - 1] : undefined;
+        const heading =
+          label !== null &&
+          label !== (previous ? historyGroupLabel(previous.last_watched, startOfToday) : null)
+            ? label
+            : null;
+        return (
+          <>
+            {heading && (
+              <h3
+                className={cn(
+                  'px-1 pb-1 text-[12px] font-semibold uppercase tracking-[0.12em] text-zinc-500',
+                  index === 0 ? 'pt-0' : 'pt-5',
+                )}
+              >
+                {heading}
+              </h3>
+            )}
+            <HistoryListRow
+              item={item}
+              index={index}
+              onRemove={onRemove}
+              selectionMode={selectionMode}
+              isSelected={selectedIds?.has(watchTitleKey(item))}
+              onToggleSelect={onToggleSelect}
+            />
+          </>
+        );
+      }}
     />
   );
 }
@@ -247,20 +282,20 @@ function HistoryListRow({
           <p
             dir='auto'
             title={item.title}
-            className='text-[13px] font-medium text-zinc-100 truncate'
+            className='text-[14px] font-medium text-zinc-100 truncate'
           >
             {item.title}
           </p>
           <div className='flex flex-wrap items-center gap-x-2 gap-y-1 mt-1'>
             {seasonEpisodeLabel && (
-              <span className='text-[11px] text-zinc-400 font-medium'>{seasonEpisodeLabel}</span>
+              <span className='text-[12px] text-zinc-400 font-medium'>{seasonEpisodeLabel}</span>
             )}
             {progressPct > 0 && (
-              <span className='text-[11px] text-zinc-500 tabular-nums'>
+              <span className='text-[12px] text-zinc-500 tabular-nums'>
                 {Math.round(progressPct)}%
               </span>
             )}
-            {watchedAgo && <span className='text-[11px] text-zinc-500'>{watchedAgo}</span>}
+            {watchedAgo && <span className='text-[12px] text-zinc-500'>{watchedAgo}</span>}
           </div>
         </div>
       </button>

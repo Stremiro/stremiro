@@ -213,23 +213,6 @@ fn reputation_scoring_bounds_cooldowns_and_future_failures() {
     );
 }
 
-#[test]
-fn stream_family_priority_penalizes_recent_nearby_failure() {
-    let now_ms = 100_000;
-    let snapshot = PlaybackStreamFamilySnapshot {
-        last_failure_season: Some(1),
-        last_failure_episode: Some(5),
-        consecutive_failures: 1,
-        cooldown_until: Some(110_000),
-        ..stream_family_snapshot(None, None, Some(99_500))
-    };
-
-    assert_eq!(
-        score_stream_family_priority(Some(&snapshot), Some(1), Some(6), now_ms),
-        0
-    );
-}
-
 fn stream_family_snapshot(
     source_id: Option<&str>,
     last_success_at: Option<u64>,
@@ -498,6 +481,13 @@ fn movie_stream_family_priority_rewards_success_and_penalizes_failure_within_tit
             expected
         );
     }
+    failure.last_failure_season = Some(1);
+    failure.last_failure_episode = Some(5);
+    failure.cooldown_until = Some(110_000);
+    assert_eq!(
+        score_stream_family_priority(Some(&failure), Some(1), Some(6), now),
+        0
+    );
     assert_ne!(
         super::stream_health::playback_stream_family_snapshot_key("movie:tt1", "release"),
         super::stream_health::playback_stream_family_snapshot_key("movie:tt2", "release")

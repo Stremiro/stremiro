@@ -216,7 +216,9 @@ async fn tvmaze_credits(
     ))
 }
 
-fn decode_tvmaze_show(bytes: &[u8]) -> Result<(Option<serde_json::Value>, bool), String> {
+pub(super) fn decode_tvmaze_show(
+    bytes: &[u8],
+) -> Result<(Option<serde_json::Value>, bool), String> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| TRANSIENT_ERROR.to_string())?;
     if value.is_null() {

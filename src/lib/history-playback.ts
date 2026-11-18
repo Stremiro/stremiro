@@ -22,6 +22,8 @@ export interface DetailsHistoryRouteState {
   // Optional: a self-referential `from` dead-ends the titlebar Back button.
   from?: string;
   season?: number;
+  /** Preserves episode-pane memory when the consumed player handoff replaces this entry. */
+  detailsEntryKey?: string;
   reopenStreamSelector?: boolean;
   reopenStreamSeason?: number;
   reopenStreamEpisode?: number;

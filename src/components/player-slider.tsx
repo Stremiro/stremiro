@@ -71,6 +71,7 @@ export function PlayerSlider({
   };
   // Pointermove can outpace frames — coalesce the layout read + state update to one per rAF.
   const scheduleAimFromPointer = (clientX: number) => {
+    if (variant === 'pill') return;
     pendingAimXRef.current = clientX;
     if (aimRafRef.current !== null) return;
     aimRafRef.current = window.requestAnimationFrame(() => {

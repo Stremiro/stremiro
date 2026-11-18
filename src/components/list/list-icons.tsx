@@ -65,9 +65,9 @@ const ICON_BY_ID = new Map(LIST_ICONS.map((icon) => [icon.id, icon]));
 export const DEFAULT_LIST_ICON = 'Film';
 
 const TILE_SIZES = {
-  sm: { className: 'size-7 rounded-md', iconClassName: 'size-3.5' },
-  md: { className: 'size-9 rounded-lg', iconClassName: 'size-[18px]' },
-  lg: { className: 'size-12 rounded-xl', iconClassName: 'size-6' },
+  sm: { className: 'size-7', iconClassName: 'size-4' },
+  md: { className: 'size-9', iconClassName: 'size-[18px]' },
+  lg: { className: 'size-12', iconClassName: 'size-6' },
 };
 
 export function ListIconTile({
@@ -85,7 +85,7 @@ export function ListIconTile({
     <span
       aria-hidden='true'
       className={cn(
-        'inline-flex shrink-0 items-center justify-center bg-white/[0.04] text-zinc-300 ring-1 ring-inset ring-white/[0.08]',
+        'inline-flex shrink-0 items-center justify-center text-zinc-400',
         tile.className,
       )}
     >

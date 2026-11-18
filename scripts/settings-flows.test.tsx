@@ -14,6 +14,7 @@ import { ConfirmDialog } from '../src/components/ui/dialog';
 import { supportedLanguagesQueryOptions } from '../src/hooks/use-playback-language-preferences';
 import { DEFAULT_PROFILE_PREFERENCES } from '../src/hooks/use-local-profile';
 import * as localProfile from '../src/hooks/use-local-profile';
+import * as appUiPreferences from '../src/hooks/use-app-ui-preferences';
 import { api, DEFAULT_APP_UI_PREFERENCES } from '../src/lib/api';
 import {
   APP_UI_PREFERENCES_QUERY_KEY,
@@ -23,6 +24,7 @@ import {
 import { DataSection } from '../src/pages/settings/data';
 import { PlaybackSettings } from '../src/pages/settings/playback';
 import { AppearanceSettings } from '../src/pages/settings/appearance';
+import { ShortcutsSection } from '../src/pages/settings/shortcuts';
 
 type Element = React.ReactElement<Record<string, unknown> & { children?: React.ReactNode }>;
 
@@ -63,6 +65,104 @@ function testClient() {
 const captureComponent = <T,>(client: QueryClient, component: () => T) =>
   captureWithClient(client, component, '/settings');
 
+// Keeps useState/useRef slots stable across repeated captures of `render`.
+function statefulRender<T>(render: () => T): () => T {
+  const states: unknown[] = [];
+  const refs: { current: unknown }[] = [];
+  let stateIndex = 0;
+  let refIndex = 0;
+  spyOn(React, 'useState').mockImplementation((initial) => {
+    const index = stateIndex++;
+    if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
+    return [
+      states[index],
+      (next: React.SetStateAction<unknown>) => {
+        states[index] = typeof next === 'function' ? next(states[index]) : next;
+      },
+    ];
+  });
+  spyOn(React, 'useRef').mockImplementation((initial) => {
+    const index = refIndex++;
+    return (refs[index] ??= { current: initial });
+  });
+  return () => {
+    stateIndex = 0;
+    refIndex = 0;
+    return render();
+  };
+}
+
+test.each(['unchanged', 'saved', 'pending', 'failed'] as const)(
+  'Shortcut reset Undo never overwrites a later edit (%s)',
+  async (edit) => {
+    const client = testClient();
+    const previous = { togglePlay: ['p'] };
+    let preferences = { ...DEFAULT_APP_UI_PREFERENCES, playerKeybindings: previous };
+    const base = captureComponent(client, appUiPreferences.useAppUiPreferences);
+    const writes: Record<string, string[]>[] = [];
+    const resetNotice = Promise.withResolvers<() => void>();
+    const binding = Promise.withResolvers<Record<string, string[]>>();
+    const save = mock(async (patch: { playerKeybindings?: Record<string, string[]> }) => {
+      const next = patch.playerKeybindings!;
+      writes.push(next);
+      preferences = { ...preferences, playerKeybindings: next };
+    });
+    spyOn(appUiPreferences, 'useAppUiPreferences').mockImplementation(() => ({
+      ...base,
+      preferences,
+      savePreferences: save,
+    }));
+    spyOn(api, 'bindPlayerKeybinding').mockImplementation(() => binding.promise);
+    spyOn(toast, 'success').mockImplementation((_message, data) => {
+      if (data?.action && typeof data.action !== 'function' && 'onClick' in data.action) {
+        const action = data.action;
+        resetNotice.resolve(() => action.onClick({}));
+      }
+      return 'shortcut-notice';
+    });
+    const render = statefulRender(() => captureComponent(client, ShortcutsSection));
+    const row = () => findElement(render(), (node) => node.props.action === 'toggleMute');
+    const header = findElement(render(), (node) => node.props.title === 'Player shortcuts');
+    ((header.props.action as Element).props.onClick as () => void)();
+    const undo = await resetNotice.promise;
+    if (edit !== 'unchanged') {
+      (row().props.onStartCapture as (capture: { action: string; slot: number }) => void)({
+        action: 'toggleMute',
+        slot: 0,
+      });
+      (row().props.onCaptureKey as (event: unknown) => void)({
+        key: 'x',
+        nativeEvent: { isComposing: false },
+        preventDefault() {},
+        stopPropagation() {},
+      });
+      if (edit === 'saved') {
+        binding.resolve({ toggleMute: ['x'] });
+        await binding.promise;
+        await Promise.resolve();
+        await Promise.resolve();
+      } else if (edit === 'failed') {
+        binding.reject(new Error('Binding rejected'));
+        await binding.promise.catch(() => undefined);
+      }
+    }
+    undo();
+    undo();
+    if (edit === 'pending') {
+      binding.resolve({ toggleMute: ['x'] });
+      await binding.promise;
+      await Promise.resolve();
+    }
+    expect(writes).toEqual(
+      edit === 'unchanged'
+        ? [{}, previous]
+        : edit === 'failed'
+          ? [{}]
+          : [{}, { toggleMute: ['x'] }],
+    );
+  },
+);
+
 function captureDataPart(client: QueryClient, name: 'BackupRestore' | 'DataManager') {
   const element = findElement(
     DataSection(),
@@ -80,12 +180,8 @@ function click(tree: React.ReactNode, label: string) {
   (element.props.onClick as () => void)();
 }
 
-function dataMarkup(client: QueryClient) {
-  return markupWithClient(client, <DataSection />);
-}
-
 function expectDataControlsDisabled(client: QueryClient, disabled: boolean) {
-  const tags = dataMarkup(client).match(/<button\b[^>]*>/g) ?? [];
+  const tags = markupWithClient(client, <DataSection />).match(/<button\b[^>]*>/g) ?? [];
   for (const selector of [
     'id="setting-export"',
     'id="setting-import"',
@@ -245,29 +341,7 @@ test('Reset and reselecting a color keeps the newer draft when an older save fin
     profile,
     updateProfile: save,
   }));
-  const states: unknown[] = [];
-  const refs: { current: unknown }[] = [];
-  let stateIndex = 0;
-  let refIndex = 0;
-  const state = spyOn(React, 'useState').mockImplementation((initial) => {
-    const index = stateIndex++;
-    if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
-    return [
-      states[index],
-      (next: React.SetStateAction<unknown>) => {
-        states[index] = typeof next === 'function' ? next(states[index]) : next;
-      },
-    ];
-  });
-  const ref = spyOn(React, 'useRef').mockImplementation((initial) => {
-    const index = refIndex++;
-    return (refs[index] ??= { current: initial });
-  });
-  const render = () => {
-    stateIndex = 0;
-    refIndex = 0;
-    return captureComponent(client, AppearanceSettings);
-  };
+  const render = statefulRender(() => captureComponent(client, AppearanceSettings));
   try {
     accentControls(render()).onAccentColorChange('#abc');
     const draftHeader = findElement(render(), (node) => node.props.title === 'Color & glow');
@@ -286,6 +360,6 @@ test('Reset and reselecting a color keeps the newer draft when an older save fin
     expect(colors).toEqual(['#123456', '#ffffff', '#123456']);
   } finally {
     firstSave.resolve();
-    restoreSpies(state, ref, profileHook);
+    restoreSpies(profileHook);
   }
 });

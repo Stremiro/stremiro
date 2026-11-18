@@ -84,8 +84,7 @@ static RELEASE_NOTES_CACHE: LazyLock<TtlCache<ReleaseNotesCacheEntry>> = LazyLoc
         RELEASE_NOTES_HIT_TTL,
     )
 });
-static RELEASE_NOTES_IN_FLIGHT: LazyLock<InFlight> =
-    LazyLock::new(|| InFlight::new(RELEASE_NOTES_CACHE_CAPACITY));
+static RELEASE_NOTES_IN_FLIGHT: LazyLock<InFlight> = LazyLock::new(InFlight::default);
 /// reqwest's timeout is total-duration and can't bound a legit long download —
 /// instead a watchdog aborts when no chunk has arrived for this long.
 const UPDATE_DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(120);
@@ -511,23 +510,19 @@ pub async fn get_app_release_notes(version: String) -> Result<Option<AppUpdateMe
     }
 
     let key_lock = RELEASE_NOTES_IN_FLIGHT.claim(&version);
-    let result = {
-        let _fetch_permit = key_lock.lock().await;
-        if let Some(result) = RELEASE_NOTES_CACHE
-            .get(&version)
-            .as_ref()
-            .map(ReleaseNotesCacheEntry::result)
-        {
-            result
-        } else {
-            let entry = fetch_app_release_notes(&version).await;
-            let result = entry.result();
-            RELEASE_NOTES_CACHE.put_for(&version, entry.clone(), entry.ttl(), || true);
-            result
-        }
-    };
-    RELEASE_NOTES_IN_FLIGHT.release(&version, &key_lock);
-    result
+    let _fetch_permit = key_lock.lock().await;
+    if let Some(result) = RELEASE_NOTES_CACHE
+        .get(&version)
+        .as_ref()
+        .map(ReleaseNotesCacheEntry::result)
+    {
+        result
+    } else {
+        let entry = fetch_app_release_notes(&version).await;
+        let result = entry.result();
+        RELEASE_NOTES_CACHE.put_for(&version, entry.clone(), entry.ttl(), || true);
+        result
+    }
 }
 
 #[command]

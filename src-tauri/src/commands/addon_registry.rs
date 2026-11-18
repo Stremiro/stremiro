@@ -1,16 +1,18 @@
-use super::config_store::{addon_configs_generation, load_addon_configs, AddonConfig};
+use super::config_store::{
+    addon_configs_generation, is_default_cinemeta_url, load_addon_configs, AddonConfig,
+};
 use super::media_normalization::{normalize_media_details, normalize_media_item};
 use super::{js_trim, SETTINGS_STORE_FILE};
-use crate::providers::addon_manifest::{snapshot_supports_request, AddonCatalogCapability};
+use crate::providers::addon_manifest::{snapshot_request_type, snapshot_supports_request};
 use crate::providers::addon_resource::{
-    catalog_declares_extra, snapshot_supports_catalog, AddonResourceClient, AddonSubtitle,
-    CatalogExtra, CatalogPage,
+    catalog_declares_extra, catalog_request_extras, snapshot_supports_catalog, AddonResourceClient,
+    AddonSubtitle, CatalogExtra, CatalogPage,
 };
 use crate::providers::ttl_cache::hash_segment;
 use crate::providers::{lock_or_recover, MediaDetails, MediaItem};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -208,22 +210,32 @@ fn addon_allows_resource(addon: &AddonConfig, resource: &str, type_: &str, id: &
         .is_none_or(|snapshot| snapshot_supports_request(snapshot, resource, type_, id))
 }
 
-fn searchable_catalog_ids<'a>(addon: &'a AddonConfig, type_: &str) -> Vec<(&'a str, bool)> {
-    match addon.capabilities.as_ref() {
-        None => vec![("top", false)],
-        Some(snapshot) => snapshot
-            .catalogs
+fn searchable_catalogs<'a>(
+    addon: &'a AddonConfig,
+    type_: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a str, bool)> + 'a {
+    let (fallback, catalogs) = match addon.capabilities.as_ref() {
+        None => (Some((type_, "top", false)), &[][..]),
+        Some(snapshot) => (None, snapshot.catalogs.as_slice()),
+    };
+    fallback.into_iter().chain(
+        catalogs
             .iter()
-            .filter(|catalog| {
+            .filter(move |catalog| {
                 catalog.type_.eq_ignore_ascii_case(type_)
                     && catalog_declares_extra(catalog, "search")
             })
-            .map(|catalog| (catalog.id.as_str(), catalog_declares_extra(catalog, "skip")))
-            .collect(),
-    }
+            .map(|catalog| {
+                (
+                    catalog.type_.as_str(),
+                    catalog.id.as_str(),
+                    catalog_declares_extra(catalog, "skip"),
+                )
+            }),
+    )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CatalogFetchPage {
     pub items: Vec<MediaItem>,
     pub next_skip: Option<u32>,
@@ -241,20 +253,20 @@ pub(crate) struct SearchSourceCursor {
     pub page_hash: Option<String>,
 }
 
-/// Dedup key -> bitmask of advanced source cursors; zero when no source can page.
-pub(crate) type SearchCursorClaims = HashMap<String, u64>;
+/// Dedup key -> browse branches that returned it before local filtering.
+pub(crate) type BrowseCursorClaims = HashMap<String, u8>;
 
 #[derive(Debug)]
 pub(crate) struct SearchCatalogFetchPage {
     pub items: Vec<MediaItem>,
     pub cursors: Vec<SearchSourceCursor>,
-    pub claims: SearchCursorClaims,
     pub partial: bool,
 }
 
 /// Stable identity shared by source merging and cross-page catalog deduplication.
 pub(crate) fn catalog_dedup_key(type_: &str, id: &str) -> String {
-    let mut key = format!("{}:{}", js_trim(type_), js_trim(id));
+    let type_ = js_trim(type_);
+    let mut key = format!("{}:{type_}:{}", type_.len(), js_trim(id));
     key.make_ascii_lowercase();
     key
 }
@@ -335,26 +347,8 @@ pub(crate) struct CatalogTarget {
     media_type: String,
     catalog_id: String,
     catalog_genre: Option<String>,
-}
-
-/// A catalog's `genre` extra accepts the sent value only when it is free-form
-/// (no options) or lists it — a closed options list that excludes it cannot
-/// filter, so the sent genre must not be stamped on the returned items.
-fn catalog_accepts_genre(catalog: &AddonCatalogCapability, sent_genre: Option<&str>) -> bool {
-    let Some(extra) = catalog
-        .extras
-        .iter()
-        .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
-    else {
-        return false;
-    };
-    extra.options.is_empty()
-        || sent_genre.is_some_and(|sent| {
-            extra
-                .options
-                .iter()
-                .any(|option| option.trim().eq_ignore_ascii_case(sent.trim()))
-        })
+    extras: Vec<CatalogExtra>,
+    supports_skip: bool,
 }
 
 pub(crate) fn select_catalog_targets(
@@ -366,12 +360,20 @@ pub(crate) fn select_catalog_targets(
     let targets: Vec<CatalogTarget> = snapshot
         .iter()
         .filter_map(|addon| {
+            let extras = catalog_request_extras(
+                addon.capabilities.as_ref(),
+                type_,
+                catalog_id,
+                extras.to_vec(),
+            );
             let catalog = match addon.capabilities.as_ref() {
                 Some(snapshot) => {
-                    Some(snapshot_supports_catalog(snapshot, type_, catalog_id, extras).ok()?)
+                    Some(snapshot_supports_catalog(snapshot, type_, catalog_id, &extras).ok()?)
                 }
                 None => None,
             };
+            let supports_skip =
+                catalog.is_none_or(|catalog| catalog_declares_extra(catalog, "skip"));
             Some(CatalogTarget {
                 url: addon.url.clone(),
                 media_type: catalog
@@ -380,13 +382,14 @@ pub(crate) fn select_catalog_targets(
                 catalog_id: catalog
                     .map_or(catalog_id, |catalog| catalog.id.as_str())
                     .to_string(),
-                catalog_genre: catalog.and_then(|catalog| {
+                catalog_genre: catalog.and_then(|_| {
                     extras
                         .iter()
                         .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
-                        .filter(|sent| catalog_accepts_genre(catalog, Some(sent.value.as_str())))
                         .map(|sent| sent.value.clone())
                 }),
+                extras,
+                supports_skip,
             })
         })
         .take(MAX_CATALOG_SOURCES)
@@ -410,10 +413,6 @@ pub(crate) fn select_addon_catalog_targets(
     snapshot: &[AddonConfig],
     extras: &[CatalogExtra],
 ) -> Result<Vec<CatalogTarget>, String> {
-    let sent_genre = extras
-        .iter()
-        .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
-        .map(|extra| extra.value.as_str());
     let targets: Vec<CatalogTarget> = snapshot
         .iter()
         .filter_map(|addon| {
@@ -423,23 +422,31 @@ pub(crate) fn select_addon_catalog_targets(
                 .map(|snapshot| (&addon.url, snapshot))
         })
         .flat_map(|(url, snapshot)| {
-            snapshot
-                .catalogs
-                .iter()
-                .filter(move |catalog| {
-                    !matches!(
-                        catalog.type_.trim().to_ascii_lowercase().as_str(),
-                        "movie" | "series"
-                    ) && catalog_accepts_genre(catalog, sent_genre)
-                        && snapshot_supports_catalog(snapshot, &catalog.type_, &catalog.id, extras)
-                            .is_ok()
-                })
-                .map(move |catalog| CatalogTarget {
+            snapshot.catalogs.iter().filter_map(move |catalog| {
+                let supports_skip = catalog_declares_extra(catalog, "skip");
+                if matches!(
+                    catalog.type_.trim().to_ascii_lowercase().as_str(),
+                    "movie" | "series"
+                ) {
+                    return None;
+                }
+                let extras = catalog_request_extras(
+                    Some(snapshot),
+                    &catalog.type_,
+                    &catalog.id,
+                    extras.to_vec(),
+                );
+                let genre = extras.iter().find(|extra| extra.name == "genre")?;
+                snapshot_supports_catalog(snapshot, &catalog.type_, &catalog.id, &extras).ok()?;
+                Some(CatalogTarget {
                     url: url.clone(),
                     media_type: catalog.type_.clone(),
                     catalog_id: catalog.id.clone(),
-                    catalog_genre: sent_genre.map(str::to_string),
+                    catalog_genre: Some(genre.value.clone()),
+                    extras,
+                    supports_skip,
                 })
+            })
         })
         .take(MAX_CATALOG_SOURCES)
         .collect();
@@ -596,22 +603,28 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
     for (group, entry) in groups.into_iter().enumerate() {
         match entry {
             Ok((targets, extras)) => {
-                group_errors.push((None, targets.len()));
-                group_skips.push(extra_skip_value(&extras));
-                for (order, target) in targets.into_iter().enumerate() {
+                let skip = extra_skip_value(&extras);
+                let targets = targets
+                    .into_iter()
+                    .filter(|target| skip == 0 || target.supports_skip);
+                let mut supports_skip = Vec::new();
+                group_skips.push(skip);
+                for (order, target) in targets.enumerate() {
+                    supports_skip.push(target.supports_skip);
                     work.push(CatalogWorkItem {
                         group,
                         order,
                         addon_url: target.url,
                         media_type: target.media_type,
                         catalog_id: target.catalog_id,
-                        extras: extras.clone(),
+                        extras: target.extras,
                         catalog_genre: target.catalog_genre,
                     });
                 }
+                group_errors.push((None, supports_skip));
             }
             Err(error) => {
-                group_errors.push((Some(error), 0));
+                group_errors.push((Some(error), Vec::new()));
                 group_skips.push(0);
             }
         }
@@ -622,20 +635,27 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
         .into_iter()
         .zip(group_errors)
         .zip(group_skips)
-        .map(|((bucket, (error, source_count)), skip)| match error {
+        .map(|((bucket, (error, supports_skip)), skip)| match error {
             Some(error) => Err(error),
+            None if supports_skip.is_empty() => Ok(CatalogFetchPage::default()),
             None if deadline.is_some()
-                && (bucket.len() != source_count
+                && (bucket.len() != supports_skip.len()
                     || bucket.iter().any(|(_, result)| result.is_err())) =>
             {
                 Err("Catalog scan incomplete.".into())
             }
             None => {
                 // Dropped stragglers have no outcome to carry the partial flag.
-                let incomplete = bucket.len() != source_count;
+                let incomplete = bucket.len() != supports_skip.len();
                 merge_catalog_pages(
-                    bucket.into_iter().map(|(_, result)| {
-                        result.map(|page| catalog_fetch_page_from_source(page, skip))
+                    bucket.into_iter().map(|(order, result)| {
+                        result.map(|page| {
+                            let mut page = catalog_fetch_page_from_source(page, skip);
+                            if !supports_skip[order] {
+                                page.next_skip = None;
+                            }
+                            page
+                        })
                     }),
                     "Failed to load catalog.",
                 )
@@ -709,12 +729,32 @@ fn select_search_catalog_work(
     for (group, genre) in genres.iter().enumerate() {
         let mut group_sources = Vec::new();
         'addons: for addon in snapshot {
+            let cinemeta = is_default_cinemeta_url(&addon.url);
             for media_type in addon_search_types(addon, media_types, include_custom_types) {
-                for (catalog_id, supports_skip) in searchable_catalog_ids(addon, media_type) {
-                    let key =
-                        search_source_key(genre.as_deref(), &addon.url, media_type, catalog_id);
+                for (catalog_type, catalog_id, supports_skip) in
+                    searchable_catalogs(addon, media_type)
+                {
+                    // Cinemeta's top text search ignores genre. Rust verifies genre after merging.
+                    let genre = if cinemeta && catalog_id == "top" {
+                        None
+                    } else {
+                        genre.as_deref()
+                    };
+                    let mut extras = catalog_request_extras(
+                        addon.capabilities.as_ref(),
+                        catalog_type,
+                        catalog_id,
+                        catalog_search_extras(query, genre, 0),
+                    );
+                    let sent_genre = extras
+                        .iter()
+                        .find(|extra| extra.name == "genre")
+                        .map(|extra| extra.value.as_str());
+                    let key = search_source_key(sent_genre, &addon.url, catalog_type, catalog_id);
                     let cursor = if let Some(cursors) = &cursors {
-                        let Some(cursor) = cursors.get(key.as_str()).filter(|_| supports_skip)
+                        let Some(cursor) = cursors
+                            .get(key.as_str())
+                            .filter(|cursor| supports_skip || (cursor.retry && cursor.skip == 0))
                         else {
                             continue;
                         };
@@ -727,8 +767,14 @@ fn select_search_catalog_work(
                             page_hash: None,
                         }
                     };
-                    let extras = catalog_search_extras(query, genre.as_deref(), cursor.skip);
-                    if !addon_allows_catalog(addon, media_type, catalog_id, &extras)
+                    if cursor.skip > 0 {
+                        extras.retain(|extra| extra.name != "skip");
+                        extras.extend(super::search_commands::catalog_browse_extras(
+                            None,
+                            cursor.skip,
+                        ));
+                    }
+                    if !addon_allows_catalog(addon, catalog_type, catalog_id, &extras)
                         || !selected_keys.insert(cursor.key.clone())
                     {
                         continue;
@@ -737,7 +783,7 @@ fn select_search_catalog_work(
                         group,
                         order: group_sources.len(),
                         addon_url: addon.url.clone(),
-                        media_type: media_type.to_string(),
+                        media_type: catalog_type.to_string(),
                         catalog_id: catalog_id.to_string(),
                         extras,
                         catalog_genre: None,
@@ -761,7 +807,7 @@ fn select_search_catalog_work(
 /// `include_custom_types` adds each addon's own search-capable catalog types to
 /// the fixed `media_types` — the All tab searches addon-declared types too.
 pub(crate) async fn search_catalog_pages_for_genres(
-    app: &AppHandle,
+    snapshot: &[AddonConfig],
     client: &AddonResourceClient,
     query: &str,
     media_types: &[&str],
@@ -769,9 +815,8 @@ pub(crate) async fn search_catalog_pages_for_genres(
     cursors: Option<&[SearchSourceCursor]>,
     include_custom_types: bool,
 ) -> Result<SearchCatalogFetchPage, String> {
-    let snapshot = load_enabled_addons_snapshot(app).await?;
     let (work, sources) = select_search_catalog_work(
-        &snapshot,
+        snapshot,
         query,
         media_types,
         genres,
@@ -805,8 +850,7 @@ fn merge_search_catalog_pages(
     outcomes: Vec<Vec<(usize, Result<CatalogPage, String>)>>,
     first_page: bool,
 ) -> Result<SearchCatalogFetchPage, String> {
-    let mut items = Vec::new();
-    let mut claims = HashMap::new();
+    let mut pages = Vec::new();
     let mut cursors = Vec::new();
     let mut partial = false;
     let mut succeeded = false;
@@ -823,34 +867,26 @@ fn merge_search_catalog_pages(
             match outcome {
                 Ok(page) => {
                     succeeded = true;
-                    let advanced = catalog_page_next_skip(cursor.skip, page.source_item_count)
+                    if let Some(skip) = catalog_page_next_skip(cursor.skip, page.source_item_count)
                         .filter(|skip| source.supports_skip && *skip > cursor.skip)
-                        .map(|skip| {
-                            let mut keys: Vec<_> = page
-                                .items
-                                .iter()
-                                .map(|item| catalog_dedup_key(&item.type_, &item.id))
-                                .collect();
-                            keys.sort_unstable();
-                            keys.dedup();
-                            cursor.page_hash = Some(hash_segment(&keys));
-                            cursor.skip = skip;
-                            cursor.retry = false;
-                            cursors.push(cursor);
-                            debug_assert!(cursors.len() <= u64::BITS as usize);
-                            1_u64 << (cursors.len() - 1)
-                        })
-                        .unwrap_or(0);
-                    for item in page.items {
-                        *claims
-                            .entry(catalog_dedup_key(&item.type_, &item.id))
-                            .or_default() |= advanced;
-                        items.push(item);
+                    {
+                        let keys = page
+                            .items
+                            .iter()
+                            .map(|item| catalog_dedup_key(&item.type_, &item.id))
+                            .collect();
+                        cursor.page_hash = Some(catalog_page_hash(keys));
+                        cursor.skip = skip;
+                        cursor.retry = false;
+                        cursors.push(cursor);
+                    }
+                    if !page.items.is_empty() {
+                        pages.push(page.items);
                     }
                 }
                 Err(error) => {
                     first_error.get_or_insert(error);
-                    if source.supports_skip && !cursor.retry {
+                    if !cursor.retry {
                         cursor.retry = true;
                         cursors.push(cursor);
                     } else {
@@ -860,15 +896,34 @@ fn merge_search_catalog_pages(
             }
         }
     }
-    if first_page && (!succeeded || (items.is_empty() && first_error.is_some())) {
+    if first_page && (!succeeded || (pages.is_empty() && first_error.is_some())) {
         return Err(first_error.unwrap_or_else(|| "Failed to search catalog.".into()));
     }
     Ok(SearchCatalogFetchPage {
-        items,
+        items: interleave_catalog_items(pages),
         cursors,
-        claims,
         partial,
     })
+}
+
+pub(super) fn catalog_page_hash(mut keys: Vec<impl Ord + std::hash::Hash>) -> String {
+    keys.sort_unstable();
+    keys.dedup();
+    hash_segment(&keys)
+}
+
+pub(super) fn interleave_catalog_items(
+    pages: impl IntoIterator<Item = Vec<MediaItem>>,
+) -> Vec<MediaItem> {
+    let mut pages: VecDeque<_> = pages.into_iter().map(Vec::into_iter).collect();
+    let mut items = Vec::with_capacity(pages.iter().map(ExactSizeIterator::len).sum());
+    while let Some(mut page) = pages.pop_front() {
+        items.extend(page.next());
+        if page.len() > 0 {
+            pages.push_back(page);
+        }
+    }
+    items
 }
 
 pub async fn fetch_meta_details(
@@ -892,6 +947,23 @@ async fn fetch_ranked_meta(
         .fetch_meta(url, type_, id, normalize_media_details)
         .await
         .and_then(|details| {
+            use crate::providers::skip_times::normalize_imdb_id;
+            if let Some(requested) = normalize_imdb_id(id) {
+                let actual = details
+                    .imdb_id
+                    .as_deref()
+                    .and_then(normalize_imdb_id)
+                    .or_else(|| {
+                        details
+                            .imdb_id
+                            .is_none()
+                            .then(|| normalize_imdb_id(&details.id))
+                            .flatten()
+                    });
+                if actual.is_some_and(|actual| actual != requested) {
+                    return Err("Metadata IMDb ID does not match the requested title.".to_string());
+                }
+            }
             let response_type = super::normalize_watch_progress_type(&details.type_);
             if response_type.is_some()
                 && response_type == super::normalize_watch_progress_type(type_)
@@ -914,11 +986,23 @@ pub(super) async fn fetch_meta_details_from_addons(
     let require_genres = genres_deadline.is_some();
     let targets: Vec<_> = snapshot
         .iter()
-        .filter(|addon| addon_allows_resource(addon, "meta", type_, id))
+        .filter_map(|addon| {
+            // Prefer an explicitly declared anime endpoint; legacy and series-only
+            // sources retain the Cinemeta-compatible series request.
+            let request_type = if type_ == "anime"
+                && (addon.capabilities.is_none()
+                    || !addon_allows_resource(addon, "meta", type_, id))
+            {
+                "series"
+            } else {
+                type_
+            };
+            addon_allows_resource(addon, "meta", request_type, id).then_some((addon, request_type))
+        })
         .take(MAX_METADATA_SOURCES)
         .collect();
 
-    let Some(first) = targets.first() else {
+    let Some((first, first_type)) = targets.first() else {
         return Err(no_capable_addon_error(
             &format!("metadata for {type_}/{id}"),
             "metadata",
@@ -927,8 +1011,8 @@ pub(super) async fn fetch_meta_details_from_addons(
 
     let generation = client.cache_generation();
     let mut recent_stragglers = [false; MAX_METADATA_SOURCES];
-    recent_stragglers[0] = client.meta_is_recent_straggler(&first.url, type_, id);
-    let mut first_fetch = Box::pin(fetch_ranked_meta(client, &first.url, type_, id, 0));
+    recent_stragglers[0] = client.meta_is_recent_straggler(&first.url, first_type, id);
+    let mut first_fetch = Box::pin(fetch_ranked_meta(client, &first.url, first_type, id, 0));
     let hedge = tokio::time::sleep(if recent_stragglers[0] {
         Duration::ZERO
     } else {
@@ -966,11 +1050,15 @@ pub(super) async fn fetch_meta_details_from_addons(
         pending.insert(0);
         outcomes.push(first_fetch);
     }
-    for (index, addon) in targets.iter().enumerate().skip(1) {
-        recent_stragglers[index] = client.meta_is_recent_straggler(&addon.url, type_, id);
+    for (index, (addon, request_type)) in targets.iter().enumerate().skip(1) {
+        recent_stragglers[index] = client.meta_is_recent_straggler(&addon.url, request_type, id);
         pending.insert(index);
         outcomes.push(Box::pin(fetch_ranked_meta(
-            client, &addon.url, type_, id, index,
+            client,
+            &addon.url,
+            request_type,
+            id,
+            index,
         )));
     }
 
@@ -1036,7 +1124,8 @@ pub(super) async fn fetch_meta_details_from_addons(
         if grace_expired {
             for index in pending {
                 if index < best_index && !recent_stragglers[index] {
-                    client.note_meta_straggler(&targets[index].url, type_, id, generation);
+                    let (addon, request_type) = targets[index];
+                    client.note_meta_straggler(&addon.url, request_type, id, generation);
                 }
             }
         }
@@ -1098,7 +1187,7 @@ async fn fetch_subtitles_from_addons(
         .filter(|addon| {
             query_ids
                 .iter()
-                .any(|id| addon_allows_resource(addon, "subtitles", type_, id))
+                .any(|id| subtitle_request_type(addon, type_, id).is_some())
         })
         .take(MAX_SUBTITLE_SOURCES)
         .enumerate()
@@ -1133,7 +1222,7 @@ async fn fetch_subtitles_from_addons(
         match result {
             Ok(items) => {
                 had_success = true;
-                for item in items {
+                for item in items.iter() {
                     add_subtitle_if_unique(&mut subtitles, &mut seen, addon, item);
                     if subtitles.len() >= MAX_SUBTITLES_TOTAL {
                         break;
@@ -1154,19 +1243,31 @@ async fn fetch_subtitles_from_addons(
     Ok(subtitles)
 }
 
+fn subtitle_request_type<'a>(addon: &'a AddonConfig, type_: &'a str, id: &str) -> Option<&'a str> {
+    let fallback = super::media_type::addon_episode_lookup_type(type_);
+    let Some(manifest) = addon.capabilities.as_ref() else {
+        return Some(fallback);
+    };
+    snapshot_request_type(manifest, "subtitles", type_, id).or_else(|| {
+        (fallback != type_)
+            .then(|| snapshot_request_type(manifest, "subtitles", fallback, id))
+            .flatten()
+    })
+}
+
 async fn fetch_subtitles_for_addon(
     client: &AddonResourceClient,
     type_: &str,
     query_ids: &[String],
     addon: &AddonConfig,
-) -> Result<Vec<AddonSubtitle>, String> {
+) -> Result<Arc<[AddonSubtitle]>, String> {
     let mut had_success = false;
     let mut last_error = None;
-    for id in query_ids
+    for (request_type, id) in query_ids
         .iter()
-        .filter(|id| addon_allows_resource(addon, "subtitles", type_, id))
+        .filter_map(|id| subtitle_request_type(addon, type_, id).map(|type_| (type_, id)))
     {
-        match client.fetch_subtitles(&addon.url, type_, id).await {
+        match client.fetch_subtitles(&addon.url, request_type, id).await {
             Ok(items) => {
                 had_success = true;
                 if !items.is_empty() {
@@ -1181,14 +1282,14 @@ async fn fetch_subtitles_for_addon(
             return Err(error);
         }
     }
-    Ok(Vec::new())
+    Ok(Arc::default())
 }
 
 fn add_subtitle_if_unique(
     subtitles: &mut Vec<SourcedAddonSubtitle>,
     seen: &mut HashSet<String>,
     addon: &AddonConfig,
-    item: AddonSubtitle,
+    item: &AddonSubtitle,
 ) {
     let (id, url, lang) = item.dedup_identity();
     let selection_key = serde_json::to_string(&(&addon.id, id, url, lang))
@@ -1217,11 +1318,11 @@ fn add_subtitle_if_unique(
             .filter(|label| !label.is_empty())
             .unwrap_or(&item.id)
             .to_string(),
-        id: item.id,
+        id: item.id.clone(),
         selection_key,
-        url: item.url,
-        lang: item.lang,
-        label: item.label,
+        url: item.url.clone(),
+        lang: item.lang.clone(),
+        label: item.label.clone(),
         source_id: addon.id.clone(),
         source_name: addon.name.clone(),
     });

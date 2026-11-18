@@ -49,7 +49,7 @@ import {
   type WatchProgress,
   type TitleWatchProgress,
 } from '@/lib/api';
-import { handleRovingGroupKeyDown, whenRowMounted } from '@/lib/dom';
+import { handleRovingGroupKeyDown, isPlainKeyEvent, whenRowMounted } from '@/lib/dom';
 import {
   episodeMatchesCoordinates,
   isEpisodeSpoiler,
@@ -194,16 +194,7 @@ export function rovingListTarget(
   bounds: { count: number; first: number; last: number },
   step: (distance: number, direction: 1 | -1) => number,
 ): number | null {
-  if (
-    bounds.count === 0 ||
-    event.defaultPrevented ||
-    event.nativeEvent.isComposing ||
-    event.ctrlKey ||
-    event.altKey ||
-    event.metaKey ||
-    event.shiftKey
-  )
-    return null;
+  if (bounds.count === 0 || !isPlainKeyEvent(event)) return null;
   const move = ROVING_STEP_KEYS.get(event.key);
   if (!move && event.key !== 'Home' && event.key !== 'End') return null;
   event.preventDefault();
@@ -232,7 +223,7 @@ interface StreamSelectorHeaderProps {
 }
 
 const HEADER_KICKER_CLASS =
-  'text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/40';
+  'text-[11px] font-semibold uppercase tracking-[0.18em] leading-none text-white/50';
 
 export function StreamSelectorHeader({
   backdrop,
@@ -256,7 +247,7 @@ export function StreamSelectorHeader({
         : `Resume from ${formatTime(startTime)}`
       : 'Choose a stream to play';
   return (
-    <div className='relative h-56 shrink-0 overflow-hidden [@media(max-height:800px)]:h-36'>
+    <div className='relative h-48 shrink-0 overflow-hidden [@media(max-height:800px)]:h-36'>
       {backdrop ? (
         <div className='absolute inset-0 z-0'>
           <RemoteImage
@@ -342,8 +333,8 @@ export function StreamSelectorHeader({
 // Matches StreamItem's silhouette so the swap to real rows is a fill-in, not a layout jump.
 function StreamRowSkeleton() {
   return (
-    <div className='flex items-center gap-3 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-2.5'>
-      <div className='h-9 w-9 shrink-0 animate-pulse motion-reduce:animate-none rounded-[10px] bg-white/[0.05]' />
+    <div className='flex items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.02] px-3 py-2.5'>
+      <div className='h-9 w-9 shrink-0 animate-pulse motion-reduce:animate-none rounded-lg bg-white/[0.05]' />
       <div className='min-w-0 flex-1 space-y-1.5'>
         <div className='flex items-center gap-1.5'>
           <div className='h-3 w-28 animate-pulse motion-reduce:animate-none rounded bg-white/[0.06]' />
@@ -822,7 +813,7 @@ export function StreamFilterToolbar({
       role='group'
       aria-label='Stream filters'
       aria-disabled={isResolving || undefined}
-      className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'
+      className='mb-3 shrink-0 border-b border-white/[0.06] pb-3'
     >
       <div className='mb-2 flex flex-wrap items-center gap-2'>
         <SearchInput
@@ -979,7 +970,7 @@ export function StreamResolveFeedbackToast({
     <div className='pointer-events-none absolute inset-x-3 bottom-3 z-30 flex justify-center'>
       <div
         role='status'
-        className='animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none relative w-full max-w-xs overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/85 shadow-lg shadow-black/40 backdrop-blur-xl'
+        className='animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none relative w-full max-w-xs overflow-hidden rounded-lg border border-white/[0.08] bg-zinc-950/90 shadow-lg shadow-black/40 backdrop-blur-xl'
       >
         <div className='flex items-center gap-2.5 py-2 pl-2 pr-1.5'>
           {poster ? (
@@ -1238,7 +1229,7 @@ export function StreamPackEpisodeList({
       return (
         <p
           className={cn(
-            'px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500',
+            'px-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500',
             index === 0 ? 'pt-0' : 'pt-2',
           )}
         >
@@ -1249,7 +1240,6 @@ export function StreamPackEpisodeList({
 
     const ep = row.episode;
     const isTarget = episodeMatchesCoordinates(ep, targetSeason, targetEpisode);
-    const artwork = ep.thumbnail || backdrop;
     const watchEntry = progressFor(ep);
     const isSpoiler = isEpisodeSpoiler(
       ep,
@@ -1288,7 +1278,7 @@ export function StreamPackEpisodeList({
             if (!disabled) onPick(ep);
           }}
           className={cn(
-            'group relative flex w-full items-center gap-3 overflow-hidden rounded-xl border px-2.5 py-2 text-left',
+            'group relative flex w-full items-center gap-3 overflow-hidden rounded-lg border px-2.5 py-2 text-left',
             'bg-white/[0.02] border-white/[0.05] transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer',
             'hover:bg-white/[0.045] hover:border-white/[0.1]',
             'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25',
@@ -1316,7 +1306,8 @@ export function StreamPackEpisodeList({
           )}
           <EpisodeThumb
             episode={ep.episode}
-            src={artwork}
+            src={ep.thumbnail}
+            fallbackSrc={backdrop}
             isSpoiler={isSpoiler}
             progressPercent={progressPercent}
             className='h-12 w-[84px] rounded-md'
@@ -1326,11 +1317,11 @@ export function StreamPackEpisodeList({
 
           <div className='min-w-0 flex-1'>
             <div className='flex items-center gap-1.5'>
-              <span className='shrink-0 text-[10px] font-semibold uppercase tracking-wider tabular-nums text-zinc-500'>
+              <span className='shrink-0 text-[11px] font-semibold uppercase tracking-wider tabular-nums text-zinc-500'>
                 {formatSeasonEpisode(ep.season, ep.episode)}
               </span>
               {(isTarget || isPending) && (
-                <span className='shrink-0 text-[10.5px] font-medium leading-none text-(--accent-act)'>
+                <span className='shrink-0 text-[11px] font-medium leading-none text-(--accent-act)'>
                   {isPending ? 'Opening…' : 'Selected'}
                 </span>
               )}
@@ -1348,7 +1339,7 @@ export function StreamPackEpisodeList({
             >
               {episodeTitle}
             </p>
-            {airDate && <p className='mt-0.5 text-[11px] leading-none text-zinc-400'>{airDate}</p>}
+            {airDate && <p className='mt-1 text-[12px] leading-none text-zinc-400'>{airDate}</p>}
           </div>
           <ChevronRight
             aria-hidden='true'
@@ -1377,7 +1368,7 @@ export function StreamPackEpisodeList({
       className='flex h-full min-h-0 flex-col outline-hidden animate-in fade-in duration-150 motion-reduce:animate-none'
     >
       <div className='shrink-0 px-3 pt-3'>
-        <div className='mb-2 flex items-center gap-3 rounded-xl border border-white/[0.07] bg-white/[0.025] px-3 py-2.5'>
+        <div className='mb-2 flex items-center gap-3 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2.5'>
           <button
             type='button'
             onClick={onBack}
@@ -1389,7 +1380,7 @@ export function StreamPackEpisodeList({
             <ChevronLeft aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
           </button>
           <div className='min-w-0 flex-1'>
-            <p className='flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/40'>
+            <p className='flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] leading-none text-white/50'>
               <span className='h-1 w-1 rounded-full bg-amber-400/80' />
               Episode pack
             </p>
@@ -1430,7 +1421,7 @@ export function StreamPackEpisodeList({
           {Array.from({ length: 4 }, (_, index) => (
             <div
               key={index}
-              className='flex items-center gap-3 rounded-xl border border-white/[0.05] px-2.5 py-2'
+              className='flex items-center gap-3 rounded-lg border border-white/[0.05] px-2.5 py-2'
             >
               <div className='h-12 w-[84px] shrink-0 animate-pulse rounded-md bg-white/[0.05] motion-reduce:animate-none' />
               <div className='flex-1 space-y-2'>

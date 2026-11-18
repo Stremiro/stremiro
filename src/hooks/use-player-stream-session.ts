@@ -16,6 +16,7 @@ export interface PlayerStreamSession extends ResolvedStreamSession {
 }
 
 interface UsePlayerStreamSessionArgs {
+  resolvedLaunchId?: number;
   routeSourceId?: string;
   routeSourceName?: string;
   routeStreamFamily?: string;
@@ -42,6 +43,7 @@ interface SessionStreamOverride {
 const streamSecrets = new WeakMap<SessionStreamOverride, StreamSecrets>();
 
 export function usePlayerStreamSession({
+  resolvedLaunchId,
   routeSourceId,
   routeSourceName,
   routeStreamFamily,
@@ -53,6 +55,7 @@ export function usePlayerStreamSession({
 }: UsePlayerStreamSessionArgs): PlayerStreamSession {
   // Routes carry identities only (URLs stripped); seed includes episode coordinates so advancing drops prior secrets.
   const routeSeed = JSON.stringify([
+    resolvedLaunchId ?? '',
     routeSourceId?.trim() ?? '',
     routeSourceName?.trim() ?? '',
     routeStreamFamily?.trim() ?? '',

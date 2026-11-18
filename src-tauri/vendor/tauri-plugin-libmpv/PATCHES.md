@@ -17,6 +17,8 @@ Local changes:
   userdata freed by teardown.
 - Filter unused event kinds through a borrowed header and emit retained JSON
   verbatim with `emit_str_to`, preserving teardown serialization.
+- Forward `start-file` so load failures received before the command acknowledgement
+  reach the app's recovery handler while initial idle snapshots remain suppressed.
 - Hold the instance mutex through synchronous native destruction, preventing
   overlapping destruction and replacement initialization; share poison recovery.
 - Leave close requests to the app's save-and-teardown barrier; clean up on

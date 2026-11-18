@@ -80,27 +80,28 @@ fn registry_shares_one_map_and_save_persists() {
 }
 
 #[test]
-fn open_path_rejects_invalid_files_without_caching_or_touching() {
+fn first_open_quarantines_corrupt_bytes_before_allowing_writes() {
     for (tag, bytes) in [
         ("corrupt", b"{not json" as &[u8]),
         ("empty", b"" as &[u8]),
         ("nonobject", b"[1, 2, 3]" as &[u8]),
     ] {
-        let path = TempPath::file(tag);
+        let dir = TempPath::dir(tag);
+        let path = dir.join("settings.json");
         std::fs::write(&path, bytes).expect("seed file");
         let registry = DurableStoreRegistry::default();
 
-        assert!(registry.open_path(path.to_path_buf()).is_err());
-        // A rejected open never truncates or rewrites the existing bytes.
-        assert_eq!(std::fs::read(&path).expect("read back"), bytes);
+        let store = registry.open_path(path.clone()).expect("recover store");
+        assert!(!path.exists());
+        let mut siblings = std::fs::read_dir(&dir).expect("read directory");
+        let quarantined = siblings.next().unwrap().unwrap().path();
+        assert!(siblings.next().is_none());
+        assert_eq!(std::fs::read(&quarantined).expect("read quarantine"), bytes);
 
-        // The failure is not registered: replacing the file loads cleanly
-        // from disk on the next open.
-        std::fs::write(&path, br#"{"ok": true}"#).expect("replace file");
-        let store = registry
-            .open_path(path.to_path_buf())
-            .expect("open valid file");
-        assert_eq!(store.get("ok"), Some(json!(true)));
+        store.set("ok", json!(true));
+        store.save().expect("save recovered store");
+        let reopened = DurableStoreRegistry::default().open_path(path).unwrap();
+        assert_eq!(reopened.get("ok"), Some(json!(true)));
     }
 }
 

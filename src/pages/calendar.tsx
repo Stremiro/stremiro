@@ -39,7 +39,6 @@ import {
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
-  ICON_CHIP_CLASS,
   PAGE_NOTICE_CLASS,
   pluralize,
   queryNeedsRetry,
@@ -135,7 +134,10 @@ function calendarEventLinkProps(
 
 // Grouping/sorting live in `get_calendar_events`; the frontend only parses `releaseDate`.
 const toCalendarEvents = (events: CalendarScheduleEvent[]) =>
-  events.map((event) => ({ ...event, date: Temporal.PlainDate.from(event.releaseDate) }));
+  events.map((event) => ({
+    ...event,
+    date: parseScheduleDay(event.releaseDate) ?? Temporal.PlainDate.from(event.releaseDate),
+  }));
 
 function focusCalendarToday(container: HTMLDivElement | null) {
   const today = container?.querySelector<HTMLElement>('[data-calendar-today]');
@@ -314,10 +316,10 @@ export function Calendar() {
             onClick={() => updatePreferences({ calendarHideWatched: !hideWatched })}
             title={hideWatched ? 'Show watched releases' : 'Hide watched releases'}
             className={cn(
-              'h-auto shrink-0 gap-1.5 rounded-xl border px-3 text-[12px] font-medium',
+              'h-auto min-h-11 shrink-0 gap-2 rounded-lg border px-3 text-[13px] font-medium',
               hideWatched
                 ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
-                : 'border-white/[0.08] bg-white/[0.025] text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+                : 'border-white/[0.12] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08] hover:text-white',
             )}
           >
             {hideWatched ? (
@@ -330,7 +332,7 @@ export function Calendar() {
           <div
             role='group'
             aria-label='Calendar navigation'
-            className='flex flex-1 md:flex-none items-center gap-0.5 rounded-xl border border-white/[0.08] bg-white/[0.025] p-1'
+            className='flex flex-1 md:flex-none items-center gap-0.5 rounded-lg border border-white/[0.12] bg-white/[0.04] p-1'
           >
             <Button
               variant='ghost'
@@ -339,7 +341,7 @@ export function Calendar() {
               aria-label='Previous month'
               aria-keyshortcuts='ArrowLeft'
               title='Previous month (←)'
-              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-lg'
+              className='group/month h-10 w-10 shrink-0 hover:bg-white/[0.08] rounded-md'
             >
               <ChevronLeft
                 aria-hidden='true'
@@ -347,7 +349,7 @@ export function Calendar() {
               />
             </Button>
             <div
-              className='px-1 font-medium text-[13px] flex-1 md:min-w-[130px] text-center text-zinc-200 tabular-nums'
+              className='px-2 font-semibold text-[15px] flex-1 md:min-w-[156px] text-center text-zinc-100 tabular-nums'
               aria-live='polite'
             >
               {MONTH_YEAR_FORMATTER.format(currentMonth)}
@@ -359,7 +361,7 @@ export function Calendar() {
               aria-label='Next month'
               aria-keyshortcuts='ArrowRight'
               title='Next month (→)'
-              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-lg'
+              className='group/month h-10 w-10 shrink-0 hover:bg-white/[0.08] rounded-md'
             >
               <ChevronRight
                 aria-hidden='true'
@@ -374,7 +376,7 @@ export function Calendar() {
               onClick={handleToday}
               title='Jump to today (T)'
               className={cn(
-                'ml-1 text-[12px] font-medium rounded-lg h-9 px-3 border',
+                'ml-1 text-[13px] font-medium rounded-md h-10 px-3 border',
                 isCurrentMonthView
                   ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
                   : 'border-white/[0.08] text-zinc-400 hover:text-white hover:bg-white/[0.06]',
@@ -406,9 +408,7 @@ export function Calendar() {
       ) : (
         schedule?.trackedCount === 0 && (
           <PageCard className='mb-5 flex flex-col items-center px-6 py-8 text-center'>
-            <span className={cn(ICON_CHIP_CLASS, 'mb-3 size-10 rounded-xl')}>
-              <CalendarDays className='h-5 w-5 text-zinc-400' />
-            </span>
+            <CalendarDays aria-hidden='true' className='mb-3 h-6 w-6 text-zinc-400' />
             <h2 className='text-[15px] font-semibold text-white'>Your schedule is empty</h2>
             <p className='mt-1 max-w-sm text-[13px] leading-relaxed text-zinc-500'>
               Add titles to your library or a list to track their release dates.
@@ -540,6 +540,9 @@ export function Calendar() {
           )}
           {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- Keyboard scrolling needs a focusable region. */}
           <PageCard>
+            <p className='border-b border-white/[0.06] px-4 py-2 text-xs text-zinc-400 md:hidden'>
+              Scroll horizontally to see the full week.
+            </p>
             <div
               ref={calendarRef}
               role='region'
@@ -562,10 +565,10 @@ export function Calendar() {
                     <div
                       key={day}
                       className={cn(
-                        'py-3 text-center text-[11px] font-medium',
+                        'py-3 text-center text-[12px] font-semibold uppercase tracking-[0.08em]',
                         isCurrentMonthView && dayIndex === now.dayOfWeek % 7
                           ? 'text-[var(--accent-nav)]'
-                          : 'text-zinc-500',
+                          : 'text-zinc-400',
                       )}
                     >
                       {day}
@@ -636,8 +639,10 @@ function UpcomingEventCard({
           className='w-9 h-[54px] rounded-sm bg-black/30 ring-0'
         />
         <div className='min-w-0 flex-1'>
-          <div className='text-[13px] font-medium text-zinc-200 truncate'>{event.seriesTitle}</div>
-          <div className='flex items-center gap-1 text-[11px] text-zinc-400'>
+          <div className='line-clamp-2 text-sm font-semibold leading-5 text-zinc-100'>
+            {event.seriesTitle}
+          </div>
+          <div className='mt-1 flex items-center gap-1 text-xs text-zinc-400'>
             {event.watched && <WatchedMark />}
             <span className='truncate'>
               {event.type === 'episode'
@@ -697,8 +702,7 @@ function CalendarDayCell({
       tabIndex={isToday ? -1 : undefined}
       className={cn(
         'min-w-0 min-h-[132px] p-1.5 sm:p-2 border-b border-r border-white/[0.05] relative group transition-colors duration-150 hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/50 motion-reduce:transition-none',
-        isToday &&
-          'bg-[rgb(var(--accent-nav-rgb)/0.035)] shadow-[inset_0_0_0_1px_rgb(var(--accent-nav-rgb)/0.18)]',
+        isToday && 'bg-white/[0.035] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.12)]',
         !isCurrentMonth && 'bg-black/20',
         isLastColumn && 'border-r-0',
       )}
@@ -709,22 +713,22 @@ function CalendarDayCell({
           aria-label={dayLabel}
           aria-current={isToday ? 'date' : undefined}
           className={cn(
-            'text-[12px] font-medium tabular-nums w-7 h-7 flex shrink-0 items-center justify-center rounded-md',
+            'text-[12px] font-medium tabular-nums w-7 h-7 flex shrink-0 items-center justify-center rounded-full',
             isToday
-              ? 'bg-[rgb(var(--accent-nav-rgb)/0.12)] text-[var(--accent-nav)] font-semibold'
+              ? 'bg-(--accent-nav) text-(--on-accent-nav) font-semibold'
               : isCurrentMonth
-                ? 'text-zinc-400 group-hover:text-zinc-300'
-                : 'text-zinc-600',
+                ? 'text-zinc-300 group-hover:text-zinc-100'
+                : 'text-zinc-500',
           )}
         >
           {day.day}
         </time>
         {isToday ? (
-          <span aria-hidden='true' className='truncate text-[10px] font-medium text-(--accent-nav)'>
+          <span aria-hidden='true' className='truncate text-[11px] font-medium text-(--accent-nav)'>
             Today
           </span>
         ) : dayEvents.length > 0 ? (
-          <span aria-hidden='true' className='px-1 text-[10px] tabular-nums text-zinc-500'>
+          <span aria-hidden='true' className='px-1 text-[11px] tabular-nums text-zinc-400'>
             {dayEvents.length}
           </span>
         ) : null}
@@ -752,8 +756,8 @@ function CalendarDayCell({
                   {...calendarEventLinkProps(event, from, onPrefetch, hideSpoilers)}
                   title={undefined}
                   className={cn(
-                    'min-h-10 w-full min-w-0 text-left hover:bg-white/[0.06] rounded-md px-1.5 py-1 transition-colors duration-150 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
-                    isToday && 'bg-white/[0.035]',
+                    'min-h-11 w-full min-w-0 text-left hover:bg-white/[0.07] rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-1.5 transition-colors duration-150 flex items-center gap-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
+                    isToday && 'bg-white/[0.05]',
                     event.watched && WATCHED_EVENT_CLASS,
                   )}
                 >
@@ -766,15 +770,10 @@ function CalendarDayCell({
                     />
                   )}
                   <span className='min-w-0 flex-1'>
-                    <span className='block truncate text-[12px] text-zinc-200 font-medium'>
+                    <span className='block line-clamp-2 text-[12px] leading-4 text-zinc-100 font-medium'>
                       {event.seriesTitle}
                     </span>
-                    <span
-                      className={cn(
-                        'flex items-center gap-1 text-[11px] tabular-nums',
-                        isToday ? 'text-[var(--accent-nav)]' : 'text-zinc-400',
-                      )}
-                    >
+                    <span className='flex items-center gap-1 text-[11px] tabular-nums text-zinc-400'>
                       {event.watched && <WatchedMark />}
                       <span className='truncate'>
                         {event.type === 'episode' ? episodeLabel || 'Episode' : 'Movie'}

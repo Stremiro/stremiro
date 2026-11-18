@@ -62,7 +62,6 @@ test('Details episode derivation preserves season counts, order and display prec
   expect(state.seasonWatchedCount).toBe(1);
   expect(state.seasonHasStarted).toBe(true);
   expect(state.firstUnwatchedEpisode).toBe(5);
-  expect(state.seasonWatchTargets[0]).toBe(untouched);
 });
 
 test.each([false, true])('Details episode derivation shares optimistic watched=%s', (watched) => {

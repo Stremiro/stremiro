@@ -337,10 +337,11 @@ pub async fn player_mpv_command(
         subtitles::SESSION.cancel();
     }
     if name == "set" {
-        let [property, value, ..] = args.as_mut_slice() else {
+        // Validation already proved the property is an allowed string.
+        let [Value::String(property), value, ..] = args.as_mut_slice() else {
             return Err("mpv 'set' requires a property and value".to_string());
         };
-        normalize_mpv_subtitle_property(property.as_str().unwrap_or_default(), value);
+        normalize_mpv_subtitle_property(property, value);
     }
     let mute_epoch = (name == "set" && args.first().and_then(Value::as_str) == Some("mute"))
         .then(next_mute_write_epoch);
@@ -356,8 +357,8 @@ pub async fn player_mpv_command(
             // loadfile drops every external track; forget their staged-path URLs.
             subtitles::SESSION.clear_tracks();
         }
-        if let ("set", [property, value, ..]) = (name.as_str(), args.as_slice()) {
-            remember_stream_header_fields(property.as_str().unwrap_or_default(), value);
+        if let ("set", [Value::String(property), value, ..]) = (name.as_str(), args.as_slice()) {
+            remember_stream_header_fields(property, value);
         }
         Ok(())
     })
@@ -387,7 +388,7 @@ pub async fn player_mpv_add_subtitle(
     let context_label = label.clone();
     let subtitle_url = url.clone();
     let (path, headers) = run_mpv_op("subtitle context", move || {
-        let path = mpv_property(&context_app, &context_label, "path".to_string(), "string")
+        let path = mpv_property(&context_app, &context_label, "path", "string")
             .and_then(|value| value.as_str().map(str::to_owned))
             .filter(|path| !path.is_empty())
             .ok_or_else(|| "No active playback for subtitle selection.".to_string())?;
@@ -407,7 +408,7 @@ pub async fn player_mpv_add_subtitle(
     run_mpv_op("subtitle add", move || {
         request.ensure_current()?;
         let mpv = app.mpv();
-        if !mpv_property(&app, &label, "path".to_string(), "string")
+        if !mpv_property(&app, &label, "path", "string")
             .is_some_and(|current| current.as_str() == Some(path.as_str()))
         {
             return Err("Playback changed during subtitle download.".to_string());
@@ -770,7 +771,7 @@ pub async fn player_mpv_get_playback_position(
             duration_secs,
             seek_target_secs,
             check_eof.unwrap_or(false),
-            |name, format| mpv_property(&app, window.label(), name.to_string(), format),
+            |name, format| mpv_property(&app, window.label(), name, format),
         ))
     })
     .await
@@ -778,12 +779,20 @@ pub async fn player_mpv_get_playback_position(
 
 pub(crate) async fn is_playback_active(app: AppHandle) -> bool {
     run_mpv_op("activity probe", move || {
-        let read = |name: &str| mpv_property(&app, "main", name.to_string(), "flag");
+        let read = |name: &str| mpv_property(&app, "main", name, "flag");
         let pause = read("pause");
         Ok(pause.is_some() && !property_flag(pause) && !property_flag(read("idle-active")))
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or_else(|error| {
+        crate::operational_log::log_warn(
+            "player",
+            "activity-probe",
+            "failed",
+            &[crate::operational_log::field("error", error)],
+        );
+        false
+    })
 }
 
 #[command]

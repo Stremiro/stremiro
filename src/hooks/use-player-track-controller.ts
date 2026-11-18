@@ -477,13 +477,15 @@ export function usePlayerTrackController({
       if (isCancelled() || manualSelectionEpoch !== manualTrackSelectionEpochRef.current[kind])
         return;
 
+      // An embedded match supersedes a pending addon fallback, or a late addon load would replace it.
       if (resolution.selectedMatches) {
         autoAppliedTrackPrefsRef.current[kind] = fingerprint;
+        if (kind === 'sub') setAddonSubtitleLanguage(null);
         return;
       }
       if (typeof resolution.matchedTrackId !== 'number') {
+        autoAppliedTrackPrefsRef.current[kind] = fingerprint;
         if (kind === 'sub') {
-          autoAppliedTrackPrefsRef.current.sub = fingerprint;
           setAddonSubtitleLanguage({ key: resetKey, language: preferredLanguage });
         }
         return;
@@ -499,6 +501,7 @@ export function usePlayerTrackController({
           preferredLanguage,
           trackListRef.current.filter((track) => track.type === kind),
         );
+        if (kind === 'sub') setAddonSubtitleLanguage(null);
       }
     },
     [resetKey, setTrack],

@@ -10,16 +10,18 @@ import { nonBlank } from '@/lib/utils';
 
 // Stable fallback so `?? []` never changes memo identity per render.
 const EMPTY_ADDON_SUBTITLES: AddonSubtitle[] = [];
+const MAX_AUTO_SUBTITLE_ATTEMPTS = 3;
 
 interface UsePlayerAddonSubtitlesOptions {
   activeStreamLoadKey: string;
   announce: (text: string, icon?: PlayerOsdMessageIcon) => void;
-  /** Preferred language no embedded track matches; loads the best addon subtitle once per language and stream load. */
+  /** Preferred language when the embedded tracks offer no match. */
   autoLoadLanguage: string | null;
   effectiveResolveMediaType: string;
   id?: string;
   menuOpen: boolean;
   mountedRef: RefObject<boolean>;
+  resolvedAbsoluteEpisode?: number;
   resolvedStreamEpisode?: number;
   resolvedStreamSeason?: number;
   selectAddonSubtitle: (
@@ -43,6 +45,7 @@ export function usePlayerAddonSubtitles({
   id,
   menuOpen,
   mountedRef,
+  resolvedAbsoluteEpisode,
   resolvedStreamEpisode,
   resolvedStreamSeason,
   selectAddonSubtitle,
@@ -71,6 +74,8 @@ export function usePlayerAddonSubtitles({
   // Trimmed so the query key matches what the API sends — untrimmed keys would fork the cache entry.
   const lookupMediaType = effectiveResolveMediaType.trim();
   const lookupMediaId = nonBlank(streamLookupId) ?? nonBlank(id);
+  const absoluteEpisode =
+    resolvedAbsoluteEpisode === resolvedStreamEpisode ? undefined : resolvedAbsoluteEpisode;
   const subtitlesEnabled =
     (menuOpen || autoLoadLanguage !== null) && lookupMediaType !== '' && !!lookupMediaId;
 
@@ -80,6 +85,7 @@ export function usePlayerAddonSubtitles({
       lookupMediaId,
       resolvedStreamSeason,
       resolvedStreamEpisode,
+      absoluteEpisode,
     ),
     queryFn: () => {
       if (!lookupMediaType || !lookupMediaId) throw new Error('Missing media identity');
@@ -88,6 +94,7 @@ export function usePlayerAddonSubtitles({
         lookupMediaId,
         resolvedStreamSeason,
         resolvedStreamEpisode,
+        absoluteEpisode,
       );
     },
     enabled: subtitlesEnabled,
@@ -122,36 +129,37 @@ export function usePlayerAddonSubtitles({
     const epoch = subtitleSessionEpochRef.current;
     let selected = false;
     setAddonSubtitleLoadingId(subtitleKey);
-    return (async () => {
+    try {
       // The controller owns track reuse and preferences; Rust owns download and native confirmation.
       selected = await selectAddonSubtitle(subtitle, { automatic });
       if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
       if (!selected) {
         if (!automatic) toast.error('Failed to load addon subtitle');
-        return;
+        return false;
       }
       setPickedAddonSubtitleId(subtitleKey);
       if (!automatic) announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
-    })()
-      .catch((error: unknown) => {
-        if (!automatic && mountedRef.current && epoch === subtitleSessionEpochRef.current) {
-          toast.error('Failed to load addon subtitle', { description: getErrorMessage(error) });
-        }
-      })
-      .finally(() => {
-        if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
-          if (automatic && !selected) autoLoadedLanguageRef.current = null;
-          subtitleLoadingRef.current = false;
-          setAddonSubtitleLoadingId(null);
-        }
-      });
+      return true;
+    } catch (error) {
+      if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
+      if (!automatic) {
+        toast.error('Failed to load addon subtitle', { description: getErrorMessage(error) });
+      }
+      return false;
+    } finally {
+      if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
+        if (automatic && !selected) autoLoadedLanguageRef.current = null;
+        subtitleLoadingRef.current = false;
+        setAddonSubtitleLoadingId(null);
+      }
+    }
   };
 
   // A manual pick clears `autoLoadLanguage`, so a late resolution never overrides it.
   const selectAutoLoadedSubtitle = useEffectEvent(
     (subtitle: AddonSubtitle, streamLoadKey: string, language: string) => {
       if (autoLoadLanguage === language && streamLoadKey === activeStreamLoadKey) {
-        void handleSelectAddonSubtitle(subtitle, { automatic: true });
+        return handleSelectAddonSubtitle(subtitle, { automatic: true });
       }
     },
   );
@@ -166,28 +174,30 @@ export function usePlayerAddonSubtitles({
     if (!loadedAddonSubtitles?.length || autoLoadedLanguageRef.current === autoLoadLanguage) return;
     const epoch = subtitleSessionEpochRef.current;
     let cancelled = false;
-    void api
-      .resolvePreferredTrackSelection(
-        loadedAddonSubtitles.map((subtitle, index) => ({
-          id: index,
-          lang: subtitle.lang,
-          title: subtitle.label,
-        })),
-        autoLoadLanguage,
-      )
-      .then(({ matchedTrackId }) => {
-        const subtitle =
-          matchedTrackId === undefined ? undefined : loadedAddonSubtitles[matchedTrackId];
-        if (
-          subtitle &&
-          !cancelled &&
-          epoch === subtitleSessionEpochRef.current &&
-          autoLoadedLanguageRef.current !== autoLoadLanguage
-        ) {
-          selectAutoLoadedSubtitle(subtitle, activeStreamLoadKey, autoLoadLanguage);
-        }
-      })
-      .catch(() => undefined);
+    const language = autoLoadLanguage;
+    const subtitles = loadedAddonSubtitles;
+    const stillCurrent = () => !cancelled && epoch === subtitleSessionEpochRef.current;
+    let candidates = subtitles.map((subtitle, index) => ({
+      id: index,
+      lang: subtitle.lang,
+      title: subtitle.label,
+    }));
+    const tryPreferredSubtitle = async (attemptsLeft: number): Promise<void> => {
+      if (!stillCurrent() || !candidates.length || autoLoadedLanguageRef.current === language) {
+        return;
+      }
+      const { matchedTrackId } = await api.resolvePreferredTrackSelection(candidates, language);
+      const subtitle = matchedTrackId === undefined ? undefined : subtitles[matchedTrackId];
+      if (!subtitle || !stillCurrent()) return;
+      const selected = await selectAutoLoadedSubtitle(subtitle, activeStreamLoadKey, language);
+      if (selected === false && attemptsLeft > 1) {
+        candidates = candidates.filter(
+          (candidate) => subtitles[candidate.id]?.url !== subtitle.url,
+        );
+        await tryPreferredSubtitle(attemptsLeft - 1);
+      }
+    };
+    void tryPreferredSubtitle(MAX_AUTO_SUBTITLE_ATTEMPTS).catch(() => undefined);
     return () => {
       cancelled = true;
     };

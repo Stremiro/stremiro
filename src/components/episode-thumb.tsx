@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { cn } from '@/lib/utils';
@@ -6,6 +7,10 @@ import { cn } from '@/lib/utils';
 export function EpisodeThumb({
   episode,
   src,
+  fallbackSrc,
+  fallbackLabel,
+  fadeIn,
+  children,
   isSpoiler,
   progressPercent,
   className,
@@ -15,6 +20,10 @@ export function EpisodeThumb({
 }: {
   episode: number;
   src?: string;
+  fallbackSrc?: string;
+  fallbackLabel?: ReactNode;
+  fadeIn?: boolean;
+  children?: ReactNode;
   isSpoiler?: boolean;
   progressPercent: number;
   className?: string;
@@ -22,14 +31,18 @@ export function EpisodeThumb({
   imageClassName?: string;
   stripClassName?: string;
 }) {
+  const primarySrc = src || fallbackSrc;
+  const secondarySrc = src && fallbackSrc && src !== fallbackSrc ? fallbackSrc : undefined;
   return (
     <div className={cn('relative shrink-0 overflow-hidden bg-zinc-900', className)}>
       <div className={cn('absolute inset-0 flex items-center justify-center', fallbackClassName)}>
-        E{episode}
+        {fallbackLabel ?? `E${episode}`}
       </div>
-      {src && (
+      {primarySrc && (
         <RemoteImage
-          src={src}
+          src={primarySrc}
+          fallbackSrc={secondarySrc}
+          fadeIn={fadeIn}
           loading='lazy'
           className={cn(
             'relative h-full w-full object-cover',
@@ -39,6 +52,7 @@ export function EpisodeThumb({
           alt=''
         />
       )}
+      {children}
       <WatchProgressStrip percent={progressPercent} className={stripClassName} />
     </div>
   );

@@ -1,10 +1,13 @@
-import { AudioLines, Captions, Check, Loader2, Minus, Plus } from 'lucide-react';
+import { AudioLines, Captions, Check, Loader2, Minus, Plus, RotateCcw } from 'lucide-react';
 import { type ReactNode, useId, useRef, useState } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
   CHROME_ICON_STROKE,
+  CHROME_MENU_HEADING_CLASS,
   CHROME_MENU_INDICATOR_CLASS,
+  CHROME_MENU_ITEM_IDLE_CLASS,
+  CHROME_MENU_ITEM_SELECTED_CLASS,
   CHROME_MENU_ROW_FOCUS_CLASS,
   CHROME_POPOVER_CLASS,
 } from '@/components/player-chrome-styles';
@@ -24,24 +27,22 @@ import { clamp, cn, queryNeedsRetry } from '@/lib/utils';
 
 const TRACK_SETTINGS_DOT_CLASS =
   'absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-(--accent-act)';
-const TRACK_RESET_BUTTON_CLASS = cn(
+/** Nudge steppers and the icon-only resets share one compact square. */
+const TRACK_ICON_BUTTON_CLASS = cn(
   CHROME_MENU_ROW_FOCUS_CLASS,
-  'h-8 shrink-0 rounded-md px-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300',
-);
-const TRACK_NUDGE_BUTTON_CLASS = cn(
-  CHROME_MENU_ROW_FOCUS_CLASS,
-  'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300',
+  'flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-400',
 );
 const SUBTITLE_VIEW_TAB_CLASS = cn(
   CHROME_MENU_ROW_FOCUS_CLASS,
-  'relative z-10 flex h-9 flex-1 items-center justify-center gap-1.5 rounded-md text-[13px] font-medium transition-colors duration-150 motion-reduce:transition-none',
+  'relative z-10 flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md text-[12px] font-medium transition-colors duration-150 motion-reduce:transition-none',
 );
-const SUBTITLE_VIEW_TAB_ACTIVE_CLASS = 'text-white';
-const SUBTITLE_VIEW_TAB_INACTIVE_CLASS = 'text-zinc-400 hover:text-white';
 const TRACK_ROW_CLASS = cn(
   CHROME_MENU_ROW_FOCUS_CLASS,
-  'flex min-h-10 w-full cursor-pointer items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left text-[13px] font-medium leading-snug transition-colors aria-disabled:cursor-wait',
+  'flex min-h-11 w-full cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-[14px] font-medium leading-snug transition-colors aria-disabled:cursor-wait',
 );
+const TRACK_FOOTER_ROW_CLASS = 'flex min-h-8 items-center justify-between gap-2';
+const TRACK_NOTE_CLASS = 'px-2 py-2.5 text-xs leading-relaxed text-zinc-400';
+const RESET_ICON = <RotateCcw aria-hidden='true' className='size-3.5' />;
 
 interface TrackSelectRowProps {
   label: string;
@@ -72,9 +73,7 @@ function TrackSelectRow({
       type='button'
       className={cn(
         TRACK_ROW_CLASS,
-        selected
-          ? 'bg-white/[0.08] text-white'
-          : 'text-zinc-300 hover:bg-white/[0.06] hover:text-white',
+        selected ? CHROME_MENU_ITEM_SELECTED_CLASS : CHROME_MENU_ITEM_IDLE_CLASS,
         busy && 'opacity-60',
         className,
       )}
@@ -95,7 +94,7 @@ function TrackSelectRow({
         {showSpinner ? (
           <Loader2 className='h-3.5 w-3.5 animate-spin text-white/70 motion-reduce:animate-none' />
         ) : selected ? (
-          <Check className='h-3.5 w-3.5 text-white' strokeWidth={CHROME_ICON_STROKE} />
+          <Check className='h-3.5 w-3.5 text-(--accent-act)' strokeWidth={CHROME_ICON_STROKE} />
         ) : null}
       </span>
     </button>
@@ -156,58 +155,56 @@ export function AudioTrackSelector({
         aria-labelledby={headingId}
         className={cn(
           CHROME_POPOVER_CLASS,
-          'flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-[22rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden p-2',
+          'flex max-h-[min(30rem,var(--radix-popover-content-available-height))] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden',
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className='flex min-h-10 shrink-0 items-center justify-between gap-2 px-2.5'>
-          <h4 id={headingId} className='text-[13px] font-semibold text-zinc-200'>
+        <div className='flex shrink-0 items-center justify-between gap-2'>
+          <h4 id={headingId} className={CHROME_MENU_HEADING_CLASS}>
             Audio
           </h4>
           {isHydrating && !hasPreferencesError && (
-            <span role='status' className='text-xs text-zinc-400'>
-              Loading preferences…
+            <span role='status' className='px-2 pb-0.5 text-[11px] text-zinc-500'>
+              Loading…
             </span>
           )}
         </div>
         {hasPreferencesError && (
           <RetryBanner
-            className='mx-2.5 mb-2 px-2.5 py-2'
+            className='mx-1 mb-1.5 px-2.5 py-2'
             message="Couldn't load your preferences."
             isRetrying={preferencesQuery.isFetching}
             onRetry={() => void preferencesQuery.refetch()}
           />
         )}
-        <div className='min-h-0 flex-1 overflow-y-auto overscroll-contain'>
-          <div className='space-y-px'>
-            {audioTracks.map((track) => (
-              <TrackSelectRow
-                key={track.id}
-                label={track.displayLabel}
-                selected={!!track.selected}
-                busy={trackSwitching.audio}
-                onSelect={() => onSelectTrack(track.id)}
-              />
-            ))}
-            {audioTracks.length === 0 && (
-              <p className='px-2.5 py-3 text-[13px] leading-relaxed text-zinc-400'>
-                No audio tracks in this stream.
-              </p>
-            )}
-          </div>
+        <div className='min-h-0 flex-1 space-y-px overflow-y-auto overscroll-contain'>
+          {audioTracks.map((track) => (
+            <TrackSelectRow
+              key={track.id}
+              label={track.displayLabel}
+              selected={!!track.selected}
+              busy={trackSwitching.audio}
+              onSelect={() => onSelectTrack(track.id)}
+            />
+          ))}
+          {audioTracks.length === 0 && (
+            <p className={TRACK_NOTE_CLASS}>No audio tracks in this stream.</p>
+          )}
         </div>
-        <div className='mx-2.5 mt-2 shrink-0 border-t border-white/[0.07] pt-1 pb-1'>
+        <div className='mt-1.5 shrink-0 border-t border-white/[0.07] px-2 pt-1'>
           {/* eslint-disable-next-line jsx-a11y/label-has-associated-control -- Switch renders the single labelable button. */}
           <label
-            className={cn(
-              'flex min-h-10 items-center justify-between gap-3',
-              isHydrating ? 'cursor-wait' : 'cursor-pointer',
-            )}
+            className={cn(TRACK_FOOTER_ROW_CLASS, isHydrating ? 'cursor-wait' : 'cursor-pointer')}
             title='Boosts quiet audio and smooths volume changes.'
           >
-            <span className='text-[13px] font-medium text-zinc-200'>Night mode</span>
-            <span id={`${headingId}-night-description`} className='sr-only'>
-              Boosts quiet audio and smooths volume changes.
+            <span className='min-w-0 py-2'>
+              <span className='block text-[13px] font-medium text-zinc-200'>Night mode</span>
+              <span
+                id={`${headingId}-night-description`}
+                className='mt-1 block text-xs leading-5 text-zinc-400'
+              >
+                Boosts quiet audio and smooths volume changes.
+              </span>
             </span>
             <Switch
               ariaLabel='Night mode'
@@ -221,18 +218,19 @@ export function AudioTrackSelector({
             />
           </label>
           <div
-            className='flex min-h-10 items-center justify-between gap-1'
+            className={cn(TRACK_FOOTER_ROW_CLASS, 'gap-0.5')}
             title='Adjust only if sound and picture are out of sync.'
           >
-            <span className='mr-auto text-[13px] font-medium text-zinc-300'>Audio sync</span>
+            <span className='mr-auto text-[13px] font-medium text-zinc-200'>Audio sync</span>
             <AudioSyncStepper
               audioDelay={audioDelay}
               isHydrating={isHydrating}
               updatePreferences={updatePreferences}
-              buttonClassName={TRACK_NUDGE_BUTTON_CLASS}
-              resetClassName={TRACK_RESET_BUTTON_CLASS}
-              outputClassName='w-14 shrink-0 text-center text-[13px] tabular-nums text-zinc-100'
-              resetContent='Reset'
+              buttonClassName={TRACK_ICON_BUTTON_CLASS}
+              resetClassName={TRACK_ICON_BUTTON_CLASS}
+              outputClassName='w-11 shrink-0 text-center text-[12px] tabular-nums text-zinc-100'
+              resetContent={RESET_ICON}
+              resetTitle='Reset audio sync'
               live
             />
           </div>
@@ -305,9 +303,8 @@ export function SubtitleTrackSelector({
   const { subtitleFont, subtitleColor, subtitleEdge, subtitleBold, subtitleItalic } = preferences;
   const headingId = useId();
   const selectedSubTrack = subTracks.find((track) => track.selected);
-  const selectedSubLabel = selectedSubTrack?.displayLabel;
   const subtitlesShownOff = !selectedSubTrack;
-  const subStateLabel = subtitlesShownOff ? 'Off' : (selectedSubLabel ?? 'On');
+  const subStateLabel = selectedSubTrack?.displayLabel ?? 'Off';
   const hasSubtitleAdjustments =
     subtitleDelay !== 0 || subtitlePos !== 100 || subtitleScale !== 1.0;
   const hasAppearanceChanges = hasSubtitleAppearance(preferences);
@@ -357,27 +354,28 @@ export function SubtitleTrackSelector({
         aria-labelledby={headingId}
         className={cn(
           CHROME_POPOVER_CLASS,
-          'flex max-h-[min(36rem,var(--radix-popover-content-available-height))] w-[22rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden p-2',
+          'flex max-h-[min(34rem,var(--radix-popover-content-available-height))] w-[19rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden',
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className='flex min-h-10 shrink-0 items-center justify-between gap-2 pl-2.5 pr-1'>
-          <h4 id={headingId} className='text-[13px] font-semibold text-zinc-200'>
+        <div className='flex shrink-0 items-center justify-between gap-2'>
+          <h4 id={headingId} className={CHROME_MENU_HEADING_CLASS}>
             Subtitles
           </h4>
           <StepButton
-            className={TRACK_RESET_BUTTON_CLASS}
+            className={TRACK_ICON_BUTTON_CLASS}
             label='Reset subtitle settings'
+            title='Reset subtitle settings'
             disabled={!canResetSubtitleSettings}
             onStep={resetSubtitleSettings}
           >
-            Reset
+            {RESET_ICON}
           </StepButton>
         </div>
 
         {hasPreferencesError && (
           <RetryBanner
-            className='mx-2.5 mb-2 px-2.5 py-2'
+            className='mx-1 mb-1.5 px-2.5 py-2'
             message="Couldn't load your preferences."
             isRetrying={preferencesQuery.isFetching}
             onRetry={() => void preferencesQuery.refetch()}
@@ -387,7 +385,7 @@ export function SubtitleTrackSelector({
           role='group'
           aria-label='Subtitle view'
           ref={setViewTabsNode}
-          className='relative isolate mx-1 mb-1.5 mt-1 flex shrink-0 rounded-lg bg-white/[0.05] p-0.5'
+          className='relative isolate mb-1.5 flex shrink-0 rounded-lg bg-white/[0.05] p-0.5'
         >
           {viewIndicator && (
             <span
@@ -416,7 +414,7 @@ export function SubtitleTrackSelector({
               aria-pressed={view === tab}
               className={cn(
                 SUBTITLE_VIEW_TAB_CLASS,
-                view === tab ? SUBTITLE_VIEW_TAB_ACTIVE_CLASS : SUBTITLE_VIEW_TAB_INACTIVE_CLASS,
+                view === tab ? 'text-white' : 'text-zinc-400 hover:text-white',
               )}
               onClick={() => setView(tab)}
             >
@@ -448,7 +446,7 @@ export function SubtitleTrackSelector({
           className='player-menu-swap min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain'
         >
           {view !== 'style' && (
-            <div className='min-h-[9rem]'>
+            <div className='min-h-[8rem]'>
               {subTracks.length > 0 && (
                 <TrackSelectRow
                   label='Turn subtitles off'
@@ -473,10 +471,7 @@ export function SubtitleTrackSelector({
                   {addonSubtitlesError &&
                   addonSubtitles.length === 0 ? null : addonSubtitlesLoading &&
                     addonSubtitles.length === 0 ? (
-                    <p
-                      role='status'
-                      className='flex items-center gap-2 px-2.5 py-3 text-xs text-zinc-400'
-                    >
+                    <p role='status' className={cn(TRACK_NOTE_CLASS, 'flex items-center gap-2')}>
                       <Loader2
                         aria-hidden='true'
                         className='h-3 w-3 animate-spin motion-reduce:animate-none'
@@ -484,13 +479,11 @@ export function SubtitleTrackSelector({
                       Loading addon subtitles…
                     </p>
                   ) : !addonSubtitlesAvailable ? (
-                    <p className='px-2.5 py-3 text-xs leading-relaxed text-zinc-400'>
+                    <p className={TRACK_NOTE_CLASS}>
                       Addon subtitles are unavailable for this title.
                     </p>
                   ) : addonSubtitles.length === 0 ? (
-                    <p className='px-2.5 py-3 text-xs leading-relaxed text-zinc-400'>
-                      No addon subtitles found for this title.
-                    </p>
+                    <p className={TRACK_NOTE_CLASS}>No addon subtitles found for this title.</p>
                   ) : (
                     addonSubtitles.map((subtitle) => {
                       const langCode = subtitle.lang?.trim().toUpperCase();
@@ -546,9 +539,7 @@ export function SubtitleTrackSelector({
                     />
                   ))}
                   {subTracks.length === 0 && (
-                    <p className='px-2.5 py-3 text-xs leading-relaxed text-zinc-400'>
-                      No subtitle tracks in this stream.
-                    </p>
+                    <p className={TRACK_NOTE_CLASS}>No subtitle tracks in this stream.</p>
                   )}
                 </div>
               )}
@@ -556,7 +547,7 @@ export function SubtitleTrackSelector({
           )}
 
           {view === 'style' && (
-            <div className='shrink-0 px-2.5 pt-1 pb-1.5'>
+            <div className='shrink-0 px-1.5 pb-1'>
               <SubtitleAppearanceControls
                 subtitleFont={subtitleFont}
                 subtitleColor={subtitleColor}
@@ -567,7 +558,7 @@ export function SubtitleTrackSelector({
                 compact
                 onPatch={updatePreferences}
               />
-              <div className='mt-2.5 space-y-1 border-t border-white/[0.07] pt-2'>
+              <div className='mt-2 space-y-0.5 border-t border-white/[0.07] pt-1'>
                 {(
                   [
                     {
@@ -613,7 +604,7 @@ export function SubtitleTrackSelector({
                 ).map((row) => (
                   // Label + value on one line, the slider underneath: the control
                   // gets the full panel width instead of a squeezed middle third.
-                  <div key={row.key} className='pt-1.5'>
+                  <div key={row.key} className='pt-1'>
                     <div className='flex items-baseline justify-between gap-2'>
                       <span className='text-[11px] font-medium text-zinc-400'>{row.label}</span>
                       <span className='text-[11px] font-medium tabular-nums text-zinc-200'>
@@ -622,7 +613,7 @@ export function SubtitleTrackSelector({
                     </div>
                     <div className='flex items-center gap-1.5'>
                       <StepButton
-                        className={TRACK_NUDGE_BUTTON_CLASS}
+                        className={TRACK_ICON_BUTTON_CLASS}
                         label={row.decreaseLabel}
                         title={row.decreaseLabel}
                         disabled={isHydrating || row.current <= row.min}
@@ -646,7 +637,7 @@ export function SubtitleTrackSelector({
                         className='h-6 min-w-0 flex-1'
                       />
                       <StepButton
-                        className={TRACK_NUDGE_BUTTON_CLASS}
+                        className={TRACK_ICON_BUTTON_CLASS}
                         label={row.increaseLabel}
                         title={row.increaseLabel}
                         disabled={isHydrating || row.current >= row.max}

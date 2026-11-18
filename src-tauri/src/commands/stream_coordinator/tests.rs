@@ -215,6 +215,7 @@ fn sort_stream(source: &str) -> AddonStream {
 
 fn no_match_context() -> StreamMatchContext<'static> {
     StreamMatchContext {
+        accepted_years: &[],
         media_type: "series",
         title: None,
         episode_targets: &[],
@@ -236,6 +237,7 @@ fn episode_match_context_final<'a>(
     is_final_season: bool,
 ) -> StreamMatchContext<'a> {
     StreamMatchContext {
+        accepted_years: &[],
         media_type: "series",
         title: Some(title),
         episode_targets,
@@ -561,6 +563,7 @@ fn ranking_language_evidence_excludes_reference_title_words() {
         plain.name = Some(format!("{title} 1080p"));
         let fixture = RecommendationFixture {
             match_context: StreamMatchContext {
+                accepted_years: &[],
                 title: Some(title),
                 ..no_match_context()
             },
@@ -588,17 +591,30 @@ fn ranking_language_evidence_excludes_reference_title_words() {
 
 #[test]
 fn stream_audit_labelled_language_overrides_reference_title_suppression() {
-    let reference = build_reference_title(Some("English Teacher")).unwrap();
-    for (text, expected) in [
-        ("english teacher 1080p", 0),
-        ("english teacher 1080p english audio", 4),
-        ("english teacher 1080p audio: english", 4),
-        ("english teacher 1080p english dub", 4),
-        ("english teacher 1080p english subtitles", 3),
-        ("english teacher 1080p subtitles: english", 3),
-        ("english teacher 1080p [en]", 6),
-        ("english teacher 1080p [en] subtitles", 3),
+    for (title, text, expected) in [
+        ("English Teacher", "english teacher 1080p", 0),
+        ("English Teacher", "english teacher 1080p english audio", 4),
+        ("English Teacher", "english teacher 1080p audio: english", 4),
+        ("English Teacher", "english teacher 1080p english dub", 4),
+        (
+            "English Teacher",
+            "english teacher 1080p english subtitles",
+            3,
+        ),
+        (
+            "English Teacher",
+            "english teacher 1080p subtitles: english",
+            3,
+        ),
+        ("English Teacher", "english teacher 1080p [en]", 6),
+        ("English Teacher", "english teacher 1080p [en] subtitles", 3),
+        ("English Dub", "english dub 1080p", 0),
+        ("English Dub", "english.dub.1080p", 0),
+        ("English Dub", "english dub 1080p english audio", 4),
+        ("English Dub", "english dub 1080p subtitles: english", 3),
+        ("English Dub", "english dub 1080p [en]", 6),
     ] {
+        let reference = build_reference_title(Some(title)).unwrap();
         assert_eq!(
             stream_language_preference_priority(
                 text,
@@ -608,51 +624,42 @@ fn stream_audit_labelled_language_overrides_reference_title_suppression() {
             )
             .0,
             expected,
-            "{text}"
-        );
-    }
-    let reference = build_reference_title(Some("English Dub")).unwrap();
-    for (text, expected) in [
-        ("english dub 1080p", 0),
-        ("english.dub.1080p", 0),
-        ("english dub 1080p english audio", 4),
-        ("english dub 1080p subtitles: english", 3),
-        ("english dub 1080p [en]", 6),
-    ] {
-        assert_eq!(
-            stream_language_preference_priority(
-                text,
-                canonicalize_language_prefs(Some("en"), Some("en")),
-                detect_stream_flags(text),
-                Some(&reference),
-            )
-            .0,
-            expected,
-            "{text}"
+            "{title}: {text}"
         );
     }
 }
 
 #[test]
-fn title_relevance_preserves_initialisms_digits_and_repeated_words() {
-    for (title, release, expected) in [
-        ("Full Metal Alchemist", "FMA 1080p", 2),
-        ("Se7en", "Se7en 1080p", 4),
-        ("S1m0ne", "S1m0ne 1080p", 4),
-        ("Alpha Beta Gamma", "Alpha Beta Gamma Extra Extra 720p", 4),
+fn title_relevance_preserves_initialisms_sequels_and_repeated_words() {
+    for (media_type, title, release, expected) in [
+        ("series", "Full Metal Alchemist", "FMA 1080p", 2),
+        ("series", "Se7en", "Se7en 1080p", 4),
+        ("series", "S1m0ne", "S1m0ne 1080p", 4),
         (
+            "series",
+            "Alpha Beta Gamma",
+            "Alpha Beta Gamma Extra Extra 720p",
+            4,
+        ),
+        (
+            "series",
             "Alpha Beta Gamma",
             "Alpha Alpha Beta Beta Gamma Gamma 720p",
             4,
         ),
+        ("movie", "Dune", "Dune 2 Dune 1080p", 2),
+        ("movie", "Dune", "Dune II Dune 1080p", 2),
+        ("movie", "Dune", "Dune 2.0 Dune 1080p", 4),
+        ("movie", "Dune", "Dune 2 K Dune 1080p", 4),
+        ("movie", "Dune", "Dune 2021 Dune 1080p", 4),
     ] {
         let reference = build_reference_title(Some(title));
         let mut stream = sort_stream("alpha");
         stream.name = Some(release.to_string());
         assert_eq!(
-            super::stream_title_relevance_score(&stream, "series", reference.as_ref()),
+            super::stream_title_relevance_score(&stream, media_type, &[], reference.as_ref()),
             expected,
-            "{title}"
+            "{media_type} {title}: {release}"
         );
     }
 }
@@ -683,6 +690,7 @@ fn recommendation_reasons_preserve_order_cap_and_fallback() {
     let baseline = StreamRecommendationKey {
         episode_match: StreamEpisodeMatchKind::None,
         season_claim_verified: false,
+        year_conflict: std::cmp::Reverse(false),
         title_match: 0,
         viability: 0,
         audio_language_conflict: std::cmp::Reverse(false),
@@ -691,6 +699,7 @@ fn recommendation_reasons_preserve_order_cap_and_fallback() {
         family: 2,
         title_source_affinity: 0,
         quality: 0,
+        year_verified: false,
         language_bonus: 0,
         source_priority: 0,
         oversize: std::cmp::Reverse(false),
@@ -841,6 +850,7 @@ fn final_season_claim_scopes_to_the_canonical_season() {
 
     // Canonical pair IS the final season: the numberless claim verifies.
     let context = StreamMatchContext {
+        accepted_years: &[],
         media_type: "series",
         title: Some("Show"),
         episode_targets: &[(3, 5)],
@@ -855,6 +865,7 @@ fn final_season_claim_scopes_to_the_canonical_season() {
     // season 3, so the query battery must see a conflicting season
     // claim — the canonical battery then finds no E08 either.
     let context = StreamMatchContext {
+        accepted_years: &[],
         episode_targets: &[(1, 5), (3, 8)],
         ..context
     };
@@ -1084,26 +1095,22 @@ fn sort_assigns_selection_priority_from_key() {
         &mut StreamSignalCache::default(),
     );
 
-    assert_eq!(
-        streams[0].selection_priority,
-        Some(SelectionPriority {
-            episode_match: StreamEpisodeMatchKind::Exact,
-            season_claim_verified: true,
-            title_match: 4,
-            viability: 1,
-            language: 6,
-        })
-    );
-    assert_eq!(
-        streams[1].selection_priority,
-        Some(SelectionPriority {
-            episode_match: StreamEpisodeMatchKind::None,
-            season_claim_verified: false,
-            title_match: 4,
-            viability: 1,
-            language: 0,
-        })
-    );
+    for (stream, episode_match, season_claim_verified, language) in [
+        (&streams[0], StreamEpisodeMatchKind::Exact, true, 6),
+        (&streams[1], StreamEpisodeMatchKind::None, false, 0),
+    ] {
+        assert_eq!(
+            stream.selection_priority,
+            Some(SelectionPriority {
+                year_not_conflicting: true,
+                episode_match,
+                season_claim_verified,
+                title_match: 4,
+                viability: 1,
+                language,
+            })
+        );
+    }
 }
 
 #[test]
@@ -1208,7 +1215,7 @@ fn release_tag_spellings_never_count_as_title_extras() {
     for spelling in FLAG_SPELLINGS {
         for word in tokenize_title_words(&normalize_token_text(spelling), false) {
             assert!(
-                is_title_boundary_token(word) || is_neutral_title_extra(word, "series"),
+                is_title_boundary_token(word) || is_neutral_title_extra(word, "series", &[]),
                 "flag spelling `{spelling}` tokenizes to `{word}`, which counts as a title extra"
             );
         }
@@ -1251,4 +1258,64 @@ recommendation_sort_tests! {
             (preferred, standard)
         })
     };
+}
+
+#[test]
+fn avatar_work_year_identity_precedes_quality_but_verified_year_is_only_a_tiebreaker() {
+    let fixture = RecommendationFixture {
+        match_context: StreamMatchContext {
+            accepted_years: &[2005, 2006],
+            ..episode_match_context("Avatar The Last Airbender", &[(1, 5)])
+        },
+        ..Default::default()
+    };
+    let releases = [
+        (
+            "live-2024",
+            "Avatar.The.Last.Airbender.2024.S01E05.2160p.NF.WEB-DL.DV.HDR",
+        ),
+        ("yearless", "Avatar.The.Last.Airbender.S01E05.1080p.BluRay"),
+        ("sd-2005", "Avatar.The.Last.Airbender.2005.S01E05.480p.SD"),
+        (
+            "live-2026",
+            "Avatar.The.Last.Airbender.2026.S01E05.2160p.NF.WEB-DL.DV.HDR",
+        ),
+        (
+            "animated",
+            "Avatar.The.Last.Airbender.2005.S01E05.1080p.BluRay",
+        ),
+    ];
+    let mut streams: Vec<_> = releases
+        .into_iter()
+        .map(|(id, title)| AddonStream {
+            name: Some("Torrentio".into()),
+            title: Some(title.into()),
+            url: Some(format!("https://cdn.example/{id}.mkv")),
+            ..test_stream()
+        })
+        .collect();
+    streams = prepare_addon_streams(streams, "Torrentio", "alpha");
+    sort_streams_by_recommendation(
+        &mut streams,
+        fixture.inputs(),
+        &mut StreamSignalCache::default(),
+    );
+    assert_eq!(
+        streams[..3]
+            .iter()
+            .map(|stream| stream.url.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "https://cdn.example/animated.mkv",
+            "https://cdn.example/yearless.mkv",
+            "https://cdn.example/sd-2005.mkv"
+        ]
+    );
+    let best = streams[0].selection_priority.unwrap();
+    for stream in &streams[3..] {
+        assert!(!stream.selection_priority.unwrap().covers(&best));
+    }
+    assert!(!is_neutral_title_extra("2024", "series", &[2005]));
+    assert!(is_neutral_title_extra("2005", "series", &[2005]));
+    assert!(is_neutral_title_extra("2024", "series", &[]));
 }

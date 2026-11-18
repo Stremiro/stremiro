@@ -3,7 +3,7 @@ use super::{
     episode_navigation::build_source_episode_coordinates,
     js_trim,
     media_normalization::{normalize_media_details, with_requested_media_id},
-    normalize_media_id, normalize_stream_media_type, normalize_watch_progress_type,
+    normalize_media_id, normalize_stream_media_type,
     playback_state::{PlaybackEpisodeMappingSnapshot, PlaybackStateService},
     streaming_helpers::{build_stream_query_ids, push_bounded_error},
     watch_history_commands::{
@@ -239,16 +239,15 @@ fn enrich_episode_targets(
     episodes
 }
 
-async fn fetch_media_details_shared_inner(
+pub(super) async fn fetch_media_details_shared_inner(
     app: &AppHandle,
     client: &AddonResourceClient,
     media_type: &str,
     id: &str,
 ) -> Result<Arc<MediaDetails>, String> {
-    // Same canonical fold as watch progress: Cinemeta serves anime under
-    // `series`, so one mapping owns both.
-    let media_type = normalize_watch_progress_type(media_type)
-        .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?;
+    // Keep addon-facing types intact; the registry chooses series fallbacks per source.
+    let media_type = normalize_stream_media_type(media_type, None)
+        .ok_or_else(|| "Invalid media type for details lookup.".to_string())?;
     super::addon_registry::fetch_meta_details(app, client, &media_type, id).await
 }
 
@@ -293,10 +292,19 @@ pub async fn get_media_details(
 
     let mut details =
         fetch_media_details_inner(&app, &client, &media_type, &id, include_episodes).await?;
-    client
+    let matched = client
         .repair_episode_artwork(&mut details, normalize_media_details)
         .await;
+    if let Some(enrichment) = app.try_state::<crate::providers::enrichment::EnrichmentClient>() {
+        crate::providers::addon_resource::enrich_missing_episode_artwork(
+            &enrichment,
+            &mut details,
+            &matched,
+        )
+        .await;
+    }
 
+    let work_years = PlaybackStateService::work_years_from_details(&details);
     if let Some(episodes) = details.episodes.take() {
         let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
         // Mapping reads are gated to series|anime — writes for other types are
@@ -315,6 +323,7 @@ pub async fn get_media_details(
                         &cache_id,
                         Some(fallback_owned.as_str()),
                         &cache_episodes,
+                        work_years,
                     )
                 })
                 .await;
@@ -422,10 +431,12 @@ pub async fn get_addon_subtitles(
     id: String,
     season: Option<u32>,
     episode: Option<u32>,
+    absolute_episode: Option<u32>,
 ) -> Result<Vec<SourcedAddonSubtitle>, String> {
-    let (effective_type, query_ids) = subtitle_lookup_ids(&media_type, &id, season, episode)?;
+    let (media_type, query_ids) =
+        subtitle_lookup_ids(&media_type, &id, season, episode, absolute_episode)?;
 
-    super::addon_registry::fetch_addon_subtitles(&app, &client, &effective_type, &query_ids).await
+    super::addon_registry::fetch_addon_subtitles(&app, &client, &media_type, &query_ids).await
 }
 
 fn subtitle_lookup_ids(
@@ -433,11 +444,10 @@ fn subtitle_lookup_ids(
     id: &str,
     season: Option<u32>,
     episode: Option<u32>,
+    absolute_episode: Option<u32>,
 ) -> Result<(String, Vec<String>), String> {
     let (media_type, id) =
         normalize_lookup_id_type(js_trim(media_type), js_trim(id), "subtitle lookup")?;
-    // Subtitle IDs follow stream IDs; anime resolves through series episodes.
-    let effective_type = super::media_type::addon_episode_lookup_type(&media_type).to_string();
     // A single colon can be a namespace (kitsu:48316); only two numeric
     // trailing fields identify an already-scoped episode lookup.
     let episode_scoped = id.rsplit_once(':').is_some_and(|(prefix, episode)| {
@@ -447,12 +457,12 @@ fn subtitle_lookup_ids(
                 .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
         })
     });
-    let query_ids = if effective_type == "movie" || episode_scoped {
+    let query_ids = if media_type == "movie" || episode_scoped {
         vec![id]
     } else {
-        build_stream_query_ids(&media_type, &id, season, episode, None)
+        build_stream_query_ids(&media_type, &id, season, episode, absolute_episode)
     };
-    Ok((effective_type, query_ids))
+    Ok((media_type, query_ids))
 }
 
 fn append_media_schedule_echoes(
@@ -676,6 +686,15 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
     }
 
     let details = fetch_media_details_shared_inner(&app, client, &media_type, &id).await?;
+    let details = if crate::providers::addon_resource::needs_cinemeta_artwork(&details) {
+        let mut repaired = (*details).clone();
+        client
+            .repair_episode_artwork(&mut repaired, normalize_media_details)
+            .await;
+        Arc::new(repaired)
+    } else {
+        details
+    };
 
     if details.episodes.is_some() {
         let id_owned = id.clone();
@@ -687,6 +706,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
                     &id_owned,
                     Some(details.imdb_id.as_deref().unwrap_or(id_owned.as_str())),
                     details.episodes.as_deref().unwrap_or_default(),
+                    PlaybackStateService::work_years_from_details(&details),
                 )
             })
             .await?;

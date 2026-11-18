@@ -27,6 +27,7 @@ interface InlineMenuProps {
   label: string;
   actions: readonly (InlineMenuAction | false | null | undefined)[];
   orientation?: 'vertical' | 'horizontal';
+  layout?: 'overlay' | 'flow';
   className?: string;
   onAction?: () => void;
 }
@@ -46,6 +47,7 @@ export function InlineMenu({
   label,
   actions,
   orientation = 'vertical',
+  layout = 'overlay',
   className,
   onAction,
 }: InlineMenuProps) {
@@ -85,9 +87,12 @@ export function InlineMenu({
       aria-label={label}
       aria-orientation={orientation}
       className={cn(
-        'absolute inset-0 z-20 flex outline-none motion-reduce:animate-none',
+        'z-20 flex outline-none motion-reduce:animate-none',
+        layout === 'flow' ? 'relative' : 'absolute inset-0',
         orientation === 'vertical'
-          ? 'flex-col p-1'
+          ? layout === 'flow'
+            ? 'flex-col gap-0.5 p-1.5'
+            : 'flex-col p-1'
           : 'items-center justify-center-safe gap-1 overflow-x-auto p-1.5',
         presence.exiting ? 'animate-surface-out' : 'animate-surface-in',
         className,
@@ -115,8 +120,10 @@ export function InlineMenu({
           className: cn(
             ITEM_CLASS_NAME,
             ORIENTATION_ITEM_CLASS_NAME[orientation],
+            layout === 'flow' && 'min-h-9 flex-none gap-2.5 px-2.5 py-2 text-[13px] leading-5',
             action.muted && 'text-zinc-400',
             action.destructive && 'hover:text-red-300 focus-visible:text-red-300',
+            layout === 'flow' && action.destructive && 'mt-1 text-red-300',
           ),
           onPointerEnter: action.onWarm,
           onFocus: action.onWarm,
@@ -127,12 +134,15 @@ export function InlineMenu({
               aria-hidden='true'
               className={cn(
                 ICON_CLASS_NAME,
+                layout === 'flow' && 'size-4',
                 action.destructive &&
                   'group-hover/item:text-red-300 group-focus-visible/item:text-red-300',
                 action.iconClassName,
               )}
             />
-            <span className='truncate'>{action.label}</span>
+            <span className={layout === 'flow' ? 'min-w-0 break-words' : 'truncate'}>
+              {action.label}
+            </span>
           </>
         );
         if (action.href !== undefined) {

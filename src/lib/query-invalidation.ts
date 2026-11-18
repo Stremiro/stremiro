@@ -47,8 +47,12 @@ export const DETAILS_QUERY_KEY = ['details'] as const;
 export const ADDON_CONFIGS_QUERY_KEY = ['addonConfigs'] as const;
 export const ADDON_CONFIGS_STALE_TIME_MS = 1000 * 60 * 5;
 /** Installed ids track registry membership for duplicate verdicts. */
-export function addonUrlInspectionQueryKey(url: string, installedIds: readonly string[]) {
-  return ['addonUrlInspection', url, installedIds.toSorted()] as const;
+export function addonUrlInspectionQueryKey(
+  url: string,
+  installedIds: readonly string[],
+  replacingId?: string,
+) {
+  return ['addonUrlInspection', url, installedIds.toSorted(), replacingId ?? null] as const;
 }
 // Derived from the addon registry's manifests; refreshed with discovery.
 export const BROWSE_GENRES_QUERY_KEY = ['browseGenres'] as const;
@@ -154,8 +158,7 @@ export async function invalidateLibraryQueries(
     ...(refetchLibrary ? [invalidateQuery(queryClient, LIBRARY_QUERY_KEY)] : []),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, WATCHLIST_QUERY_KEY),
-    invalidateQuery(queryClient, LISTS_QUERY_KEY),
-    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
+    invalidateListMetadataQueries(queryClient),
     watchStatusChanged && invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
@@ -261,6 +264,7 @@ export function addonSubtitlesQueryKey(
   mediaId: string | undefined,
   season: number | undefined,
   episode: number | undefined,
+  absoluteEpisode?: number,
 ) {
   return [
     ...ADDON_SUBTITLES_QUERY_KEY,
@@ -268,6 +272,7 @@ export function addonSubtitlesQueryKey(
     mediaId ?? null,
     season ?? null,
     episode ?? null,
+    ...(absoluteEpisode === undefined ? [] : [absoluteEpisode]),
   ] as const;
 }
 
@@ -342,8 +347,7 @@ export async function invalidateStoredDataQueries(
     invalidateHistoryCollections(queryClient, undefined, true, !restoreSettings),
     invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
-    invalidateQuery(queryClient, LISTS_QUERY_KEY),
-    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
+    invalidateListMetadataQueries(queryClient),
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     restoreSettings &&
       Promise.all([

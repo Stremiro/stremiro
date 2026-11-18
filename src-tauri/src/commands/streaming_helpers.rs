@@ -29,6 +29,9 @@ static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static STREAM_FAMILY_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b\d+(?:[.,]\d+)?\s*(?:k|m|g|t)i?b\b").expect("valid stream family size regex")
 });
+static STREAM_FAMILY_SEASON_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bseason[\s._-]*\d+\b").expect("valid stream family season regex")
+});
 static STREAM_FAMILY_NON_WORD_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("valid stream family non-word regex"));
 /// Emoji/pictograph blocks addons decorate names with, plus joiners and variation selectors.
@@ -96,15 +99,20 @@ fn join_words<'a>(words: impl Iterator<Item = &'a str>, separator: char) -> Stri
 fn stream_family_source_key(source_id: &str) -> Option<String> {
     let source_id = normalize_source_id(source_id)?;
     // URL ids already contain the original source digest; keep saved release-family matches.
-    if let Some(digest) = source_id.strip_prefix("addon-url:").filter(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    }) {
+    if let Some(digest) = source_id
+        .strip_prefix("addon-url:")
+        .filter(|digest| is_lower_sha256_hex(digest))
+    {
         return Some(format!("v2:{digest}"));
     }
     Some(format!("v2:{:x}", Sha256::digest(source_id.as_bytes())))
+}
+
+fn is_lower_sha256_hex(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub(super) fn remap_stream_family_source(family: &str, from: &str, to: &str) -> Option<String> {
@@ -119,18 +127,14 @@ pub(crate) fn is_current_stream_family(value: &str) -> bool {
     let Some((source, family)) = value.split_once('|') else {
         return false;
     };
-    source.strip_prefix("v2:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    }) && family.split_once(':').is_some_and(|(kind, component)| {
-        matches!(kind, "binge" | "release" | "delivery")
-            && !component.is_empty()
-            && component
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    })
+    source.strip_prefix("v2:").is_some_and(is_lower_sha256_hex)
+        && family.split_once(':').is_some_and(|(kind, component)| {
+            matches!(kind, "binge" | "release" | "delivery")
+                && !component.is_empty()
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 /// Source digest is constant across the batch and never exposes credential-bearing addon ids.
@@ -152,6 +156,29 @@ fn derive_stream_family_normalized(
         .behavior_hints
         .as_ref()
         .and_then(|hints| hints.filename.as_deref())
+        .or_else(|| {
+            let name_is_release = stream.name.as_deref().is_some_and(|name| {
+                let name = normalize_separators(name);
+                STREAM_FAMILY_EPISODE_REGEX.is_match(&name)
+                    || STREAM_FAMILY_SEASON_REGEX.is_match(&name)
+            });
+            if name_is_release {
+                return None;
+            }
+            stream
+                .title
+                .as_deref()
+                .and_then(|title| title.lines().map(str::trim).find(|line| !line.is_empty()))
+                .filter(|line| {
+                    STREAM_FILENAME_HINT_REGEX.is_match(line)
+                        && line
+                            .split(|ch: char| !ch.is_alphanumeric())
+                            .filter(|word| !word.is_empty())
+                            .take(3)
+                            .count()
+                            >= 3
+                })
+        })
         .or(stream.name.as_deref())
         .or(stream.title.as_deref())
         .and_then(normalize_stream_family_component);
@@ -731,32 +758,31 @@ pub(crate) fn build_stream_query_ids(
 
     let mut ids = vec![format!("{}:{}:{}", id, s, e)];
 
-    if media_type == "anime" || media_type == "series" {
-        if id.starts_with("tt") {
-            // Addons index long-running IMDB titles differently: absolute numbering under
-            // the real or season-1 slot, season 0 for specials. Both media types try
-            // absolute coordinates; anime additionally retries season-1 and season-0 forms.
-            if media_type == "anime" && s != 1 {
-                push_unique(&mut ids, format!("{}:1:{}", id, e));
+    if id.starts_with("tt") {
+        // Addons index long-running IMDB titles differently: absolute numbering under
+        // the real or season-1 slot, season 0 for specials. Try known absolute targets
+        // before falling back to season-1 per-season numbering so S21E5 (abs 1000) never
+        // probes S1E5 ahead of S21E1000 / S1E1000.
+        if let Some(targets) =
+            stream_absolute_episode_targets(media_type, id, season, episode, absolute_episode)
+        {
+            for (target_season, target_episode) in targets {
+                push_unique(&mut ids, format!("{id}:{target_season}:{target_episode}"));
             }
-            if let Some(targets) =
-                stream_absolute_episode_targets(media_type, id, season, episode, absolute_episode)
-            {
-                for (target_season, target_episode) in targets {
-                    push_unique(&mut ids, format!("{id}:{target_season}:{target_episode}"));
-                }
-            }
-            if media_type == "anime" {
-                push_unique(&mut ids, format!("{}:0:{}", id, e));
-            }
-        } else if media_type == "anime" {
-            // Namespaced anime ids (kitsu:, …) index episodes flat — `{id}:{episode}` —
-            // so the `{id}:{s}:{e}` probe above misses them. Retry bare-episode and
-            // absolute-episode forms; the per-addon id-prefix gate still filters.
-            push_unique(&mut ids, format!("{}:{}", id, e));
-            if let Some(abs_ep) = absolute_episode.filter(|abs_ep| *abs_ep != e) {
-                push_unique(&mut ids, format!("{}:{}", id, abs_ep));
-            }
+        }
+        if media_type == "anime" && s != 1 {
+            push_unique(&mut ids, format!("{}:1:{}", id, e));
+        }
+        if media_type == "anime" {
+            push_unique(&mut ids, format!("{}:0:{}", id, e));
+        }
+    } else if media_type == "anime" {
+        // Namespaced anime ids (kitsu:, …) index episodes flat — `{id}:{episode}` —
+        // so the `{id}:{s}:{e}` probe above misses them. Retry bare-episode and
+        // absolute-episode forms; the per-addon id-prefix gate still filters.
+        push_unique(&mut ids, format!("{}:{}", id, e));
+        if let Some(abs_ep) = absolute_episode.filter(|abs_ep| *abs_ep != e) {
+            push_unique(&mut ids, format!("{}:{}", id, abs_ep));
         }
     }
 
@@ -873,12 +899,6 @@ pub(crate) fn stream_resolution_priority(
     stream: &AddonStream,
     flags: StreamFlags,
 ) -> StreamResolutionPriority {
-    // A magnet-only stream (URL `xt`, no `content_hash` field) shares the `h:` dedup
-    // identity with the field-carrying spelling, so it earns the same viability —
-    // otherwise arrival order decides the rank input.
-    let has_content_hash = stream.content_hash.as_deref().is_some_and(non_blank)
-        || stream.url.as_deref().and_then(magnet_xt_hash).is_some();
-
     let texts = stream.match_texts();
     let is_clip = [
         texts.filename.as_deref(),
@@ -888,19 +908,20 @@ pub(crate) fn stream_resolution_priority(
     .into_iter()
     .flatten()
     .any(|text| STREAM_CLIP_REGEX.is_match(text));
-    let viability = if is_clip {
-        0
-    } else if matches!(
-        stream.presentation.delivery_kind,
-        StreamDeliveryKind::Cached
-    ) {
-        4
-    } else if matches!(stream.presentation.delivery_kind, StreamDeliveryKind::Http) {
-        3
-    } else if has_content_hash {
-        2
-    } else {
-        1
+    let viability = match stream.presentation.delivery_kind {
+        _ if is_clip => 0,
+        StreamDeliveryKind::Cached => 4,
+        StreamDeliveryKind::Http => 3,
+        // A magnet-only stream (URL `xt`, no `content_hash` field) shares the `h:` dedup
+        // identity with the field-carrying spelling, so it earns the same viability —
+        // otherwise arrival order decides the rank input.
+        StreamDeliveryKind::PeerToPeer
+            if stream.content_hash.as_deref().is_some_and(non_blank)
+                || stream.url.as_deref().and_then(magnet_xt_hash).is_some() =>
+        {
+            2
+        }
+        StreamDeliveryKind::PeerToPeer => 1,
     };
 
     let size_bytes = stream.size_bytes.unwrap_or(0);

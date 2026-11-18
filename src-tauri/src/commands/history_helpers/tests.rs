@@ -262,3 +262,41 @@ fn compare_continue_watching_demotes_low_confidence_resume_positions() {
         ["resume", "up-next", "stub"]
     );
 }
+
+#[test]
+fn resume_hydration_preserves_valid_opaque_series_lookup_ids() {
+    for lookup in ["kitsu:12", "mal:21", "tvdb:1234", "12345", "tt0417299"] {
+        let mut row = WatchProgress {
+            type_: "series".into(),
+            id: "tt0417299".into(),
+            last_stream_lookup_id: Some(lookup.into()),
+            ..sample_progress()
+        };
+        assert!(super::has_usable_resume_lookup_id(&row), "{lookup}");
+        super::hydrate_watch_progress_lookup_id(&mut row);
+        assert_eq!(row.last_stream_lookup_id.as_deref(), Some(lookup));
+        row.id = lookup.into();
+        row.last_stream_lookup_id = None;
+        super::hydrate_watch_progress_lookup_id(&mut row);
+        assert_eq!(row.last_stream_lookup_id.as_deref(), Some(lookup));
+    }
+    for lookup in [
+        "".to_string(),
+        "  ".into(),
+        "x".repeat(crate::commands::MEDIA_ID_MAX_CHARS + 1),
+    ] {
+        let mut row = WatchProgress {
+            type_: "series".into(),
+            id: "kitsu:12".into(),
+            last_stream_lookup_id: Some(lookup),
+            ..sample_progress()
+        };
+        assert!(!super::has_usable_resume_lookup_id(&row));
+        super::hydrate_watch_progress_lookup_id(&mut row);
+        assert_eq!(row.last_stream_lookup_id.as_deref(), Some("kitsu:12"));
+        row.id = " ".into();
+        row.last_stream_lookup_id = None;
+        super::hydrate_watch_progress_lookup_id(&mut row);
+        assert!(row.last_stream_lookup_id.is_none());
+    }
+}

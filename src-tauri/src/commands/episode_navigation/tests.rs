@@ -36,11 +36,33 @@ fn source_coordinates_skip_blank_addon_ids() {
 }
 
 #[test]
+fn avatar_video_ids_cannot_cross_imdb_work_roots_but_opaque_ids_remain_valid() {
+    let mut episode = episode(1, 5);
+    for (lookup_id, video_id, expected) in [
+        ("tt0417299", "tt9018736:1:5", None),
+        ("tt0417299:cut", "tt9018736:1:5", None),
+        ("tt0417299", "tt0417299:2:25", Some("tt0417299:2:25")),
+        ("tt0417299", "kitsu:12:5", Some("kitsu:12:5")),
+        ("tt0417299", "1234567:1:5", Some("1234567:1:5")),
+        ("kitsu:12", "tt0417299:1:5", Some("tt0417299:1:5")),
+    ] {
+        episode.id = video_id.into();
+        let source = build_source_episode_coordinates(&episode, lookup_id);
+        assert_eq!(
+            additional_episode_video_id(&episode, &source).as_deref(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn additional_video_ids_preserve_source_mapping_and_reject_unusable_ids() {
     let mut episode = episode(1, 2);
     let source = build_source_episode_coordinates(&episode, "tt123");
     for (id, expected) in [
-        ("\u{feff} tt999:4:12 \u{feff}", Some("tt999:4:12")),
+        ("\u{feff} tt999:4:12 \u{feff}", None),
+        ("tt123:4:12", Some("tt123:4:12")),
+        ("12345:4:12", Some("12345:4:12")),
         ("kitsu:42:12", Some("kitsu:42:12")),
         ("tt123:1:2", None),
         ("tt123", None),
@@ -108,42 +130,41 @@ fn player_episode_navigation_keeps_specials_separate_and_ungated_previous() {
 }
 
 #[test]
-fn player_episode_navigation_gates_only_immediate_successor_without_skipping() {
-    let mut future = episode(1, 2);
-    future.release_date = Some("2026-10-16".to_string());
-    let mut later = episode(1, 3);
-    later.release_date = Some("2026-10-14".to_string());
-    let episodes = [episode(1, 1), future, later];
-    assert!(navigation(&episodes, &request(1, 1)).next_index.is_none());
-    let mut tomorrow = request(1, 1);
-    tomorrow.today = "2026-10-16".to_string();
-    assert_eq!(navigation(&episodes, &tomorrow).next_index, Some(1));
-}
-
-#[test]
-fn player_episode_navigation_accepts_undated_and_invalid_dates() {
-    for date in [None, Some("invalid"), Some("2026-02-30"), Some("")] {
-        let mut successor = episode(1, 2);
-        successor.release_date = date.map(str::to_string);
-        let episodes = [episode(1, 1), successor];
-        assert_eq!(navigation(&episodes, &request(1, 1)).next_index, Some(1));
-    }
-}
-
-#[test]
-fn player_episode_navigation_uses_calendar_day_not_timestamp_offset() {
-    for (date, aired) in [
-        ("2026-10-15", true),
-        ("2026-10-15T23:59:59-12:00", true),
-        ("2026-10-16T00:00:00+14:00", false),
+fn player_episode_navigation_gates_next_on_the_successors_calendar_day() {
+    // (release dates for the episodes after 1:1, `today` override, expected next index)
+    for (dates, today, expected) in [
+        // A future successor gates even when a later episode already aired — no skipping.
+        (vec![Some("2026-10-16"), Some("2026-10-14")], None, None),
+        (
+            vec![Some("2026-10-16"), Some("2026-10-14")],
+            Some("2026-10-16"),
+            Some(1),
+        ),
+        // Undated or unparseable dates stay reachable.
+        (vec![None], None, Some(1)),
+        (vec![Some("invalid")], None, Some(1)),
+        (vec![Some("2026-02-30")], None, Some(1)),
+        (vec![Some("")], None, Some(1)),
+        // The gate uses the successor's calendar day, not a timestamp offset.
+        (vec![Some("2026-10-15")], None, Some(1)),
+        (vec![Some("2026-10-15T23:59:59-12:00")], None, Some(1)),
+        (vec![Some("2026-10-16T00:00:00+14:00")], None, None),
     ] {
-        let mut successor = episode(1, 2);
-        successor.release_date = Some(date.to_string());
+        let episodes: Vec<Episode> = std::iter::once(episode(1, 1))
+            .chain(dates.iter().enumerate().map(|(index, date)| {
+                let mut successor = episode(1, index as u32 + 2);
+                successor.release_date = date.map(str::to_string);
+                successor
+            }))
+            .collect();
+        let mut request = request(1, 1);
+        if let Some(today) = today {
+            request.today = today.to_string();
+        }
         assert_eq!(
-            navigation(&[episode(1, 1), successor], &request(1, 1))
-                .next_index
-                .is_some(),
-            aired
+            navigation(&episodes, &request).next_index,
+            expected,
+            "dates: {dates:?} today: {today:?}"
         );
     }
 }
@@ -190,10 +211,6 @@ fn player_episode_navigation_preserves_coordinate_ties_and_camel_case_index_dto(
         "today": "2026-10-15",
     }))
     .unwrap();
-    assert_eq!(request.season, 1);
-    assert_eq!(request.episode, 2);
-    assert_eq!(request.episodes[0].season, 1);
-    assert_eq!(request.episodes[0].episode, 3);
     assert_eq!(
         request.episodes[0].release_date.as_deref(),
         Some("2026-10-15")

@@ -261,12 +261,12 @@ function RouteScrollManager() {
 
     const restorePosition = () => {
       if (savedPosition !== undefined) {
+        window.scrollTo(0, savedPosition);
         const scrollRoot = document.scrollingElement ?? document.documentElement;
         if (scrollRoot.scrollHeight - scrollRoot.clientHeight < savedPosition) {
           restoreFrame = window.requestAnimationFrame(restorePosition);
           return;
         }
-        window.scrollTo(0, savedPosition);
       }
       cancelRestoration();
     };

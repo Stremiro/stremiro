@@ -37,10 +37,6 @@ pub fn run() {
                 commands::app_shell_commands::frontend_loading(webview.app_handle());
             }
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                let window = webview.window();
-                if let Some(icon) = webview.app_handle().default_window_icon().cloned() {
-                    let _ = window.set_icon(icon);
-                }
                 commands::app_shell_commands::reveal_on_startup(webview.app_handle());
             }
         })
@@ -81,7 +77,7 @@ pub fn run() {
                 app.path().app_cache_dir().ok(),
             ));
 
-            commands::validate_startup_stores(&handle);
+            commands::sweep_startup_store_files(&handle);
             commands::app_shell_commands::accept_app_link(
                 &handle,
                 std::env::args_os().filter_map(|arg| arg.into_string().ok()),

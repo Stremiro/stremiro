@@ -447,30 +447,41 @@ pub(crate) fn snapshot_supports_request(
     media_type: &str,
     media_id: &str,
 ) -> bool {
+    snapshot_request_type(snapshot, resource, media_type, media_id).is_some()
+}
+
+pub(crate) fn snapshot_request_type<'a>(
+    snapshot: &'a AddonManifest,
+    resource: &str,
+    media_type: &str,
+    media_id: &str,
+) -> Option<&'a str> {
     let resource_name = resource.trim();
     let media_type = media_type.trim();
     if media_type.is_empty() || media_type.chars().nth(MAX_TYPE_CHARS).is_some() {
-        return false;
+        return None;
     }
     let media_id = media_id.trim();
     if media_id.is_empty() {
-        return false;
+        return None;
     }
 
-    snapshot.resources.iter().any(|capability| {
-        capability.name.eq_ignore_ascii_case(resource_name)
-            && capability
-                .types
-                .iter()
-                .any(|item| item.eq_ignore_ascii_case(media_type))
-            && (resource_name.eq_ignore_ascii_case("catalog")
-                || capability.id_prefixes.is_empty()
-                || capability.id_prefixes.iter().any(|prefix| {
-                    media_id
-                        .get(..prefix.len())
-                        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-                }))
-    })
+    snapshot
+        .resources
+        .iter()
+        .filter(|capability| {
+            capability.name.eq_ignore_ascii_case(resource_name)
+                && (resource_name.eq_ignore_ascii_case("catalog")
+                    || capability.id_prefixes.is_empty()
+                    || capability.id_prefixes.iter().any(|prefix| {
+                        media_id
+                            .get(..prefix.len())
+                            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+                    }))
+        })
+        .flat_map(|capability| &capability.types)
+        .find(|item| item.eq_ignore_ascii_case(media_type))
+        .map(String::as_str)
 }
 
 pub(crate) fn snapshot_is_classified(snapshot: &AddonManifest) -> bool {

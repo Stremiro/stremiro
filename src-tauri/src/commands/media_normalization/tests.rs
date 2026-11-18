@@ -51,13 +51,16 @@ fn extract_primary_year_reads_first_valid_year() {
         assert_eq!(extract_primary_year(Some(input)), expected, "{input}");
         let display = expected.map(|year| year.to_string());
         assert_eq!(build_display_year(Some(input)), display, "{input}");
-        let item = normalize_media_item(MediaItem {
-            year: Some(input.to_string()),
-            ..test_media_item("tt1", "movie")
-        });
-        assert_eq!(item.primary_year, expected, "{input}");
-        assert_eq!(item.display_year, display, "{input}");
     }
+    // The item-level path reuses the same extractors; verify the wiring once.
+    let item = normalize_media_item(MediaItem {
+        year: Some("Premiered in 2021".to_string()),
+        ..test_media_item("tt1", "movie")
+    });
+    assert_eq!(
+        (item.primary_year, item.display_year.as_deref()),
+        (Some(2021), Some("2021"))
+    );
 }
 
 #[test]

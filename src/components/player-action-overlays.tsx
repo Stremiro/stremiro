@@ -1,7 +1,6 @@
 import { ChevronsRight } from 'lucide-react';
 import { useSyncExternalStore } from 'react';
 import { CHROME_ICON_STROKE, CHROME_SKIP_BUTTON_CLASS } from '@/components/player-chrome-styles';
-import { MINI_ICON_BUTTON_CLASS } from '@/components/player-control-buttons';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { ariaKeyShortcuts, type PlayerKeymap, withShortcutHint } from '@/lib/player-keybindings';
 import { clamp, cn } from '@/lib/utils';
@@ -23,7 +22,7 @@ export function PlayerSkipButton({
 }: {
   action: PlayerSkipAction;
   keymap: PlayerKeymap;
-  variant?: 'full' | 'compact' | 'icon';
+  variant?: 'full' | 'compact';
   className?: string;
   tabIndex?: number;
   clock?: PlaybackClock;
@@ -44,11 +43,9 @@ export function PlayerSkipButton({
       title={withShortcutHint(action.label, keymap, 'skipSegment')}
       className={cn(
         'relative flex min-w-0 max-w-full cursor-pointer items-center overflow-hidden',
-        variant === 'icon'
-          ? MINI_ICON_BUTTON_CLASS
-          : variant === 'compact'
-            ? 'gap-1.5 rounded-lg px-2.5 py-1.5 text-xs'
-            : 'min-h-10 gap-2 rounded-lg px-3.5 py-2 text-[13px] font-medium tracking-tight animate-in fade-in duration-200 motion-reduce:animate-none',
+        variant === 'compact'
+          ? 'gap-1.5 rounded-lg px-2.5 py-1.5 text-xs'
+          : 'min-h-10 gap-2 rounded-lg px-3.5 py-2 text-[13px] font-medium tracking-tight animate-in fade-in duration-200 motion-reduce:animate-none',
         CHROME_SKIP_BUTTON_CLASS,
         className,
       )}
@@ -61,7 +58,7 @@ export function PlayerSkipButton({
         )}
         strokeWidth={CHROME_ICON_STROKE}
       />
-      {variant !== 'icon' && <span className='truncate'>{action.label}</span>}
+      <span className='truncate'>{action.label}</span>
       {clock &&
         segmentStart !== undefined &&
         segmentEnd !== undefined &&

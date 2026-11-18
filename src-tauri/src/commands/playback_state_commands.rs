@@ -5,7 +5,7 @@ use tauri::{command, AppHandle, State};
 /// Stream identity fields (`source_id`, `stream_family`) feed the
 /// source-health and family reputation snapshots; nothing else persists.
 #[command]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn report_playback_stream_outcome(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,

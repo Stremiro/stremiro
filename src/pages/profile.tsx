@@ -3,6 +3,7 @@ import {
   CalendarArrowDown,
   CalendarArrowUp,
   CheckSquare,
+  ChevronRight,
   History,
   LayoutList,
   Library,
@@ -262,10 +263,10 @@ export function Profile() {
         />
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-4'>
-          <div className='flex justify-center border-b border-white/[0.07]'>
+          <div className='flex justify-center'>
             <TabsList
               aria-label='Profile collections'
-              className='inline-flex h-auto max-w-full gap-5 overflow-x-auto rounded-none bg-transparent p-0 scrollbar-hide'
+              className='grid h-auto w-full max-w-lg grid-cols-3 gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1'
             >
               {PROFILE_TABS.map((tab) => (
                 <TabsTrigger
@@ -275,15 +276,15 @@ export function Profile() {
                   onPointerEnter={tab.id === 'lists' ? warmListsManager : undefined}
                   onFocus={tab.id === 'lists' ? warmListsManager : undefined}
                   className={cn(
-                    'shrink-0 gap-1.5 rounded-none border-b-2 bg-transparent px-0 py-3 text-[13px] font-medium shadow-none transition-colors focus-visible:ring-inset focus-visible:ring-offset-0 motion-reduce:transition-none',
+                    'h-10 min-w-0 gap-1 rounded-md border-0 px-1.5 py-2 text-[13px] font-medium shadow-none transition-colors focus-visible:ring-inset focus-visible:ring-offset-0 motion-reduce:transition-none sm:gap-2 sm:px-4 sm:text-sm',
                     tab.id === activeTab
-                      ? 'border-(--accent-nav) text-white'
-                      : 'border-transparent text-zinc-400 hover:text-zinc-100',
+                      ? 'bg-white/[0.1] text-white'
+                      : 'bg-transparent text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100',
                   )}
                 >
                   <tab.icon aria-hidden='true' className='size-3.5' />
                   <span>{tab.label}</span>
-                  <span className='w-[4ch] shrink-0 text-left text-[11px] tabular-nums leading-none text-zinc-500'>
+                  <span className='min-w-[2ch] shrink-0 text-left text-[11px] tabular-nums leading-none text-zinc-400'>
                     {tabCounts[tab.id]}
                   </span>
                 </TabsTrigger>
@@ -998,7 +999,7 @@ function ProfileHeader({
   onToggleStatus: (status: WatchStatus) => void;
 }) {
   return (
-    <PageCard className='px-5 py-4 sm:px-6'>
+    <PageCard aria-label='Profile summary' className='px-5 py-5 sm:px-6 sm:py-6'>
       <span
         aria-hidden='true'
         className='pointer-events-none absolute inset-0'
@@ -1046,7 +1047,7 @@ function ProfileHeader({
           )}
         </div>
 
-        <div className='grid w-full grid-cols-4 gap-2 lg:w-auto lg:shrink-0 lg:gap-4 lg:border-l lg:border-white/[0.07] lg:pl-6'>
+        <div className='grid w-full grid-cols-2 gap-x-4 gap-y-4 rounded-lg border border-white/[0.06] bg-black/15 p-2 sm:grid-cols-4 lg:w-auto lg:shrink-0 lg:gap-4'>
           <StatChip
             value={libraryCount}
             isLoading={statsLoading}
@@ -1105,7 +1106,7 @@ function ProfileHeader({
                   }
                   onClick={() => onToggleStatus(s)}
                   className={cn(
-                    '-mx-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
+                    'flex min-h-9 items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-[13px] transition-colors hover:bg-white/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
                     active && 'bg-white/[0.08] hover:bg-white/[0.1]',
                   )}
                 >
@@ -1153,7 +1154,7 @@ function StatChip({
       onClick={onClick}
       title={title ?? (onClick ? `Open ${label}` : undefined)}
       className={cn(
-        'flex min-w-0 flex-col items-center gap-1.5 rounded-lg px-2 py-1.5 text-center',
+        'flex min-w-0 flex-col items-start gap-2 rounded-md px-3 py-2 text-left',
         onClick &&
           'transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
       )}
@@ -1166,14 +1167,17 @@ function StatChip({
       ) : (
         <span
           className={cn(
-            'text-[21px] font-semibold tabular-nums tracking-tight leading-none',
+            'text-2xl font-semibold tabular-nums tracking-tight leading-none',
             valueClassName,
           )}
         >
           {value ?? '—'}
         </span>
       )}
-      <span className='text-[11px] leading-4 text-zinc-400'>{label}</span>
+      <span className='inline-flex items-center gap-1 text-xs leading-4 text-zinc-400'>
+        {label}
+        {onClick && <ChevronRight aria-hidden='true' className='size-3 shrink-0 text-zinc-500' />}
+      </span>
     </Root>
   );
 }
@@ -1194,9 +1198,9 @@ function EmptyState({
       icon={icon}
       title={title}
       description={subtitle}
-      descriptionClassName='text-[13px] text-zinc-500'
+      descriptionClassName='text-sm text-zinc-400'
       action={action}
-      className='border border-white/[0.06] rounded-lg bg-white/[0.015] px-6 py-12'
+      className='rounded-xl border border-white/[0.08] bg-white/[0.025] px-6 py-12'
     />
   );
 }

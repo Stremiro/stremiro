@@ -6,21 +6,48 @@ import { RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 
 const PLAYER_INTERACTIVE_TARGET_SELECTOR = `[data-player-interactive], ${RADIX_POPPER_CONTENT_SELECTOR}`;
 
-export function createWheelSeekAccumulator() {
+/** Wheel delta in pixels: line mode scales by `linePx`, page mode by `pagePx`. */
+export function wheelDeltaPixels(
+  { deltaY, deltaMode }: Pick<WheelEvent, 'deltaY' | 'deltaMode'>,
+  linePx: number,
+  pagePx: number,
+): number {
+  return deltaY * (deltaMode === 1 ? linePx : deltaMode === 2 ? pagePx : 1);
+}
+
+/** Accumulates wheel pixels into discrete steps; sign flips and stale bursts reset the count. */
+export function createWheelStepAccumulator({
+  windowMs,
+  pxPerStep,
+}: {
+  windowMs: number;
+  pxPerStep: number;
+}) {
   let accumulatedPixels = 0;
   let lastEventAt = 0;
-  return ({ deltaY, deltaMode }: Pick<WheelEvent, 'deltaY' | 'deltaMode'>): number => {
-    if (deltaY === 0) return 0;
-    const now = performance.now();
-    if (now - lastEventAt > 200 || Math.sign(deltaY) !== Math.sign(accumulatedPixels)) {
+  return {
+    add(pixels: number): number {
+      if (pixels === 0) return 0;
+      const now = performance.now();
+      if (now - lastEventAt > windowMs || Math.sign(pixels) !== Math.sign(accumulatedPixels)) {
+        accumulatedPixels = 0;
+      }
+      lastEventAt = now;
+      accumulatedPixels += pixels;
+      const steps = Math.trunc(accumulatedPixels / pxPerStep);
+      accumulatedPixels -= steps * pxPerStep;
+      return steps;
+    },
+    reset() {
       accumulatedPixels = 0;
-    }
-    lastEventAt = now;
-    accumulatedPixels += deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? window.innerHeight : 1);
-    const steps = Math.trunc(accumulatedPixels / 100);
-    accumulatedPixels -= steps * 100;
-    return -steps * 5;
+    },
   };
+}
+
+export function createWheelSeekAccumulator() {
+  const accumulator = createWheelStepAccumulator({ windowMs: 200, pxPerStep: 100 });
+  return (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>): number =>
+    -accumulator.add(wheelDeltaPixels(event, 16, window.innerHeight)) * 5;
 }
 
 export function isPlayerInteractiveTarget(target: EventTarget | null): boolean {
@@ -40,8 +67,12 @@ export function blurActivePlayerControl(): void {
   }
 }
 
+export function hasOpenPlayerPopover(): boolean {
+  return document.querySelector('[data-player-popover][data-state="open"]') !== null;
+}
+
 export function preserveOpenPlayerMenuFocus(event: Event): void {
-  if (document.querySelector('[data-player-popover][data-state="open"]')) event.preventDefault();
+  if (hasOpenPlayerPopover()) event.preventDefault();
 }
 
 // All three need the color — a partial write leaves the page background bleeding through mpv's transparent frame.
@@ -53,9 +84,11 @@ function setSurfaceBackground(value: string): void {
 }
 
 export function setPlayerDocumentBackground(transparent: boolean): void {
+  document.getElementById('root')?.classList.remove('player-background-restoring');
   setSurfaceBackground(transparent ? 'transparent' : 'black');
 }
 
 export function restorePlayerBackground(): void {
+  document.getElementById('root')?.classList.add('player-background-restoring');
   setSurfaceBackground('');
 }

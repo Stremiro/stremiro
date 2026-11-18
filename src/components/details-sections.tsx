@@ -1,16 +1,14 @@
-import {
-  type ComponentProps,
-  type PointerEvent,
-  type ReactNode,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { type ComponentProps, type ReactNode, useEffect, useRef, useState } from 'react';
+import { CalendarClock, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { CreditLink } from '@/components/details-credits';
 import { RemoteImage } from '@/components/remote-image';
-import { scrollEdgeMask, useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
+import {
+  DRAG_SCROLL_CLASS,
+  scrollEdgeMask,
+  useHorizontalDragScroll,
+  useScrollEdgeIndicators,
+} from '@/hooks/use-scroll-edge-indicators';
 import {
   api,
   getErrorMessage,
@@ -55,70 +53,74 @@ function ExternalLink({
 const SOURCE_LINK_CLASS =
   'rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
 
-const PEOPLE_SCROLL_BUTTON_CLASS =
-  'pointer-events-none absolute top-[38%] z-10 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-zinc-950/60 text-white/70 opacity-0 backdrop-blur-xs transition-opacity hover:bg-zinc-950/85 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/people:pointer-events-auto group-hover/people:opacity-100 group-focus-within/people:pointer-events-auto group-focus-within/people:opacity-100 aria-disabled:pointer-events-none aria-disabled:opacity-0 motion-reduce:transition-none';
+export const DETAILS_RAIL_BUTTON_CLASS =
+  'flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35 motion-reduce:transition-none';
 
 function People({ people, characters }: Pick<TitleCredits, 'people'> & { characters: boolean }) {
   const scrollRef = useRef<HTMLUListElement>(null);
-  const dragRef = useRef<{ x: number; left: number; moved: boolean } | null>(null);
-  const suppressClickRef = useRef(false);
+  const dragScrollProps = useHorizontalDragScroll<HTMLUListElement>();
   const { bind: bindScroller, ...scrollState } = useScrollEdgeIndicators(scrollRef);
   const edgeMask = scrollEdgeMask(scrollState);
 
-  const onPointerDown = (event: PointerEvent<HTMLUListElement>) => {
-    if (event.pointerType !== 'mouse' || event.button !== 0) return;
-    // Snap points fight a hand-held position; they resume on release and settle the rail.
-    event.currentTarget.style.scrollSnapType = 'none';
-    dragRef.current = { x: event.clientX, left: event.currentTarget.scrollLeft, moved: false };
-  };
-  const onPointerMove = (event: PointerEvent<HTMLUListElement>) => {
-    const drag = dragRef.current;
-    if (!drag) return;
-    if (!drag.moved) {
-      if (Math.abs(event.clientX - drag.x) < 4) return;
-      drag.moved = true;
-      event.currentTarget.setPointerCapture(event.pointerId);
-    }
-    event.currentTarget.scrollLeft = drag.left - (event.clientX - drag.x);
-  };
-  const endDrag = (event: PointerEvent<HTMLUListElement>) => {
-    suppressClickRef.current = !!dragRef.current?.moved;
-    dragRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    event.currentTarget.style.scrollSnapType = '';
-  };
   const scrollPeople = (direction: -1 | 1) => {
+    if (direction < 0 ? !scrollState.canScrollLeft : !scrollState.canScrollRight) return;
     scrollRef.current?.scrollBy({
       left: direction * scrollRef.current.clientWidth * 0.8,
       behavior: scrollBehavior(),
     });
   };
   return (
-    <div className='group/people relative -mx-1'>
+    <div className='min-w-0'>
+      <div className='mb-3 flex items-center justify-between gap-3'>
+        <h2
+          id='details-cast-heading'
+          className='text-xl font-semibold leading-7 tracking-[-0.02em] text-zinc-100'
+        >
+          {characters ? 'Characters' : 'Cast'}
+        </h2>
+        {scrollState.hasOverflow && (
+          <div
+            role='group'
+            aria-label={characters ? 'Character navigation' : 'Cast navigation'}
+            className='flex items-center gap-1.5 sm:gap-2'
+          >
+            <button
+              type='button'
+              aria-label={characters ? 'Show previous characters' : 'Show previous cast'}
+              aria-disabled={!scrollState.canScrollLeft || undefined}
+              onClick={() => scrollPeople(-1)}
+              className={DETAILS_RAIL_BUTTON_CLASS}
+            >
+              <ChevronLeft aria-hidden='true' className='h-4 w-4' />
+            </button>
+            <button
+              type='button'
+              aria-label={characters ? 'Show next characters' : 'Show next cast'}
+              aria-disabled={!scrollState.canScrollRight || undefined}
+              onClick={() => scrollPeople(1)}
+              className={DETAILS_RAIL_BUTTON_CLASS}
+            >
+              <ChevronRight aria-hidden='true' className='h-4 w-4' />
+            </button>
+          </div>
+        )}
+      </div>
       <ul
         aria-label={characters ? 'Characters' : 'Cast'}
         ref={bindScroller}
         // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- Keyboard access to the horizontal cast rail.
         tabIndex={0}
         style={edgeMask ? { maskImage: edgeMask, WebkitMaskImage: edgeMask } : undefined}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-        onClickCapture={(event) => {
-          if (!suppressClickRef.current) return;
-          suppressClickRef.current = false;
-          event.preventDefault();
-          event.stopPropagation();
-        }}
-        className='flex cursor-grab select-none gap-4 overflow-x-auto overscroll-x-contain snap-x snap-proximity scrollbar-hide px-1 pt-1 active:cursor-grabbing focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/25'
+        {...dragScrollProps}
+        className={cn(
+          '-mx-1 flex gap-4 overflow-x-auto overscroll-x-contain scrollbar-hide px-1 pt-1 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/25',
+          scrollState.hasOverflow && DRAG_SCROLL_CLASS,
+        )}
       >
         {people.map((person) => (
           <li
             key={`${person.name}:${person.character ?? ''}:${person.voiceActor ?? ''}:${person.role}`}
-            className='w-32 shrink-0 snap-start space-y-2.5 sm:w-36'
+            className='w-32 shrink-0 space-y-2.5 sm:w-36'
           >
             <div className='relative aspect-[3/4] overflow-hidden rounded-lg bg-white/[0.045] ring-1 ring-inset ring-white/[0.07]'>
               <span
@@ -147,13 +149,13 @@ function People({ people, characters }: Pick<TitleCredits, 'people'> & { charact
                 {characters ? person.name : <CreditLink name={person.name} />}
               </p>
               {person.character && (
-                <p className='line-clamp-2 break-words text-[12px] text-white/45'>
+                <p className='line-clamp-2 break-words text-[12px] text-white/60'>
                   as {person.character}
                 </p>
               )}
               {person.voiceActor && (
-                <p className='line-clamp-2 break-words text-[12px] text-white/45'>
-                  <span className='text-white/35'>Voiced by </span>
+                <p className='line-clamp-2 break-words text-[12px] text-white/60'>
+                  <span className='text-white/45'>Voiced by </span>
                   <CreditLink name={person.voiceActor} />
                 </p>
               )}
@@ -161,33 +163,12 @@ function People({ people, characters }: Pick<TitleCredits, 'people'> & { charact
           </li>
         ))}
       </ul>
-      {scrollState.hasOverflow && (
-        <>
-          <button
-            type='button'
-            aria-label='Scroll cast left'
-            aria-disabled={!scrollState.canScrollLeft || undefined}
-            onClick={() => scrollPeople(-1)}
-            className={cn(PEOPLE_SCROLL_BUTTON_CLASS, 'left-1')}
-          >
-            <ChevronLeft aria-hidden='true' className='h-4 w-4' />
-          </button>
-          <button
-            type='button'
-            aria-label='Scroll cast right'
-            aria-disabled={!scrollState.canScrollRight || undefined}
-            onClick={() => scrollPeople(1)}
-            className={cn(PEOPLE_SCROLL_BUTTON_CLASS, 'right-1')}
-          >
-            <ChevronRight aria-hidden='true' className='h-4 w-4' />
-          </button>
-        </>
-      )}
     </div>
   );
 }
 
-const SECTION_HEADING_CLASS = 'mb-3 text-[17px] font-semibold tracking-[-0.02em] text-white';
+const SECTION_HEADING_CLASS =
+  'mb-3 text-xl font-semibold leading-7 tracking-[-0.02em] text-zinc-100';
 
 export function DetailsSections({
   item,
@@ -208,7 +189,7 @@ export function DetailsSections({
   const characters = data?.source === 'anilist';
   if (!hasEpisodes && !people.length) return null;
   return (
-    <div className='min-w-0 space-y-6'>
+    <div className='min-w-0 space-y-9'>
       {hasEpisodes && (
         <section aria-labelledby='details-episodes-heading' className='min-w-0'>
           <h2
@@ -223,14 +204,11 @@ export function DetailsSections({
       )}
       {people.length > 0 && (
         <section aria-labelledby='details-cast-heading' className='min-w-0'>
-          <h2 id='details-cast-heading' className={SECTION_HEADING_CLASS}>
-            {characters ? 'Characters' : 'Cast'}
-          </h2>
           <People people={people} characters={characters} />
         </section>
       )}
       {data?.source && (
-        <p className='flex flex-wrap gap-x-1 text-[11px] leading-5 text-white/35'>
+        <p className='flex flex-wrap gap-x-1 text-[12px] leading-5 text-white/45'>
           Data:
           {data.source === 'tvmaze' ? (
             <>
@@ -258,6 +236,7 @@ export function DetailsSections({
 }
 
 const AIRING_DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
+  weekday: 'short',
   month: 'short',
   day: 'numeric',
   hour: 'numeric',
@@ -283,9 +262,14 @@ export function NextAiringChip({ episode }: { episode: NextAiringEpisode }) {
   if (expired) return null;
   const date = new Date(deadline);
   return (
-    <span className='inline-flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-white/65'>
-      <span>Next: Episode {episode.episode}</span>
-      <time dateTime={date.toISOString()}>{AIRING_DATE_FORMAT.format(date)}</time>
+    <span className='inline-flex min-w-0 max-w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-white/[0.045] px-2.5 py-1.5 text-[13px] leading-5'>
+      <span className='inline-flex items-center gap-1.5 font-medium text-zinc-200'>
+        <CalendarClock aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-zinc-400' />
+        Next: Episode {episode.episode}
+      </span>
+      <time dateTime={date.toISOString()} className='tabular-nums text-zinc-300'>
+        {AIRING_DATE_FORMAT.format(date)}
+      </time>
     </span>
   );
 }

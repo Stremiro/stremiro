@@ -1,11 +1,8 @@
 import type { NavigateFunction } from 'react-router';
 import type { BestResolvedStream } from '@/lib/api';
+import { stageResolvedPlayerLaunch } from '@/lib/api-cache';
 import { currentPathWithSearch, navigateApp } from '@/lib/navigation';
-import {
-  type PlayerStreamRequest,
-  type PreferredStreamIdentity,
-  primePlayerStream,
-} from '@/lib/resolve-player-stream';
+import type { PlayerStreamRequest, PreferredStreamIdentity } from '@/lib/resolve-player-stream';
 import { createGeneration } from '@/lib/utils';
 
 export type PlayerRouteMediaType = 'movie' | 'series' | 'anime' | (string & {});
@@ -30,8 +27,9 @@ export interface PlayerRouteState {
   streamSourceName?: string;
   streamFamily?: string;
   selectedStreamKey?: string;
-  /** The stream key the caller's resolve ran with — replays the cached entry. */
+  /** The original pick, used if the staged result is gone and playback must resolve again. */
   requestedStreamKey?: string;
+  resolvedLaunchId?: number;
   startTime?: number;
   absoluteSeason?: number;
   absoluteEpisode?: number;
@@ -133,6 +131,8 @@ function sanitizePlayerRouteState(state: PlayerRouteState | null | undefined): P
   if (streamSeason !== undefined) sanitized.streamSeason = streamSeason;
   const streamEpisode = normalizeRouteNumber(state.streamEpisode);
   if (streamEpisode !== undefined) sanitized.streamEpisode = streamEpisode;
+  const resolvedLaunchId = normalizeRouteNumber(state.resolvedLaunchId);
+  if (resolvedLaunchId !== undefined) sanitized.resolvedLaunchId = resolvedLaunchId;
   if (state.resumeFromHistory === true) sanitized.resumeFromHistory = true;
   const originFrom = resolveSafeInternalReturnPath(state.originFrom);
   if (originFrom !== undefined) sanitized.originFrom = originFrom;
@@ -225,7 +225,7 @@ function buildResolvedStreamRouteState(
   return { ...extras, ...explicit };
 }
 
-/** Launch the player for a resolve winner — primes the cache entry the player replays so mount pays zero resolve. */
+/** Transfer a resolve winner in memory. Browser history carries only its handoff ID. */
 export function launchResolvedStream(
   navigate: NavigateFunction,
   request: PlayerStreamRequest,
@@ -233,10 +233,10 @@ export function launchResolvedStream(
   extras?: PlayerRouteState,
   picked?: PreferredStreamIdentity,
 ): void {
-  primePlayerStream(resolved, request, picked?.streamKey);
   const state = sanitizePlayerRouteState(
     buildResolvedStreamRouteState(request, resolved, extras, picked),
   );
+  state.resolvedLaunchId = stageResolvedPlayerLaunch(resolved);
   const season = state.absoluteSeason ?? state.streamSeason;
   const episode = state.absoluteEpisode ?? state.streamEpisode;
   const base = `/player/${request.mediaType}/${encodeURIComponent(request.mediaId)}`;

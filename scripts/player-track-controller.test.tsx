@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import * as React from 'react';
 import { QueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { captureWithClient, restoreSpies } from './render-helpers';
+import { addonSubtitleFixture, captureWithClient, restoreSpies } from './render-helpers';
 
 import { usePlayerTrackController } from '../src/hooks/use-player-track-controller';
 import { api } from '../src/lib/api';
@@ -12,16 +12,10 @@ import type { Track } from '../src/lib/player-track-utils';
 
 type Operation = 'select' | 'cycle' | 'addon';
 const OPERATIONS: Operation[] = ['select', 'cycle', 'addon'];
-const subtitle = {
-  id: 'external',
-  selectionKey: 'external',
-  url: 'https://example.com/sub.srt',
+const subtitle = addonSubtitleFixture('external', 'https://example.com/sub.srt', {
   lang: 'en',
   label: 'English',
-  mpvTitle: 'English',
-  sourceId: 'addon',
-  sourceName: 'Addon',
-};
+});
 const selectedSubtitle: Track = {
   id: 3,
   type: 'sub',
@@ -41,6 +35,9 @@ function startChange(player: ReturnType<typeof usePlayerTrackController>, operat
       return player.selectAddonSubtitle(subtitle);
   }
 }
+
+const deferredTracks = () =>
+  Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
 
 async function withController(
   run: (
@@ -123,7 +120,7 @@ test.each(OPERATIONS)(
         expect(add).toHaveBeenCalledTimes(kind === 'addon' ? 1 : 0);
       });
     } finally {
-      for (const spy of [change, add, read]) spy.mockRestore();
+      restoreSpies(change, add, read);
     }
   },
 );
@@ -151,7 +148,7 @@ test.each(OPERATIONS)('%s cannot release a replacement load gate', async (kind) 
       expect(player.notifyObservedTrackSelection('sub', 3)).toBe(false);
     });
   } finally {
-    for (const spy of [change, add]) spy.mockRestore();
+    restoreSpies(change, add);
   }
 });
 
@@ -170,7 +167,7 @@ test.each(OPERATIONS)('%s preserves failure reporting and releases its gate', as
       else expect(notice).not.toHaveBeenCalled();
     });
   } finally {
-    for (const spy of [change, add, notice]) spy.mockRestore();
+    restoreSpies(change, add, notice);
   }
 });
 
@@ -183,8 +180,7 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
     { ...embedded, id: 3, selected: true, external: true, externalFilename: subtitle.url },
   ];
   const add = spyOn(playerMpv, 'addSubtitleTrack').mockResolvedValue(confirmed);
-  const staleTracks =
-    Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+  const staleTracks = deferredTracks();
   const write = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
   const change = spyOn(playerMpv, 'changePlayerTrack').mockResolvedValue([embedded]);
   const notice = spyOn(toast, 'error').mockReturnValue('track-error');
@@ -202,8 +198,7 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
       expect(savedTrack()).toMatchObject({ id: 3 });
       staleTracks.resolve([embedded]);
       await refresh;
-      const repeatedSnapshot =
-        Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+      const repeatedSnapshot = deferredTracks();
       tracks.mockImplementationOnce(() => repeatedSnapshot.promise);
       const repeatedRefresh = player.refreshTracks();
       change.mockResolvedValue(confirmed);
@@ -212,8 +207,7 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
       expect(await repeatedRefresh).toEqual(confirmed);
       player.notifyObservedTrackSelection('audio', null);
       player.notifyObservedTrackSelection('sub', 1);
-      const observedSnapshot =
-        Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+      const observedSnapshot = deferredTracks();
       tracks.mockImplementationOnce(() => observedSnapshot.promise);
       const observedRefresh = player.refreshTracks();
       expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 1 });
@@ -238,6 +232,6 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
     });
   } finally {
     await flushPendingAppWrites();
-    for (const spy of [tracks, add, write, change, notice]) spy.mockRestore();
+    restoreSpies(tracks, add, write, change, notice);
   }
 });

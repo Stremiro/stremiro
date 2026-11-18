@@ -26,6 +26,8 @@ interface SidebarNavItem {
   label: string;
   /** Defaults to an exact pathname match on `href`. */
   matches?: (pathname: string) => boolean;
+  /** Quick-switch key from `use-browse-hotkeys` (Alt+1–5 follow QUICK_SECTION_PATHS order). */
+  shortcut: string;
 }
 
 const SETTINGS_HREF = '/settings';
@@ -34,18 +36,19 @@ const SEARCH_HREF = '/search';
 const NAV_ACTIVE_SURFACE_CLASS = 'bg-white/[0.06] shadow-[inset_0_1px_0_rgb(255_255_255/0.08)]';
 
 const PRIMARY_NAV_ITEMS: SidebarNavItem[] = [
-  { icon: Home, label: 'Home', href: '/' },
-  { icon: Search, label: 'Search', href: SEARCH_HREF },
-  { icon: Calendar, label: 'Calendar', href: '/calendar' },
+  { icon: Home, label: 'Home', href: '/', shortcut: 'Alt+1' },
+  { icon: Search, label: 'Search', href: SEARCH_HREF, shortcut: 'Alt+2' },
+  { icon: Calendar, label: 'Calendar', href: '/calendar', shortcut: 'Alt+3' },
 ];
 
 const SECONDARY_NAV_ITEMS: SidebarNavItem[] = [
-  { icon: Settings, label: 'Settings', href: SETTINGS_HREF },
+  { icon: Settings, label: 'Settings', href: SETTINGS_HREF, shortcut: 'Alt+5' },
   {
     icon: User,
     label: 'Profile',
     href: PROFILE_HREF,
     matches: (pathname) => pathname === PROFILE_HREF || pathname === '/library',
+    shortcut: 'Alt+4',
   },
 ];
 
@@ -298,7 +301,14 @@ function SidebarNavButton({
             </Link>
           </Button>
         </TooltipTrigger>
-        <TooltipContent side='right'>{tooltip ?? item.label}</TooltipContent>
+        <TooltipContent side='right'>
+          <span className='flex items-center gap-2.5'>
+            {tooltip ?? item.label}
+            <kbd className='rounded border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] leading-none text-zinc-400'>
+              {item.shortcut}
+            </kbd>
+          </span>
+        </TooltipContent>
       </Tooltip>
     </div>
   );

@@ -101,9 +101,8 @@ where
 
 /// Decode item-by-item so a malformed sibling can't discard valid streams; applies per-field truncation.
 pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, String> {
-    const INVALID_FORMAT: &str = "Invalid stream response format.";
     let body: RawStreamResponse =
-        serde_json::from_slice(bytes).map_err(|_| INVALID_FORMAT.to_string())?;
+        serde_json::from_slice(bytes).map_err(|_| "Invalid stream response format.".to_string())?;
     Ok(body.streams)
 }
 
@@ -192,9 +191,6 @@ pub(super) const STREAM_CACHE_MAX_ENTRIES: usize = 64;
 
 /// After retries exhaust, sibling fetches fail fast for this window.
 const STREAM_FETCH_FAILURE_TTL: Duration = Duration::from_secs(30);
-/// A dropped `get_streams` future never releases its key; orphans sweep on insert past this.
-const STREAM_IN_FLIGHT_SWEEP_AT: usize = 64;
-
 /// Cut a pathological payload before the per-item regex hydration battery.
 pub(super) const DECODED_STREAMS_MAX: usize = 512;
 /// Same budget as subtitles; checked before allocation and during streaming.
@@ -306,7 +302,7 @@ impl AddonTransport {
                 STREAM_CACHE_EMPTY_TTL,
             ),
             generation: AtomicU64::new(0),
-            in_flight: InFlight::new(STREAM_IN_FLIGHT_SWEEP_AT),
+            in_flight: InFlight::default(),
             fetch_failures: FetchFailureCooldown::new(STREAM_FETCH_FAILURE_TTL),
             // Failures take the short empty TTL: a fixed addon recovers fast.
             failure_cache: TtlCache::new(
@@ -445,21 +441,17 @@ impl AddonTransport {
         origin: &str,
         prepare: impl FnOnce(Vec<AddonStream>) -> Vec<AddonStream> + Send + 'static,
     ) -> Result<Vec<AddonStream>, FetchFailure> {
-        let res = match self
+        let res = self
             .client
             .get(url)
             .header(header::ORIGIN, origin)
             .header(header::REFERER, format!("{}/", origin))
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(e) => {
+            .map_err(|e| {
                 let e = e.without_url();
-                let error = e.to_string();
-                return Err(FetchFailure::from_send_error(&e, error));
-            }
-        };
+                FetchFailure::from_send_error(&e, e.to_string())
+            })?;
 
         if !res.status().is_success() {
             let status = res.status();
@@ -473,12 +465,7 @@ impl AddonTransport {
         }
 
         let bytes =
-            match read_bounded_body(res, STREAM_MAX_BYTES, |_| STREAM_BODY_TOO_LARGE.to_string())
-                .await
-            {
-                Ok(bytes) => bytes,
-                Err(error) => return Err(FetchFailure::from(error)),
-            };
+            read_bounded_body(res, STREAM_MAX_BYTES, |_| STREAM_BODY_TOO_LARGE.to_string()).await?;
 
         tokio::task::spawn_blocking(move || {
             let mut streams = decode_stream_items(&bytes).map_err(FetchFailure::Fatal)?;

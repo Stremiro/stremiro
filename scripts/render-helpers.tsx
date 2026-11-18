@@ -3,6 +3,23 @@ import type { ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider, type QueryClientConfig } from '@tanstack/react-query';
+import type { AddonSubtitle } from '../src/lib/api';
+
+export function addonSubtitleFixture(
+  id: string,
+  url: string,
+  overrides: Partial<AddonSubtitle> = {},
+): AddonSubtitle {
+  return {
+    id,
+    selectionKey: id,
+    url,
+    mpvTitle: 'English',
+    sourceId: 'addon',
+    sourceName: 'Addon',
+    ...overrides,
+  };
+}
 
 export function queryClientFixture() {
   const clients: QueryClient[] = [];

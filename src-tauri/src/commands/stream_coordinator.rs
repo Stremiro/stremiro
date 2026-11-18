@@ -5,9 +5,10 @@ use super::language::{
 use super::normalize_token_text;
 use super::streaming_helpers::{normalize_source_id, stream_resolution_priority};
 use crate::providers::addons::{
-    language_mention_is_audio, stream_episode_match_texts, AddonStream, SelectionPriority,
-    StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags, StreamMatchBadgeKind,
-    StreamMatchSummary, StreamMatchTier, StreamRecommendationReason, StreamTitleMatch,
+    language_mention_is_audio, stream_episode_match_texts, stream_year_match, AddonStream,
+    SelectionPriority, StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags,
+    StreamMatchBadgeKind, StreamMatchSummary, StreamMatchTier, StreamRecommendationReason,
+    StreamTitleMatch, StreamYearMatch,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -144,10 +145,11 @@ const TITLE_BOUNDARY_TOKENS: &[&str] = &[
 pub(crate) struct StreamMatchContext<'a> {
     pub media_type: &'a str,
     pub title: Option<&'a str>,
+    pub accepted_years: &'a [u16],
     pub episode_targets: &'a [(u32, u32)],
     pub canonical_season: Option<u32>,
     /// True when the requested season is the show's final season — lets the episode
-    /// battery resolve numberless "final season" naming claims (`text_matches_requested_season`).
+    /// battery resolve numberless "final season" naming claims (`SeasonClaims::matches`).
     pub is_final_season: bool,
 }
 
@@ -173,6 +175,7 @@ pub(crate) struct StreamRecommendationKey {
     /// an assumed one — a titled final-season release can't lose/win an Exact tie
     /// against a same-numbered file of the wrong season.
     pub season_claim_verified: bool,
+    pub year_conflict: std::cmp::Reverse<bool>,
     pub title_match: i8,
     pub viability: u8,
     /// Audio named only in other languages ranks below untagged releases; `Reverse` = descending sort.
@@ -182,6 +185,7 @@ pub(crate) struct StreamRecommendationKey {
     pub family: u8,
     pub title_source_affinity: u8,
     pub quality: i32,
+    pub year_verified: bool,
     pub language_bonus: u8,
     pub source_priority: u32,
     /// Oversize demotion before swarm stats so a bloated remux can't resurface on a tie; `Reverse` = descending sort.
@@ -264,6 +268,12 @@ fn compute_cached_signals(
     let source_id = stream.source_id.as_deref().and_then(normalize_source_id);
     let resolution = stream_resolution_priority(stream, flags);
     let episode_match = stream_episode_relevance_priority(stream, inputs.match_context);
+    let year_match = stream_year_match(
+        texts,
+        inputs.match_context.accepted_years,
+        inputs.match_context.title,
+        inputs.match_context.episode_targets,
+    );
     let (language, audio_language_conflict) = stream_language_preference_priority(
         texts.name_title_haystack(),
         language_prefs,
@@ -274,9 +284,11 @@ fn compute_cached_signals(
     StreamRecommendationKey {
         episode_match: episode_match.kind,
         season_claim_verified: episode_match.season_claim_verified,
+        year_conflict: std::cmp::Reverse(year_match == StreamYearMatch::Conflicting),
         title_match: stream_title_relevance_score(
             stream,
             inputs.match_context.media_type,
+            inputs.match_context.accepted_years,
             reference,
         ),
         viability: resolution.viability,
@@ -291,6 +303,7 @@ fn compute_cached_signals(
                 && source_id == inputs.preferred_title_source_id,
         ) * 3,
         quality: resolution.quality,
+        year_verified: year_match == StreamYearMatch::Verified,
         language_bonus: resolution.language_bonus,
         source_priority: source_id
             .and_then(|id| inputs.addon_source_priorities.get(id).copied())
@@ -554,7 +567,15 @@ fn build_title_initialism(words: &[&str]) -> Option<String> {
     (3..=6).contains(&initialism.len()).then_some(initialism)
 }
 
-fn is_neutral_title_extra(token: &str, media_type: &str) -> bool {
+fn is_neutral_title_extra(token: &str, media_type: &str, accepted_years: &[u16]) -> bool {
+    if !accepted_years.is_empty()
+        && token.len() == 4
+        && token
+            .parse::<u16>()
+            .is_ok_and(|year| (1900..=2099).contains(&year) && !accepted_years.contains(&year))
+    {
+        return false;
+    }
     is_title_stop_word(token)
         || TITLE_NEUTRAL_EXTRA_TOKENS.contains(&token)
         || token.chars().all(|ch| ch.is_ascii_digit())
@@ -638,6 +659,7 @@ fn strip_leading_group_tag(candidate: &str) -> &str {
 fn stream_title_relevance_score(
     stream: &AddonStream,
     media_type: &str,
+    accepted_years: &[u16],
     reference: Option<&ReferenceTitle>,
 ) -> i8 {
     let Some(reference) = reference else {
@@ -679,7 +701,7 @@ fn stream_title_relevance_score(
                 has_spin_off_marker =
                     has_spin_off_marker || is_spin_off_title_extra(token, media_type);
                 if reference_initialism.as_deref() != Some(token)
-                    && !is_neutral_title_extra(token, media_type)
+                    && !is_neutral_title_extra(token, media_type, accepted_years)
                 {
                     significant_extra_count += 1;
                 }
@@ -717,12 +739,11 @@ fn stream_title_relevance_score(
                 .zip(normalized.split_whitespace())
                 .take_while(|(_, token)| !is_title_boundary_token(token))
                 .peekable();
-            let mut numbered_sequel = false;
             while let Some((_, token)) = words.next() {
                 if !reference_tokens.contains(token) {
                     continue;
                 }
-                numbered_sequel = words.peek().is_some_and(|(raw, token)| {
+                if words.peek().is_some_and(|(raw, token)| {
                     if reference
                         .normalized
                         .split_whitespace()
@@ -757,10 +778,10 @@ fn stream_title_relevance_score(
                             .any(|unit| next.eq_ignore_ascii_case(unit))
                     });
                     !decimal && !size_or_quality
-                });
-            }
-            if numbered_sequel {
-                score = score.min(2);
+                }) {
+                    score = score.min(2);
+                    break;
+                }
             }
         }
 
@@ -905,6 +926,7 @@ pub(crate) fn rank_stream_by_recommendation(
     let selection_priority = Some(SelectionPriority {
         episode_match: key.episode_match,
         season_claim_verified: key.season_claim_verified,
+        year_not_conflicting: !key.year_conflict.0,
         title_match: key.title_match,
         viability: key.viability,
         language: key.language,

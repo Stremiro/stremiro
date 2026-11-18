@@ -1,10 +1,14 @@
 use super::{
-    addon_registry::{catalog_dedup_key, CatalogFetchPage, SearchCursorClaims, SearchSourceCursor},
+    addon_registry::{
+        catalog_dedup_key, catalog_page_hash, interleave_catalog_items, BrowseCursorClaims,
+        CatalogFetchPage, SearchSourceCursor,
+    },
     config_store::AddonConfig,
     normalize_non_empty, normalize_query, MEDIA_ID_MAX_CHARS,
 };
 use crate::providers::{
     addon_resource::{AddonResourceClient, CatalogExtra},
+    ttl_cache::hash_segment,
     MediaItem,
 };
 use futures_util::stream::{self, StreamExt};
@@ -12,7 +16,7 @@ use icu_normalizer::{
     properties::CanonicalCombiningClassMapBorrowed, DecomposingNormalizerBorrowed,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use tauri::{command, AppHandle, State};
 
 const SEARCH_YEAR_MIN: u32 = 1889;
@@ -29,9 +33,8 @@ const SEARCH_GENRE_CONCURRENCY: usize = 4;
 const SEARCH_GENRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 const MAX_SEARCH_SOURCE_CURSORS: usize =
     MAX_GENRE_FILTERS * super::addon_registry::MAX_CATALOG_SOURCES;
-const _: () = assert!(MAX_SEARCH_SOURCE_CURSORS <= u64::BITS as usize);
-// Provider type strings are bounded to 2,048 characters; ids use the IPC id bound.
-const MAX_CATALOG_SEEN_KEY_CHARS: usize = 2_048 + 1 + MEDIA_ID_MAX_CHARS;
+// Types have at most 2,048 chars (8,192 bytes): four length digits and two separators.
+const MAX_CATALOG_SEEN_KEY_CHARS: usize = 2_048 + 6 + MEDIA_ID_MAX_CHARS;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +109,17 @@ impl SearchMediaType {
         match self {
             Self::Movie => "movie",
             Self::Series | Self::Anime => "series",
+        }
+    }
+
+    fn matches_type(self, type_: &str) -> bool {
+        let type_ = super::js_trim(type_);
+        match self {
+            Self::Movie => type_.eq_ignore_ascii_case("movie"),
+            Self::Series => type_.eq_ignore_ascii_case("series"),
+            Self::Anime => {
+                type_.eq_ignore_ascii_case("movie") || type_.eq_ignore_ascii_case("series")
+            }
         }
     }
 }
@@ -289,7 +303,6 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
         return Err("Search continuation requires source cursors.".into());
     }
     if continuation.source_pages.len() > MAX_CATALOG_SEEN_KEYS
-        || (!continuation.source_pages.is_empty() && normalized_query.is_none())
         || continuation.source_pages.iter().any(|page| {
             !page
                 .split_once(':')
@@ -364,93 +377,186 @@ fn without_search_article(title: &str) -> &str {
         .unwrap_or(title)
 }
 
+const EXACT_TIER: u8 = 6;
+const WHOLE_WORD_TIER: u8 = 4;
+// Fan and parody uploads share franchise titles; they need an explicit ask.
+const LOW_QUALITY_MARKERS: [&str; 8] = [
+    "parody", "spoof", "fandub", "fanfilm", "fan film", "fanmade", "fan made", "abridged",
+];
+
+/// Best word-aligned occurrence: 5 whole words opening the title, 4 whole words
+/// later, 3 and 2 the same ending mid-word ("up" in "Upgrade"). A trailing plural
+/// or possessive "s" still counts as whole ("Aliens", "It's").
+fn phrase_tier(title: &str, phrase: &str) -> u8 {
+    std::iter::once(0)
+        .chain(title.match_indices(' ').map(|(index, _)| index + 1))
+        .filter_map(|start| {
+            let rest = title[start..].strip_prefix(phrase)?;
+            let whole = matches!(
+                rest.strip_prefix('s').unwrap_or(rest).chars().next(),
+                None | Some(' ')
+            );
+            Some(match (start == 0, whole) {
+                (true, true) => 5,
+                (false, true) => WHOLE_WORD_TIER,
+                (true, false) => 3,
+                (false, false) => 2,
+            })
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 fn search_tier(title: &str, title_without_article: &str, query: &str) -> u8 {
     let query_without_article = without_search_article(query);
-    let tier = if title.is_empty() {
-        0
-    } else if title == query || title_without_article == query_without_article {
-        5
-    } else if title.starts_with(query) || title_without_article.starts_with(query_without_article) {
-        4
-    } else if title
-        .match_indices(' ')
-        .any(|(index, _)| title[index + 1..].starts_with(query_without_article))
+    if title.is_empty() {
+        return 0;
+    }
+    if title == query || title_without_article == query_without_article {
+        return EXACT_TIER;
+    }
+    let mut tier =
+        phrase_tier(title, query).max(phrase_tier(title_without_article, query_without_article));
+    if tier < 2
+        && query_without_article
+            .split_whitespace()
+            .all(|token| title.split_whitespace().any(|word| word.starts_with(token)))
     {
-        3
-    } else if query_without_article
-        .split_whitespace()
-        .all(|token| title.split_whitespace().any(|word| word.starts_with(token)))
-    {
-        2
-    } else if title.contains(query_without_article) {
-        1
-    } else {
-        0
-    };
-    if tier >= 4 {
+        tier = 2;
+    } else if tier == 0 && title.contains(query_without_article) {
+        tier = 1;
+    }
+    if tier >= 5 {
         return tier;
     }
-    let mut compact_title = title_without_article.chars().filter(|ch| *ch != ' ');
-    if query_without_article
+    // Space-insensitive match so "spiderman" finds "Spider-Man".
+    let mut rest = title_without_article.chars().peekable();
+    let compact_match = query_without_article
         .chars()
         .filter(|ch| *ch != ' ')
-        .all(|ch| compact_title.next() == Some(ch))
-    {
-        if compact_title.next().is_none() {
-            5
-        } else {
-            4
-        }
-    } else {
-        tier
+        .all(|ch| {
+            while rest.next_if_eq(&' ').is_some() {}
+            rest.next() == Some(ch)
+        });
+    if !compact_match {
+        return tier;
     }
+    tier.max(match rest.next() {
+        None => EXACT_TIER,
+        Some(' ') => 5,
+        Some(_) => 3,
+    })
 }
 
 fn rank_search_results(
     query: &str,
-    mut items: Vec<MediaItem>,
+    items: Vec<MediaItem>,
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
-    let mut seen = HashSet::new();
-    items.retain(|item| {
-        (!year_range.is_active()
-            || item
-                .primary_year
-                .is_some_and(|year| year_range.contains(year)))
-            && seen.insert(catalog_dedup_key(&item.type_, &item.id))
-    });
     let normalized_query = normalize_search_text(query);
-    if normalized_query.is_empty() {
-        return items;
-    }
     let year_query = normalized_query.rsplit_once(' ').and_then(|(query, year)| {
         let parsed = year.parse().ok()?;
         (year.len() == 4 && (SEARCH_YEAR_MIN..=SEARCH_YEAR_MAX).contains(&parsed))
             .then_some((query, parsed))
     });
-    // Per-type catalog position preserves provider relevance across merged catalogs.
-    let mut ranked_items: Vec<_> = items.into_iter().map(|item| (item, 0usize)).collect();
-    let mut next_ranks = std::collections::HashMap::new();
-    for (item, rank) in &mut ranked_items {
-        let next_rank = next_ranks.entry(item.type_.as_str()).or_default();
-        *rank = *next_rank;
-        *next_rank += 1;
-    }
-    ranked_items.sort_by_cached_key(|(item, provider_rank)| {
-        let title = normalize_search_text(&item.title);
-        let title_without_article = without_search_article(&title);
-        let mut tier = search_tier(&title, title_without_article, &normalized_query);
-        if let Some((query, _)) = year_query.filter(|(_, year)| item.primary_year == Some(*year)) {
-            tier = tier.max(search_tier(&title, title_without_article, query));
+    let relevance_tier = |title: &str, primary_year: Option<u32>| {
+        let title_without_article = without_search_article(title);
+        let mut tier = search_tier(title, title_without_article, &normalized_query);
+        if let Some((query, _)) = year_query.filter(|(_, year)| primary_year == Some(*year)) {
+            tier = tier.max(search_tier(title, title_without_article, query));
         }
+        tier
+    };
+    let mut positions = HashMap::new();
+    let mut unique: Vec<(MediaItem, u8, bool)> = Vec::with_capacity(items.len());
+    for mut item in items {
+        if year_range.is_active()
+            && !item
+                .primary_year
+                .is_some_and(|year| year_range.contains(year))
+        {
+            continue;
+        }
+        let title = if normalized_query.is_empty() {
+            String::new()
+        } else {
+            normalize_search_text(&item.title)
+        };
+        let tier = relevance_tier(&title, item.primary_year);
+        let title_allowed = !LOW_QUALITY_MARKERS.iter().any(|marker| {
+            phrase_tier(&title, marker) >= WHOLE_WORD_TIER
+                && phrase_tier(&normalized_query, marker) < WHOLE_WORD_TIER
+        });
+        match positions.entry(catalog_dedup_key(&item.type_, &item.id)) {
+            Entry::Occupied(entry) => {
+                // Keep source order, but retain the best-matching row and missing previews.
+                let (kept, kept_tier, kept_allowed) = &mut unique[*entry.get()];
+                if (title_allowed, tier) > (*kept_allowed, *kept_tier) {
+                    std::mem::swap(kept, &mut item);
+                    *kept_tier = tier;
+                    *kept_allowed = title_allowed;
+                }
+                kept.matches_search_credit |= item.matches_search_credit;
+                kept.poster = kept.poster.take().or(item.poster);
+                kept.backdrop = kept.backdrop.take().or(item.backdrop);
+                kept.logo = kept.logo.take().or(item.logo);
+                kept.description = kept.description.take().or(item.description);
+                if kept.primary_year.is_none() && item.primary_year.is_some() {
+                    kept.year = item.year;
+                    kept.primary_year = item.primary_year;
+                    kept.display_year = item.display_year;
+                    if year_query.is_some_and(|(_, year)| kept.primary_year == Some(year)) {
+                        *kept_tier =
+                            relevance_tier(&normalize_search_text(&kept.title), kept.primary_year);
+                    }
+                }
+                kept.genres = kept.genres.take().or(item.genres);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(unique.len());
+                unique.push((item, tier, title_allowed));
+            }
+        }
+    }
+    if normalized_query.is_empty() {
+        return unique.into_iter().map(|(item, ..)| item).collect();
+    }
+    // Per-type catalog position preserves provider relevance across merged catalogs.
+    let mut next_ranks = HashMap::<String, usize>::new();
+    let mut ranked: Vec<_> = unique
+        .into_iter()
+        .filter_map(|(item, tier, title_allowed)| {
+            let provider_rank = if let Some(next_rank) = next_ranks.get_mut(&item.type_) {
+                let rank = *next_rank;
+                *next_rank += 1;
+                rank
+            } else {
+                next_ranks.insert(item.type_.clone(), 1);
+                0
+            };
+            (title_allowed && (item.poster.is_some() || tier >= EXACT_TIER)).then_some((
+                item,
+                tier,
+                provider_rank,
+            ))
+        })
+        .collect();
+    // Providers also match aliases and plots; once titles or credits match, the
+    // rest is noise. Without any (typos, other languages) provider order stands.
+    let is_match =
+        |(item, tier, _): &(MediaItem, u8, usize)| *tier > 0 || item.matches_search_credit;
+    if ranked.iter().any(is_match) {
+        ranked.retain(is_match);
+    }
+    ranked.sort_by_key(|(item, tier, provider_rank)| {
         (
             std::cmp::Reverse(item.matches_search_credit),
-            std::cmp::Reverse(tier),
+            std::cmp::Reverse(*tier),
             *provider_rank,
             std::cmp::Reverse(item.primary_year.unwrap_or(0)),
         )
     });
-    ranked_items.into_iter().map(|(item, _)| item).collect()
+    ranked.into_iter().map(|(item, ..)| item).collect()
 }
 
 fn item_has_genre(item: &MediaItem, genre: &str) -> bool {
@@ -536,8 +642,9 @@ async fn fetch_query_results(
         fetch_genres.into_iter().map(Some).collect()
     };
 
+    let snapshot = super::addon_registry::load_enabled_addons_snapshot(app).await?;
     let page = super::addon_registry::search_catalog_pages_for_genres(
-        app,
+        &snapshot,
         client,
         query,
         media_types,
@@ -556,19 +663,18 @@ async fn fetch_query_results(
     let needs_genres =
         !criteria.genres.is_empty() || criteria.media_type == Some(SearchMediaType::Anime);
     let unverified = if needs_genres && items.iter().any(|item| item.genres.is_none()) {
-        let snapshot = super::addon_registry::load_enabled_addons_snapshot(app).await?;
-        resolve_search_genres(&snapshot, client, &mut items).await
+        resolve_search_genres(&snapshot, client, &mut items, criteria.media_type).await
     } else {
         false
     };
-    let items = retain_search_items_matching_genres(items, &criteria.genres, criteria.media_type);
+    let items = retain_matching_search_items(items, &criteria.genres, criteria.media_type);
     let mut result = finish_catalog_page(
         rank_search_results(query, items, criteria.year_range),
         criteria.continuation,
         None,
         None,
         Some(page.cursors),
-        page.claims,
+        HashMap::new(),
     );
     result.partial = page.partial || unverified;
     Ok(result)
@@ -583,10 +689,14 @@ async fn resolve_search_genres(
     snapshot: &[AddonConfig],
     client: &AddonResourceClient,
     items: &mut [MediaItem],
+    media_type: Option<SearchMediaType>,
 ) -> bool {
+    let needs_genres = |item: &MediaItem| {
+        item.genres.is_none() && media_type.is_none_or(|type_| type_.matches_type(&item.type_))
+    };
     let mut positions = HashMap::new();
     let mut groups = Vec::new();
-    for item in items.iter_mut().filter(|item| item.genres.is_none()) {
+    for item in items.iter_mut().filter(|item| needs_genres(item)) {
         // Same fold as display dedup: one meta fetch serves every casing variant.
         let position = positions
             .entry(catalog_dedup_key(&item.type_, &item.id))
@@ -616,22 +726,24 @@ async fn resolve_search_genres(
         },
     );
     let _ = tokio::time::timeout_at(deadline, work).await;
-    items.iter().any(|item| item.genres.is_none())
+    items.iter().any(needs_genres)
 }
 
-// Search providers can ignore genre extras; only verified tags satisfy a filter.
-fn retain_search_items_matching_genres(
+// Search providers can ignore type and genre extras; only verified rows satisfy a typed or filtered search.
+fn retain_matching_search_items(
     mut items: Vec<MediaItem>,
     genres: &[String],
     media_type: Option<SearchMediaType>,
 ) -> Vec<MediaItem> {
-    let require_animation = media_type == Some(SearchMediaType::Anime);
-    if genres.is_empty() && !require_animation {
+    if genres.is_empty() && media_type.is_none() {
         return items;
     }
     items.retain(|item| {
-        (!require_animation || item_has_genre(item, CINEMETA_ANIME_GENRE))
-            && genres.iter().all(|genre| item_has_genre(item, genre))
+        media_type.is_none_or(|media_type| {
+            media_type.matches_type(&item.type_)
+                && (media_type != SearchMediaType::Anime
+                    || item_has_genre(item, CINEMETA_ANIME_GENRE))
+        }) && genres.iter().all(|genre| item_has_genre(item, genre))
     });
     items
 }
@@ -792,7 +904,7 @@ async fn fetch_browse_page(
     criteria: &SearchCatalogCriteria,
     media_type: SearchMediaType,
     skip: u32,
-) -> Result<(CatalogFetchPage, SearchCursorClaims), String> {
+) -> Result<(CatalogFetchPage, BrowseCursorClaims), String> {
     let feed = criteria.feed;
     // Extra anime genres intersect Animation, not the general-TV genre catalogs.
     let filter_type = criteria
@@ -880,7 +992,7 @@ async fn fetch_browse_page(
             claims.extend(page.items.iter().map(|item| {
                 (
                     catalog_dedup_key(&item.type_, &item.id),
-                    1_u64 << usize::from(media_type != SearchMediaType::Movie),
+                    1_u8 << usize::from(media_type != SearchMediaType::Movie),
                 )
             }));
             // Replayed pages cannot fill the grid, even when every title is filtered out.
@@ -947,7 +1059,7 @@ async fn fetch_addon_browse_page(
     client: &AddonResourceClient,
     criteria: &SearchCatalogCriteria,
     skip: u32,
-) -> Result<(CatalogFetchPage, SearchCursorClaims), String> {
+) -> Result<(CatalogFetchPage, BrowseCursorClaims), String> {
     let mut any_targets = false;
     let groups = criteria
         .genres
@@ -966,14 +1078,7 @@ async fn fetch_addon_browse_page(
     // An empty source space is deterministic, not transient — exhaust the
     // branch instead of preserving a cursor that can never succeed.
     if !any_targets {
-        return Ok((
-            CatalogFetchPage {
-                items: Vec::new(),
-                next_skip: None,
-                partial: false,
-            },
-            HashMap::new(),
-        ));
+        return Ok((CatalogFetchPage::default(), HashMap::new()));
     }
     let page = super::addon_registry::merge_catalog_pages(
         super::addon_registry::fetch_catalog_pages_for_target_groups(client, groups, None).await,
@@ -983,7 +1088,7 @@ async fn fetch_addon_browse_page(
     let claims = page
         .items
         .iter()
-        .map(|item| (catalog_dedup_key(&item.type_, &item.id), 1_u64 << 2))
+        .map(|item| (catalog_dedup_key(&item.type_, &item.id), 1_u8 << 2))
         .collect();
     let mut seen = HashSet::new();
     let mut items = Vec::new();
@@ -1002,9 +1107,9 @@ async fn fetch_addon_browse_page(
 
 fn merge_all_browse_pages(
     continuation: SearchCatalogContinuation,
-    movie: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
-    series: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
-    addon: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
+    movie: Option<Result<(CatalogFetchPage, BrowseCursorClaims), String>>,
+    series: Option<Result<(CatalogFetchPage, BrowseCursorClaims), String>>,
+    addon: Option<Result<(CatalogFetchPage, BrowseCursorClaims), String>>,
 ) -> Result<SearchCatalogPage, String> {
     let cursors = continuation.all_cursors.unwrap_or_default();
     let mut next = AllBrowseCursors::default();
@@ -1048,21 +1153,7 @@ fn merge_all_browse_pages(
         return Err(first_error.unwrap_or_else(|| "Failed to load catalog.".into()));
     }
 
-    let [movie, series, addon] = pages;
-    let mut items = Vec::with_capacity(movie.len() + series.len() + addon.len());
-    let mut branches = [movie.into_iter(), series.into_iter(), addon.into_iter()];
-    loop {
-        let mut advanced = false;
-        for branch in &mut branches {
-            if let Some(item) = branch.next() {
-                items.push(item);
-                advanced = true;
-            }
-        }
-        if !advanced {
-            break;
-        }
-    }
+    let items = interleave_catalog_items(pages);
     let mut page = finish_catalog_page(items, continuation, None, Some(next), None, claims);
     page.partial = partial || first_error.is_some();
     Ok(page)
@@ -1074,42 +1165,39 @@ pub(super) fn finish_catalog_page(
     next_skip: Option<u32>,
     all_cursors: Option<AllBrowseCursors>,
     search_cursors: Option<Vec<SearchSourceCursor>>,
-    claims: SearchCursorClaims,
+    claims: BrowseCursorClaims,
 ) -> SearchCatalogPage {
     let mut seen: HashSet<String> = previous.seen_keys.into_iter().collect();
     let mut source_pages: HashSet<String> = previous.source_pages.into_iter().collect();
-    let mut progress = 0_u64;
-    // Claims cover the page before genre/year filtering, so a source whose new titles
-    // were all filtered out still advanced.
-    for (key, claimant) in &claims {
-        if !seen.contains(key) {
-            progress |= claimant;
-        }
-    }
-    let mut added_movie = search_cursors.is_none() && progress & 1 != 0;
-    let mut added_series = search_cursors.is_none() && progress & 2 != 0;
-    let mut added_addon = search_cursors.is_none() && progress & 4 != 0;
+    // A fresh page can overlap titles already displayed by another branch.
+    // Check each branch's unfiltered page identity before deduplicating cards.
+    let [mut added_movie, mut added_series, mut added_addon] = std::array::from_fn(|index| {
+        let keys: Vec<_> = claims
+            .iter()
+            .filter_map(|(key, branches)| (branches & (1 << index) != 0).then_some(key.as_str()))
+            .collect();
+        !keys.is_empty()
+            && source_pages.len() < MAX_CATALOG_SEEN_KEYS
+            && source_pages.insert(format!(
+                "{}:{}",
+                hash_segment(&("browse", index)),
+                catalog_page_hash(keys)
+            ))
+    });
     items.retain(|item| {
         if seen.len() >= MAX_CATALOG_SEEN_KEYS
             || !seen.insert(catalog_dedup_key(&item.type_, &item.id))
         {
             return false;
         }
-        let typed =
-            item.type_.eq_ignore_ascii_case("movie") || item.type_.eq_ignore_ascii_case("series");
-        added_movie |= item.type_.eq_ignore_ascii_case("movie");
-        added_series |= item.type_.eq_ignore_ascii_case("series");
-        added_addon |= !typed;
+        let type_ = super::js_trim(&item.type_);
+        let is_movie = type_.eq_ignore_ascii_case("movie");
+        let is_series = type_.eq_ignore_ascii_case("series");
+        added_movie |= is_movie;
+        added_series |= is_series;
+        added_addon |= !is_movie && !is_series;
         true
     });
-    // Filtered-out titles are remembered too, or an addon that ignores `skip` would
-    // replay them as progress forever.
-    for key in claims.into_keys() {
-        if seen.len() >= MAX_CATALOG_SEEN_KEYS {
-            break;
-        }
-        seen.insert(key);
-    }
     let continuation = SearchCatalogContinuation {
         skip: next_skip.filter(|next| {
             (!items.is_empty() || added_movie || added_series)
@@ -1133,16 +1221,12 @@ pub(super) fn finish_catalog_page(
         search_cursors: search_cursors.map(|cursors| {
             cursors
                 .into_iter()
-                .enumerate()
-                .filter_map(|(index, cursor)| {
-                    let advanced = cursor.page_hash.as_ref().map_or_else(
-                        || progress & (1_u64 << index) != 0,
-                        |hash| {
+                .filter(|cursor| {
+                    cursor.retry
+                        || cursor.page_hash.as_ref().is_some_and(|hash| {
                             source_pages.len() < MAX_CATALOG_SEEN_KEYS
                                 && source_pages.insert(format!("{}:{hash}", cursor.key))
-                        },
-                    );
-                    (cursor.retry || advanced).then_some(cursor)
+                        })
                 })
                 .collect()
         }),

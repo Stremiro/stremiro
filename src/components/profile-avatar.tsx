@@ -120,7 +120,7 @@ export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
       document.activeElement instanceof HTMLElement && document.activeElement !== document.body
         ? document.activeElement
         : null;
-    updateAvatar(null)
+    void updateAvatar(null)
       .then(
         () => toast.success('Profile photo removed'),
         (error: unknown) => toast.error(getErrorMessage(error)),

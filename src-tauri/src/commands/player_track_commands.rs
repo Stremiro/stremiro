@@ -1,6 +1,6 @@
 //! mpv `track-list` reads batched behind one command — one IPC per burst instead of
-//! ~150 invokes for a 20-track file. The staged wrapper's `track-list` node reads
-//! still apply, so per-field stays.
+//! ~150 invokes for a 20-track file. The staged wrapper crashes on a populated
+//! `track-list` node, so fields are read individually.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,12 +63,10 @@ pub(crate) struct ObservedTrackIds {
 pub(crate) fn mpv_property(
     app: &AppHandle,
     window_label: &str,
-    name: String,
+    name: impl Into<Vec<u8>> + AsRef<str>,
     format: &str,
 ) -> Option<serde_json::Value> {
-    app.mpv()
-        .get_property(name, format.to_string(), window_label)
-        .ok()
+    app.mpv().get_property(name, format, window_label).ok()
 }
 
 fn property_i64(value: Option<serde_json::Value>) -> Option<i64> {
@@ -112,11 +110,7 @@ fn read_track_list(
 ) -> Result<Vec<PlayerTrack>, String> {
     let count = app
         .mpv()
-        .get_property(
-            "track-list/count".to_string(),
-            "int64".to_string(),
-            window_label,
-        )
+        .get_property("track-list/count", "int64", window_label)
         .map_err(|error| format!("mpv track-count read failed: {error}"))?;
     let Some(count) = count.as_i64().filter(|count| *count > 0) else {
         return Ok(Vec::new());
@@ -126,13 +120,13 @@ fn read_track_list(
         audio: property_i64(mpv_property(
             app,
             window_label,
-            "current-tracks/audio/id".to_string(),
+            "current-tracks/audio/id",
             "int64",
         )),
         sub: property_i64(mpv_property(
             app,
             window_label,
-            "current-tracks/sub/id".to_string(),
+            "current-tracks/sub/id",
             "int64",
         )),
     });
@@ -206,12 +200,9 @@ fn read_track_list(
     tracks.sort_unstable_by_key(|track| (track.r#type as u8, track.id));
     let mut label_counts = [HashMap::new(), HashMap::new(), HashMap::new()];
     for track in &mut tracks {
-        let lang = track
-            .lang
-            .as_deref()
-            .map(str::to_uppercase)
-            .filter(|lang| !lang.is_empty());
-        let title = track.title.as_deref().filter(|title| !title.is_empty());
+        // Both come from `property_non_blank`, so they are never empty.
+        let lang = track.lang.as_deref().map(str::to_uppercase);
+        let title = track.title.as_deref();
         let mut label = match (title, lang.as_deref()) {
             (Some(title), Some(lang)) if !title.to_lowercase().contains(&lang.to_lowercase()) => {
                 format!("{lang} · {title}")

@@ -4,7 +4,7 @@ import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-item-sea
 import { type Episode, type MediaDetails } from '@/lib/api';
 import { boundedMapSet, clamp, isSeriesLikeMediaType } from '@/lib/utils';
 
-const EPISODE_DISPLAY_PAGE_SIZE = 9;
+const EPISODE_DISPLAY_PAGE_SIZE = 36;
 const EMPTY_EPISODES: Episode[] = [];
 const EMPTY_SEASONS: NonNullable<MediaDetails['seasons']> = [];
 

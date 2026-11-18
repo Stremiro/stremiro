@@ -427,6 +427,7 @@ fn priority(
     Some(SelectionPriority {
         episode_match,
         season_claim_verified,
+        year_not_conflicting: true,
         title_match,
         viability: 1,
         language,
@@ -649,7 +650,7 @@ fn pool_query(media_type: &str, season: Option<u32>, episode: Option<u32>) -> St
 }
 
 #[test]
-fn stream_pool_query_preserves_composed_ipc_trimming() {
+fn stream_pool_query_preserves_composed_ipc_trimming_and_catalog_types() {
     let query = |media_type: &str, id: &str| {
         StreamPoolQuery::new(
             media_type,
@@ -692,10 +693,7 @@ fn stream_pool_query_preserves_composed_ipc_trimming() {
             Some((expected.0.to_string(), expected.1.to_string()))
         );
     }
-}
 
-#[test]
-fn stream_pool_query_accepts_addon_catalog_types() {
     let query = StreamPoolQuery::new(
         "Channel",
         "addon:1",
@@ -1056,7 +1054,7 @@ async fn fake_probe(
     (candidate, result)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn candidate_results_failed_first_rank_passes_to_next() {
     let cases: [(&str, Duration, FakeProbeInner, Option<&str>, &str); 4] = [
         (
@@ -1159,7 +1157,7 @@ async fn recovery_candidate_results_accept_same_url_for_a_different_prepared_req
 }
 
 #[tokio::test]
-async fn candidate_results_all_failures_error() {
+async fn candidate_results_error_kinds_cover_failures_and_rate_limits() {
     let mut candidates = FuturesOrdered::new();
     candidates.push_back(fake_probe(
         candidate_input("a", "s:a"),
@@ -1175,14 +1173,10 @@ async fn candidate_results_all_failures_error() {
     let error = resolve_candidate_results(candidates, None)
         .await
         .expect_err("all probes failed");
-
     assert_eq!(error.kind, ResolveStreamErrorKind::Failed);
     assert!(error.message.contains("a: boom"));
     assert!(error.message.contains("b: gone"));
-}
 
-#[tokio::test]
-async fn candidate_results_rate_limited_probe_marks_error_kind() {
     let mut candidates = FuturesOrdered::new();
     candidates.push_back(fake_probe(
         candidate_input("a", "s:a"),
@@ -1198,7 +1192,6 @@ async fn candidate_results_rate_limited_probe_marks_error_kind() {
     let error = resolve_candidate_results(candidates, None)
         .await
         .expect_err("the only probe failed");
-
     assert_eq!(error.kind, ResolveStreamErrorKind::RateLimited);
 }
 

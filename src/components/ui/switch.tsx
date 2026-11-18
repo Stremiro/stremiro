@@ -1,4 +1,3 @@
-import { Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export function Switch({
@@ -33,21 +32,20 @@ export function Switch({
         if (!pending) onChange();
       }}
       className={cn(
-        'inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
+        'inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border p-[3px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
         checked
           ? 'border-transparent bg-(--accent-act) text-(--on-accent-act)'
-          : 'border-white/15 bg-white/[0.04] text-transparent hover:border-white/25 hover:bg-white/[0.08]',
+          : 'border-white/20 bg-white/[0.1] text-zinc-300 hover:border-white/30 hover:bg-white/[0.14]',
         disabled && 'cursor-not-allowed opacity-45',
         pending && !disabled && 'cursor-default',
         className,
       )}
     >
-      <Check
+      <span
         aria-hidden='true'
-        strokeWidth={3}
         className={cn(
-          'h-4 w-4 transition-[opacity,scale] duration-150 motion-reduce:transition-none',
-          checked ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+          'size-[18px] rounded-full bg-current shadow-sm transition-transform duration-150 motion-reduce:transition-none',
+          checked ? 'translate-x-[22px]' : 'translate-x-0',
         )}
       />
     </button>

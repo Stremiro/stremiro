@@ -3,7 +3,7 @@ import { api, type BestResolvedStream, type PlaybackStreamOutcome } from '@/lib/
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
 import { nonBlank } from '@/lib/utils';
 
-/** Resolve/recover/prime coordinates: commands route on source, ranking overrides are canonical, `streamLookupId` defaults to `mediaId`. */
+/** Commands route on source coordinates and rank on canonical coordinates. */
 export interface PlayerStreamRequest {
   mediaId: string;
   mediaType: PlayerRouteMediaType;
@@ -127,27 +127,4 @@ export function recoverPlayerStream(
     outcome,
     ...playerStreamRankingOptions(coords),
   });
-}
-
-/** Seeds under the exact key the player replays — `requestedStreamKey`: pick's key for selector resolves, winner key otherwise. */
-export function primePlayerStream(
-  resolved: BestResolvedStream,
-  request: PlayerStreamRequest,
-  requestedStreamKey?: string,
-): void {
-  const replayKey = nonBlank(requestedStreamKey) ?? nonBlank(resolved.streamKey);
-  if (!replayKey) return;
-
-  api.primeBestStream(
-    request.mediaType,
-    request.streamLookupId || request.mediaId,
-    request.streamSeason,
-    request.streamEpisode,
-    request.absoluteEpisode,
-    {
-      ...playerStreamRankingOptions(request),
-      preferredStreamKey: replayKey,
-    },
-    resolved,
-  );
 }

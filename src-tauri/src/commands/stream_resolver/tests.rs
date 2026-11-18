@@ -6,7 +6,7 @@ use crate::commands::streaming_helpers::PLAYBACK_URL_MAX_BYTES;
 use crate::providers::addons::sanitize_addon_log;
 
 #[test]
-fn relative_redirects_inherit_playback_fragments() {
+fn redirects_inherit_replace_or_clear_playback_fragments() {
     let initial = reqwest::Url::parse("https://cdn.test/start#filename.mkv").unwrap();
     for (location, expected) in [
         ("/video", "https://cdn.test/video#filename.mkv"),
@@ -15,42 +15,25 @@ fn relative_redirects_inherit_playback_fragments() {
             "/video%23part",
             "https://cdn.test/video%23part#filename.mkv",
         ),
+        (
+            "https://other.test/video",
+            "https://other.test/video#filename.mkv",
+        ),
+        (
+            "/video#replacement.mkv",
+            "https://cdn.test/video#replacement.mkv",
+        ),
+        (
+            "https://cdn.test/video#replacement.mkv",
+            "https://cdn.test/video#replacement.mkv",
+        ),
+        ("/video#", "https://cdn.test/video#"),
+        ("https://cdn.test/video#", "https://cdn.test/video#"),
     ] {
         let target = resolve_redirect_url(&initial, location).unwrap();
+        assert_eq!(target.as_str(), expected, "{location}");
         let resolved = build_resolved_direct_stream(&initial, target.to_string(), &[]).unwrap();
-        assert_eq!(resolved.url, expected);
-    }
-}
-
-#[test]
-fn absolute_redirects_inherit_playback_fragments() {
-    let initial = reqwest::Url::parse("https://cdn.test/start#file=Episode%201.mkv").unwrap();
-    let target = resolve_redirect_url(&initial, "https://other.test/video").unwrap();
-    assert_eq!(
-        target.as_str(),
-        "https://other.test/video#file=Episode%201.mkv"
-    );
-}
-
-#[test]
-fn explicit_redirect_fragments_replace_playback_fragments() {
-    let initial = reqwest::Url::parse("https://cdn.test/start#filename.mkv").unwrap();
-    for location in [
-        "/video#replacement.mkv",
-        "https://cdn.test/video#replacement.mkv",
-    ] {
-        let target = resolve_redirect_url(&initial, location).unwrap();
-        assert_eq!(target.as_str(), "https://cdn.test/video#replacement.mkv");
-    }
-}
-
-#[test]
-fn explicit_empty_redirect_fragments_clear_playback_fragments() {
-    let initial = reqwest::Url::parse("https://cdn.test/start#filename.mkv").unwrap();
-    for location in ["/video#", "https://cdn.test/video#"] {
-        let target = resolve_redirect_url(&initial, location).unwrap();
-        assert_eq!(target.fragment(), Some(""));
-        assert_eq!(target.as_str(), "https://cdn.test/video#");
+        assert_eq!(resolved.url, expected, "{location}");
     }
 }
 
@@ -74,7 +57,7 @@ fn redirect_chains_inherit_the_previous_hops_fragment() {
 }
 
 #[test]
-fn probe_content_types_allow_media() {
+fn probe_content_types_allow_media_and_reject_document_payloads() {
     for (label, content_type, allowed) in [
         ("missing", None, true),
         ("hls", Some("application/vnd.apple.mpegurl"), true),
@@ -86,6 +69,9 @@ fn probe_content_types_allow_media() {
         ("dash", Some("application/dash+xml"), true),
         ("binary", Some("application/octet-stream"), true),
         ("mp4", Some("video/mp4"), true),
+        ("html", Some("text/html"), false),
+        ("xhtml", Some("application/xhtml+xml"), false),
+        ("json", Some("application/json; charset=utf-8"), false),
     ] {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(content_type) = content_type {
@@ -213,17 +199,13 @@ fn mpv_http_header_fields_escape_commas_and_backslashes() {
 }
 
 #[test]
-fn advisory_probe_status_covers_auth_head_and_range_gaps() {
+fn advisory_probe_statuses_pass_through_but_dead_links_fail_over() {
     for status in [401, 403, 407, 405, 501, 416] {
         assert!(
             is_advisory_probe_status(status),
             "{status} must pass through"
         );
     }
-}
-
-#[test]
-fn dead_link_statuses_still_fail_over() {
     for status in [400, 404, 408, 429, 500, 502, 503] {
         assert!(!is_advisory_probe_status(status), "{status} must fail over");
     }

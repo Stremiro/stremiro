@@ -9,23 +9,28 @@ export const CHROME_ICON_BUTTON_CLASS =
 export const CHROME_ENTER_TIMING_CLASS = 'duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]';
 export const CHROME_EXIT_TIMING_CLASS = 'duration-[420ms] ease-[cubic-bezier(0.4,0,0.2,1)]';
 
-export const CHROME_PILL_CLASS =
-  'flex min-h-12 shrink-0 items-center gap-0.5 rounded-xl border border-white/[0.08] bg-zinc-950/72 p-1 shadow-[inset_0_1px_0_rgb(255_255_255/0.07)] backdrop-blur-xl';
+export const CHROME_PILL_CLASS = 'flex min-h-12 shrink-0 items-center gap-0.5 p-1';
 
-/** Title-row controls: a single-button version of the transport pill so both rows share one surface. */
+/** Title-row controls stay legible against the video scrim. */
 export const CHROME_CORNER_BUTTON_CLASS =
-  'flex h-12 w-12 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-white/[0.08] bg-zinc-950/72 text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.07)] backdrop-blur-xl transition-colors duration-150 hover:bg-zinc-900/85 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none motion-reduce:active:scale-100';
+  'flex h-12 w-12 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-black/25 text-white transition-colors duration-150 hover:bg-black/50 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none motion-reduce:active:scale-100';
 
 export const CHROME_SKIP_BUTTON_CLASS =
   'border border-white/[0.12] bg-zinc-950/80 text-white/95 shadow-[0_10px_24px_-14px_rgb(0_0_0/0.8),inset_0_1px_0_rgb(255_255_255/0.08)] backdrop-blur-md transition-colors duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-white/20 hover:bg-zinc-900/90 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-skip)/60 motion-reduce:transition-none';
 
-/** Glass surface for controls-row popovers (speed, audio, subtitles); callers add width and padding. */
+/** Glass surface for controls-row popovers (speed, audio, subtitles); callers add width. */
 export const CHROME_POPOVER_CLASS =
   // Exit stays instant: a fading layer over the video would swallow the next click.
-  'rounded-xl border-white/[0.08] bg-zinc-950/95 shadow-2xl shadow-black/60 backdrop-blur-xl data-[state=open]:duration-150 data-[state=closed]:animate-none! motion-reduce:animate-none! motion-reduce:transition-none';
+  'rounded-xl border-white/[0.08] bg-zinc-950/92 p-1.5 shadow-[0_18px_48px_-16px_rgb(0_0_0/0.85),inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-xl data-[state=open]:duration-150 data-[state=closed]:animate-none! motion-reduce:animate-none! motion-reduce:transition-none';
+
+export const CHROME_MENU_HEADING_CLASS =
+  'px-2 pt-1.5 pb-2 text-[13px] font-semibold tracking-tight text-zinc-300';
 
 export const CHROME_MENU_ROW_FOCUS_CLASS =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40';
+
+export const CHROME_MENU_ITEM_SELECTED_CLASS = 'bg-white/[0.09] text-white';
+export const CHROME_MENU_ITEM_IDLE_CLASS = 'text-zinc-300 hover:bg-white/[0.06] hover:text-white';
 
 export const CHROME_MENU_INDICATOR_CLASS = 'flex h-3.5 w-3.5 shrink-0 items-center justify-center';
 

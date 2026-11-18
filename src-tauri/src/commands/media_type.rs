@@ -1,8 +1,8 @@
 //! Canonical media-type normalization, single owner.
 //!
 //! Two namespaces on purpose: history/title-scope folds `anime` onto `series`
-//! (resume keys, title scopes, meta lookups), while the stream namespace keeps
-//! `anime` distinct because anime catalogs index streams under it.
+//! (resume keys and title scopes), while addon-facing metadata and stream lookups
+//! keep `anime` distinct for addons that declare it.
 
 use crate::providers::addon_manifest::MAX_TYPE_CHARS;
 

@@ -1,13 +1,13 @@
 use super::{
     lenient_option, DurableStore, ADDON_CONFIGS_KEY, DEFAULT_ADDON_INSTALLS,
-    DEFAULT_OPENSUBTITLES_INSTALL_URL,
+    DEFAULT_CINEMETA_INSTALL_URL,
 };
 use crate::commands::{
     app_links::APP_LINK_SCHEME, normalize_non_empty, streaming_helpers::normalize_source_id,
 };
 use crate::providers::addon_manifest::{
-    snapshot_is_classified, snapshot_resource_kinds, AddonManifest, AddonResourceCapability,
-    AddonResourceKind,
+    snapshot_is_classified, snapshot_resource_kinds, AddonCatalogCapability, AddonCatalogExtra,
+    AddonManifest, AddonResourceCapability, AddonResourceKind,
 };
 use crate::providers::{strip_manifest_suffix, ADDON_URL_INVALID_MESSAGE};
 use serde::{Deserialize, Serialize};
@@ -331,19 +331,44 @@ fn normalize_loaded_addon_configs(configs: Vec<AddonConfig>) -> Vec<AddonConfig>
 
 fn default_addon_config(install_url: &str, name: &str) -> Option<AddonConfig> {
     let url = normalize_addon_url(install_url).ok().flatten()?;
+    let cinemeta = install_url == DEFAULT_CINEMETA_INSTALL_URL;
+    let types = ["movie", "series"];
+    let catalogs = if cinemeta {
+        types
+            .iter()
+            .flat_map(|type_| {
+                ["top", "imdbRating", "year"].map(|id| AddonCatalogCapability {
+                    type_: (*type_).into(),
+                    id: id.into(),
+                    extras: ["genre", "skip", "search"]
+                        .into_iter()
+                        .filter(|extra| *extra != "search" || id == "top")
+                        .map(|extra| AddonCatalogExtra {
+                            name: extra.into(),
+                            is_required: id == "year" && extra == "genre",
+                            options: Vec::new(),
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Some(AddonConfig {
         id: opaque_addon_id(url.clone()),
         url,
         name: name.to_string(),
         enabled: true,
-        capabilities: (install_url == DEFAULT_OPENSUBTITLES_INSTALL_URL).then(|| AddonManifest {
+        capabilities: Some(AddonManifest {
             name: name.to_string(),
             resources: vec![AddonResourceCapability {
-                name: "subtitles".to_string(),
-                types: vec!["movie".to_string(), "series".to_string()],
+                name: if cinemeta { "meta" } else { "subtitles" }.into(),
+                types: types.map(str::to_string).into(),
                 id_prefixes: vec!["tt".to_string()],
             }],
+            catalogs,
             ..AddonManifest::default()
         }),
     })
@@ -363,13 +388,25 @@ pub(in crate::commands) fn is_pinned_default_addon_url(url: &str) -> bool {
         .any(|default| default.url == url)
 }
 
+pub(in crate::commands) fn is_default_cinemeta_url(url: &str) -> bool {
+    DEFAULT_ADDON_CONFIGS
+        .first()
+        .is_some_and(|addon| addon.url == url)
+}
+
 /// Default addons are pinned: each `DEFAULT_ADDON_INSTALLS` entry always occupies its
 /// index and can't be removed. A user's `enabled: false` toggle is preserved.
 fn pin_default_addons(mut configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
     for (index, default) in DEFAULT_ADDON_CONFIGS.iter().enumerate() {
         // A stored copy keeps the user's toggle/name/snapshot; a missing one seeds enabled.
         let pinned = match configs.iter().position(|config| config.url == default.url) {
-            Some(position) => configs.remove(position),
+            Some(position) => {
+                let mut pinned = configs.remove(position);
+                if pinned.capabilities.is_none() {
+                    pinned.capabilities.clone_from(&default.capabilities);
+                }
+                pinned
+            }
             None => {
                 let mut pinned = default.clone();
                 let mut suffix = 1;

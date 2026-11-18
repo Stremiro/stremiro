@@ -183,7 +183,7 @@ pub(crate) use durable_store::{
     open_store, resolve_store_path, write_atomic_file, DurableStore, DurableStoreRegistry,
 };
 pub(crate) use media_type::{normalize_stream_media_type, normalize_watch_progress_type};
-pub(crate) use startup_validation::validate_startup_stores;
+pub(crate) use startup_validation::sweep_startup_store_files;
 use store_helpers::{load_library_index, read_watch_status_snapshot};
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -274,10 +274,10 @@ pub(crate) fn normalize_media_id(input: &str) -> Option<String> {
 }
 
 /// Normalize a persisted media image URL: trimmed, char-bounded, gated by the
-/// addon-ingress artwork policy — http(s) only, no credentials, no non-routable
+/// addon-ingress artwork policy — HTTPS only, no credentials, no non-routable
 /// host. Anything else degrades to "no artwork" instead of persisting.
 pub(crate) fn normalize_media_image_url(input: &str) -> Option<String> {
-    crate::providers::addon_resource::normalize_image_url(input.trim())
+    crate::providers::addon_resource::normalize_image_url(input)
 }
 
 /// Opaque free-text fields crossing IPC (source names, stream metadata, skip-segment
@@ -332,7 +332,7 @@ pub struct PlaybackLanguagePreferences {
 /// Fetch skippable segment data (intro/recap/outro/preview) from SkipDB.
 /// Unkeyable input and missing data return empty; only transient upstream failures are errors.
 #[command]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn get_skip_times(
     skip_provider: State<'_, crate::providers::skip_times::SkipTimesProvider>,
     enrichment: State<'_, crate::providers::enrichment::EnrichmentClient>,
@@ -360,7 +360,7 @@ pub async fn get_skip_times(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn skip_times_for_request(
     enrichment: &crate::providers::enrichment::EnrichmentClient,
     skip_provider: &crate::providers::skip_times::SkipTimesProvider,

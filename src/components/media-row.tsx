@@ -53,7 +53,6 @@ export function MediaRow({
     data = EMPTY_ITEMS,
     isFetching,
     isLoading,
-    isFetched,
     isPlaceholderData,
     error,
     refetch,
@@ -97,7 +96,7 @@ export function MediaRow({
         {manageAddonsLink}
       </>
     );
-  } else if ((error || (isFetched && isLoading)) && data.length === 0) {
+  } else if (error && data.length === 0) {
     notice = retryBanner;
   } else if (!isLoading && data.length === 0) {
     if (!primary) return null;

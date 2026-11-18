@@ -191,7 +191,7 @@ export function AccentControls({
                 aria-label={`${preset.label} accent`}
                 aria-pressed={isActive}
                 onClick={() => changeColor(color)}
-                className='flex size-7 items-center justify-center justify-self-center rounded-full border border-white/10 transition-transform duration-150 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 motion-reduce:transition-none motion-reduce:transform-none'
+                className='flex size-7 items-center justify-center justify-self-center rounded-full border border-white/10 transition-[filter] duration-150 hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 motion-reduce:transition-none'
                 // Selected ring uses the swatch's own color with a dark gap —
                 // quiet on every hue where a white ring + glow shouted.
                 style={{

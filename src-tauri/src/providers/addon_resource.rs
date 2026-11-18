@@ -24,7 +24,7 @@ const SUBTITLE_MAX_BYTES: usize = 512 * 1024;
 /// Catalog pages run ~0.5-0.7MiB decompressed — a tighter timeout misreads
 /// slow international routes as dead hosts.
 const RESOURCE_TIMEOUT_SECS: u64 = 20;
-const CINEMETA_ARTWORK_TIMEOUT: Duration = Duration::from_millis(1_500);
+const CINEMETA_ARTWORK_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CATALOG_ITEMS: usize = 500;
 const MAX_EPISODES: usize = 2_000;
 const MAX_TRAILERS: usize = 32;
@@ -52,7 +52,6 @@ const SUBTITLE_DISK_MAX_BYTES: usize = SUBTITLE_MAX_BYTES + 128;
 // All filesystem work runs on blocking workers; one gate bounds writers across clients.
 static SUBTITLE_DISK_GATE: Mutex<()> = Mutex::new(());
 /// A dropped fetch future never releases its key; inserts sweep orphans past this bound.
-const RESOURCE_IN_FLIGHT_SWEEP_AT: usize = 64;
 /// Per-addon transport-failure cooldown: a host that failed to answer is
 /// presumed down, so fetches fail fast for this window. Session-local;
 /// mechanics in `FetchFailureCooldown`.
@@ -157,7 +156,55 @@ struct CatalogItemJson<'a> {
 #[derive(Debug, Deserialize, Default)]
 struct CatalogResponse<'a> {
     #[serde(borrow, default)]
-    metas: Vec<&'a RawValue>,
+    metas: CatalogItems<'a>,
+}
+
+#[derive(Debug, Default)]
+struct CatalogItems<'a> {
+    rows: Vec<(MediaItem, Option<&'a RawValue>)>,
+    source_item_count: usize,
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for CatalogItems<'a> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Items;
+
+        impl<'de> serde::de::Visitor<'de> for Items {
+            type Value = CatalogItems<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a catalog array")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut items = CatalogItems::default();
+                while items.rows.len() < MAX_CATALOG_ITEMS {
+                    let Some(raw) = sequence.next_element::<&RawValue>()? else {
+                        break;
+                    };
+                    items.source_item_count += 1;
+                    let json = raw.get();
+                    if !json.starts_with('{') && !json.starts_with('[') {
+                        continue;
+                    }
+                    if let Ok(value) = serde_json::from_str::<CatalogItemJson<'_>>(json) {
+                        let links = value.links;
+                        if let Some(item) = parse_catalog_item(value) {
+                            items.rows.push((item, links));
+                        }
+                    }
+                }
+                // Validate the tail without retaining a pointer for every discarded source row.
+                while sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(items)
+            }
+        }
+
+        deserializer.deserialize_seq(Items)
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -312,7 +359,7 @@ impl AddonResourceClient {
                 RESOURCE_CACHE_EMPTY_TTL,
                 RESOURCE_CACHE_EMPTY_TTL,
             ),
-            in_flight: InFlight::new(RESOURCE_IN_FLIGHT_SWEEP_AT),
+            in_flight: InFlight::default(),
             generation: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -483,26 +530,32 @@ impl AddonResourceClient {
         &self,
         details: &mut MediaDetails,
         normalize: fn(MediaDetails) -> MediaDetails,
-    ) {
+    ) -> Vec<bool> {
         if !needs_cinemeta_artwork(details) {
-            return;
+            return Vec::new();
         }
+        let Some(imdb_id) = canonical_imdb_anchor(details) else {
+            return Vec::new();
+        };
         let Ok(Ok(artwork)) = tokio::time::timeout(
             CINEMETA_ARTWORK_TIMEOUT,
             self.fetch_meta(
                 "https://cinemeta-live.strem.io",
                 "series",
-                &details.id,
+                &imdb_id,
                 normalize,
             ),
         )
         .await
         else {
-            return;
+            return Vec::new();
         };
-        if artwork.id == details.id && artwork.type_ == details.type_ {
-            merge_cinemeta_artwork(details, &artwork);
+        if artwork.type_ == "series"
+            && canonical_imdb_anchor(&artwork).as_deref() == Some(imdb_id.as_str())
+        {
+            return merge_cinemeta_artwork(details, &artwork);
         }
+        Vec::new()
     }
 
     pub(crate) async fn fetch_subtitles(
@@ -510,12 +563,12 @@ impl AddonResourceClient {
         base_url: &str,
         type_: &str,
         id: &str,
-    ) -> Result<Vec<AddonSubtitle>, String> {
+    ) -> Result<Arc<[AddonSubtitle]>, String> {
         let url = build_resource_url(base_url, "subtitles", type_, id, &[])?;
         let cache_key = resource_cache_key("subtitles", &url);
         let addon_key = hash_segment(base_url);
         if let Some(subtitles) = self.subtitle_cache.get(&cache_key) {
-            return Ok(subtitles.to_vec());
+            return Ok(subtitles);
         }
         let generation = self.cache_generation();
         let disk_path = self
@@ -536,12 +589,11 @@ impl AddonResourceClient {
                         .put_for(&cache_key, subtitles.clone(), ttl, || {
                             self.cache_generation() == generation
                         });
-                    return Ok(subtitles.to_vec());
+                    return Ok(subtitles);
                 }
             }
         }
-        let subtitles = self
-            .fetch_contract()
+        self.fetch_contract()
             .run(
                 &self.subtitle_cache,
                 &cache_key,
@@ -579,8 +631,7 @@ impl AddonResourceClient {
                     })?
                 },
             )
-            .await?;
-        Ok(subtitles.to_vec())
+            .await
     }
 }
 
@@ -597,14 +648,12 @@ pub(crate) fn catalog_declares_extra(catalog: &AddonCatalogCapability, extra_nam
         .any(|extra| extra.name.eq_ignore_ascii_case(extra_name))
 }
 
-pub(crate) fn snapshot_supports_catalog<'a>(
+fn declared_catalog<'a>(
     snapshot: &'a AddonManifest,
     type_: &str,
     catalog_id: &str,
-    extras: &[CatalogExtra],
-) -> Result<&'a AddonCatalogCapability, String> {
-    // `catalogs[]` is authoritative: a catalogs-only manifest may omit `resources`.
-    let Some(catalog) = snapshot
+) -> Option<&'a AddonCatalogCapability> {
+    snapshot
         .catalogs
         .iter()
         .find(|catalog| catalog.type_.eq_ignore_ascii_case(type_) && catalog.id == catalog_id)
@@ -614,11 +663,67 @@ pub(crate) fn snapshot_supports_catalog<'a>(
                     && catalog.id.eq_ignore_ascii_case(catalog_id)
             })
         })
+}
+
+pub(crate) fn catalog_request_extras(
+    snapshot: Option<&AddonManifest>,
+    type_: &str,
+    catalog_id: &str,
+    mut extras: Vec<CatalogExtra>,
+) -> Vec<CatalogExtra> {
+    let Some(catalog) = snapshot.and_then(|snapshot| declared_catalog(snapshot, type_, catalog_id))
     else {
-        return Err(format!(
-            "Addon does not declare catalog {catalog_id} for type {type_}."
-        ));
+        return extras;
     };
+    extras.retain_mut(|extra| {
+        if !extra.name.eq_ignore_ascii_case("genre") {
+            return true;
+        }
+        let Some(genre) = catalog
+            .extras
+            .iter()
+            .find(|declared| declared.name.eq_ignore_ascii_case("genre"))
+        else {
+            return false;
+        };
+        if genre.options.is_empty() {
+            return true;
+        }
+        let Some(option) = genre
+            .options
+            .iter()
+            .find(|option| option.eq_ignore_ascii_case(&extra.value))
+        else {
+            return false;
+        };
+        extra.value.clone_from(option);
+        true
+    });
+    if !extras
+        .iter()
+        .any(|extra| extra.name.eq_ignore_ascii_case("skip"))
+        && catalog
+            .extras
+            .iter()
+            .any(|extra| extra.name.eq_ignore_ascii_case("skip") && extra.is_required)
+    {
+        extras.push(CatalogExtra {
+            name: "skip".to_string(),
+            value: "0".to_string(),
+        });
+    }
+    extras
+}
+
+pub(crate) fn snapshot_supports_catalog<'a>(
+    snapshot: &'a AddonManifest,
+    type_: &str,
+    catalog_id: &str,
+    extras: &[CatalogExtra],
+) -> Result<&'a AddonCatalogCapability, String> {
+    // `catalogs[]` is authoritative: a catalogs-only manifest may omit `resources`.
+    let catalog = declared_catalog(snapshot, type_, catalog_id)
+        .ok_or_else(|| format!("Addon does not declare catalog {catalog_id} for type {type_}."))?;
 
     // `search` is a hard capability gate (an undeclaring catalog echoes bogus
     // rows); other extras are advisory — callers enforce unsupported filters locally.
@@ -708,26 +813,19 @@ fn parse_catalog_page(
     normalize: fn(MediaItem) -> MediaItem,
     query: Option<&str>,
 ) -> CatalogPage {
-    let mut items = Vec::new();
-    let mut source_item_count = 0;
-    for value in response.metas {
-        source_item_count += 1;
-        if let Ok(value) = serde_json::from_str::<CatalogItemJson<'_>>(value.get()) {
-            let links = value.links;
-            let Some(mut item) = parse_catalog_item(value) else {
-                continue;
-            };
+    let items = response
+        .metas
+        .rows
+        .into_iter()
+        .map(|(mut item, links)| {
             item.matches_search_credit = query
                 .filter(|query| !query.is_empty())
                 .is_some_and(|query| catalog_matches_search_credit(links, query));
-            items.push(normalize(item));
-            if items.len() == MAX_CATALOG_ITEMS {
-                break;
-            }
-        }
-    }
+            normalize(item)
+        })
+        .collect();
     CatalogPage {
-        source_item_count,
+        source_item_count: response.metas.source_item_count,
         items,
     }
 }
@@ -956,16 +1054,23 @@ fn is_youtube_video_token(source: &str) -> bool {
 /// Image fields reach the webview `<img>`, so they share the subtitle/stream
 /// ingress gate; a rejected URL degrades to no artwork, not a dropped row.
 pub(crate) fn sanitize_image_url(value: Option<&Value>) -> Option<String> {
-    normalize_image_url(value?.as_str()?)
+    let url = value?.as_str()?;
+    // Raw addon padding must not bypass the ingress bound; persisted URLs normalize first.
+    if url != url.trim() && url.chars().nth(MAX_STRING_CHARS).is_some() {
+        return None;
+    }
+    normalize_image_url(url)
 }
 
 pub(crate) fn normalize_image_url(url: &str) -> Option<String> {
+    let url = url.trim();
     let raw_chars = url.chars().take(MAX_SERIALIZED_IMAGE_URL_CHARS + 1).count();
     if raw_chars > MAX_SERIALIZED_IMAGE_URL_CHARS {
         return None;
     }
-    let parsed = parse_fetchable_http_url(url.trim())?;
-    (raw_chars <= MAX_STRING_CHARS || parsed.as_str() == url).then(|| parsed.into())
+    let parsed = parse_fetchable_http_url(url)?;
+    (parsed.scheme() == "https" && (raw_chars <= MAX_STRING_CHARS || parsed.as_str() == url))
+        .then(|| parsed.into())
 }
 
 fn normalize_trailer_name(title: &str) -> Option<String> {
@@ -1083,6 +1188,7 @@ fn parse_episodes(value: Option<&RawValue>) -> Option<Vec<Episode>> {
                     stream_lookup_id: None,
                     stream_season: None,
                     stream_episode: None,
+                    alternate_video_id: None,
                 });
             }
             // Validate the rest without allocating discarded rows or a pointer per source entry.
@@ -1209,8 +1315,7 @@ pub(crate) fn build_resource_url(
 ) -> Result<String, String> {
     let mut parsed =
         reqwest::Url::parse(base_url).map_err(|_| ADDON_URL_INVALID_MESSAGE.to_string())?;
-    let trimmed_path = parsed.path().trim_end_matches('/');
-    let base_path = strip_manifest_suffix(trimmed_path);
+    let base_path = strip_manifest_suffix(parsed.path());
 
     let resource = encode_path_segment(resource, MAX_ID_CHARS)?;
     let type_ = encode_path_segment(type_, MAX_ID_CHARS)?;
@@ -1247,63 +1352,271 @@ fn is_metahub_episode_thumbnail(url: &str) -> bool {
     })
 }
 
-fn needs_cinemeta_artwork(details: &MediaDetails) -> bool {
-    details.is_anime
-        && details.type_ == "series"
-        && super::skip_times::normalize_imdb_id(&details.id).as_deref() == Some(details.id.as_str())
+fn canonical_imdb_anchor(details: &MediaDetails) -> Option<String> {
+    details
+        .imdb_id
+        .as_deref()
+        .and_then(super::skip_times::normalize_imdb_id)
+        .or_else(|| super::skip_times::normalize_imdb_id(&details.id))
+}
+
+pub(crate) fn needs_cinemeta_artwork(details: &MediaDetails) -> bool {
+    matches!(details.type_.as_str(), "series" | "anime")
+        && canonical_imdb_anchor(details).is_some()
         && details.episodes.iter().flatten().any(|episode| {
-            episode.season > 1
-                && episode
-                    .thumbnail
-                    .as_deref()
-                    .is_some_and(is_metahub_episode_thumbnail)
+            episode.thumbnail.is_none()
+                || (details.is_anime
+                    && episode
+                        .thumbnail
+                        .as_deref()
+                        .is_some_and(is_metahub_episode_thumbnail))
         })
 }
 
-fn episode_artwork_identity(episode: &Episode) -> Option<(&str, &str)> {
-    let title = episode.title.as_deref()?.trim();
-    let day = episode.release_date.as_deref()?;
-    (!title.is_empty() && !day.is_empty()).then_some((title, day))
+fn artwork_title(title: Option<&str>) -> Option<String> {
+    let mut normalized = String::new();
+    for word in title?.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.extend(word.chars().flat_map(char::to_lowercase));
+    }
+    (!normalized.is_empty()).then_some(normalized)
 }
 
-fn merge_cinemeta_artwork(details: &mut MediaDetails, artwork: &MediaDetails) {
-    let Some(episodes) = details.episodes.as_mut() else {
-        return;
-    };
+struct ArtworkIdentity<'a> {
+    special: bool,
+    title: Option<String>,
+    day: Option<&'a str>,
+}
 
-    let mut source = HashMap::new();
-    for (index, episode) in episodes.iter().enumerate() {
-        if let Some(key) = episode_artwork_identity(episode) {
-            source
-                .entry(key)
-                .and_modify(|index| *index = None)
-                .or_insert(Some(index));
+impl<'a> ArtworkIdentity<'a> {
+    fn episode(episode: &'a Episode) -> Self {
+        Self {
+            special: episode.season == 0,
+            title: artwork_title(episode.title.as_deref()),
+            day: episode
+                .release_date
+                .as_deref()
+                .filter(|day| !day.is_empty()),
         }
     }
-    let mut target = HashMap::new();
-    for episode in artwork.episodes.iter().flatten() {
-        if let Some(key) = episode_artwork_identity(episode) {
-            target
-                .entry(key)
-                .and_modify(|thumbnail| *thumbnail = None)
-                .or_insert(episode.thumbnail.as_deref());
+
+    fn key(&self, pass: usize) -> Option<(bool, Option<&str>, Option<&str>)> {
+        let (title, day) = match pass {
+            0 => (Some(self.title.as_deref()?), Some(self.day?)),
+            1 => (None, Some(self.day?)),
+            _ => (
+                Some(
+                    self.title
+                        .as_deref()
+                        .filter(|title| title.chars().count() >= 8)?,
+                ),
+                None,
+            ),
+        };
+        Some((self.special, title, day))
+    }
+}
+
+/// Ambiguity is measured across the full lists, not just remaining holes.
+fn pair_episode_artwork<'k>(
+    source: &'k [ArtworkIdentity<'_>],
+    target: &'k [ArtworkIdentity<'_>],
+    passes: usize,
+) -> Vec<Option<usize>> {
+    let mut pairs = vec![None; source.len()];
+    let mut used = HashSet::new();
+    for pass in 0..passes {
+        let unique = |rows: &'k [ArtworkIdentity<'_>]| {
+            let mut keys = HashMap::new();
+            for (index, row) in rows.iter().enumerate() {
+                if let Some(key) = row.key(pass) {
+                    keys.entry(key)
+                        .and_modify(|index| *index = None)
+                        .or_insert(Some(index));
+                }
+            }
+            keys
+        };
+        let source_keys = unique(source);
+        let target_keys = unique(target);
+        for (key, index) in source_keys {
+            if let (Some(index), Some(Some(target))) = (index, target_keys.get(&key)) {
+                if pairs[index].is_none() && used.insert(*target) {
+                    pairs[index] = Some(*target);
+                }
+            }
         }
     }
-    // Cinemeta's TVDB coordinates differ from its TMDB artwork; never guess an offset.
-    let replacements: Vec<_> = source
+    pairs
+}
+
+fn merge_cinemeta_artwork(details: &mut MediaDetails, artwork: &MediaDetails) -> Vec<bool> {
+    let episodes = details.episodes.as_deref_mut().unwrap_or_default();
+    let targets = artwork.episodes.as_deref().unwrap_or_default();
+    let pairs = pair_episode_artwork(
+        &episodes
+            .iter()
+            .map(ArtworkIdentity::episode)
+            .collect::<Vec<_>>(),
+        &targets
+            .iter()
+            .map(ArtworkIdentity::episode)
+            .collect::<Vec<_>>(),
+        2,
+    );
+    for (episode, target) in episodes.iter_mut().zip(&pairs) {
+        let Some(target) = target.map(|index| &targets[index]) else {
+            continue;
+        };
+        if let Some(thumbnail) = &target.thumbnail {
+            if episode.thumbnail.is_none()
+                || (details.is_anime
+                    && episode
+                        .thumbnail
+                        .as_deref()
+                        .is_some_and(is_metahub_episode_thumbnail)
+                    && is_metahub_episode_thumbnail(thumbnail))
+            {
+                episode.thumbnail = Some(thumbnail.clone());
+            }
+        }
+        if details.is_anime && !target.id.trim().is_empty() && target.id != episode.id {
+            episode.alternate_video_id = Some(target.id.clone());
+        }
+    }
+    pairs.iter().map(Option::is_some).collect()
+}
+
+#[derive(Serialize, Deserialize)]
+struct TvmazeEpisodeArtwork {
+    special: bool,
+    airdate: Option<String>,
+    title: Option<String>,
+    image: String,
+}
+
+fn compact_tvmaze_episodes(body: Vec<u8>) -> Result<Vec<u8>, String> {
+    let rows: Vec<&RawValue> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    let rows: Vec<_> = rows
         .into_iter()
-        .filter_map(|(key, index)| {
-            let index = index?;
-            let thumbnail = (*target.get(&key)?)?;
-            let original = episodes[index].thumbnail.as_deref()?;
-            (is_metahub_episode_thumbnail(original)
-                && is_metahub_episode_thumbnail(thumbnail)
-                && original != thumbnail)
-                .then(|| (index, thumbnail.to_string()))
+        .filter_map(|raw| {
+            let row: Value = serde_json::from_str(raw.get()).ok()?;
+            let image = ["original", "medium"]
+                .into_iter()
+                .find_map(|size| row["image"][size].as_str().and_then(normalize_image_url))?;
+            Some(TvmazeEpisodeArtwork {
+                special: row["type"].as_str() != Some("regular") || row["number"].is_null(),
+                airdate: json_string_field(&row, "airdate").filter(|day| !day.is_empty()),
+                title: artwork_title(json_string_field(&row, "name").as_deref()),
+                image,
+            })
+        })
+        .take(2_500)
+        .scan(2, |size, row| {
+            // Leave headroom below the shared 256 KiB enrichment cache envelope.
+            *size += serde_json::to_vec(&row).ok()?.len() + 1;
+            (*size <= 200 * 1024).then_some(row)
         })
         .collect();
-    for (index, thumbnail) in replacements {
-        episodes[index].thumbnail = Some(thumbnail);
+    serde_json::to_vec(&rows).map_err(|e| e.to_string())
+}
+
+fn decode_tvmaze_episodes(bytes: &[u8]) -> Result<(Vec<TvmazeEpisodeArtwork>, bool), String> {
+    let rows: Vec<TvmazeEpisodeArtwork> =
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let empty = rows.is_empty();
+    Ok((rows, empty))
+}
+
+pub(crate) async fn enrich_missing_episode_artwork(
+    enrichment: &super::enrichment::EnrichmentClient,
+    details: &mut MediaDetails,
+    cinemeta_matched: &[bool],
+) {
+    use super::enrichment::Source;
+    if !matches!(details.type_.as_str(), "series" | "anime") {
+        return;
+    }
+    let Some(imdb) = canonical_imdb_anchor(details) else {
+        return;
+    };
+    let eligible: Vec<_> = details
+        .episodes
+        .iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, ep)| {
+            ep.thumbnail.is_none()
+                || (details.is_anime
+                    && ep.season != 1
+                    && !cinemeta_matched.get(index).copied().unwrap_or(false)
+                    && ep
+                        .thumbnail
+                        .as_deref()
+                        .is_some_and(is_metahub_episode_thumbnail))
+        })
+        .collect();
+    if !eligible.contains(&true) {
+        return;
+    }
+    let url = format!(
+        "{}/lookup/shows?imdb={imdb}",
+        enrichment.base_url(Source::Tvmaze)
+    );
+    let Ok(Some(show)) = enrichment
+        .load(
+            &format!("tvmaze-lookup:{imdb}"),
+            Source::Tvmaze,
+            enrichment.get(&url),
+            super::title_credits::decode_tvmaze_show,
+        )
+        .await
+    else {
+        return;
+    };
+    let Some(show_id) = show["id"].as_u64().filter(|&id| id > 0) else {
+        return;
+    };
+    let url = format!(
+        "{}/shows/{show_id}/episodes?specials=1",
+        enrichment.base_url(Source::Tvmaze)
+    );
+    let Ok(rows) = enrichment
+        .load_compacted(
+            &format!("tvmaze-episodes:v1:{show_id}"),
+            Source::Tvmaze,
+            enrichment.get(&url),
+            4 * 1024 * 1024,
+            compact_tvmaze_episodes,
+            decode_tvmaze_episodes,
+        )
+        .await
+    else {
+        return;
+    };
+    let episodes = details.episodes.as_deref_mut().unwrap_or_default();
+    let pairs = pair_episode_artwork(
+        &episodes
+            .iter()
+            .map(ArtworkIdentity::episode)
+            .collect::<Vec<_>>(),
+        &rows
+            .iter()
+            .map(|row| ArtworkIdentity {
+                special: row.special,
+                title: row.title.clone(),
+                day: row.airdate.as_deref(),
+            })
+            .collect::<Vec<_>>(),
+        if details.is_anime { 3 } else { 2 },
+    );
+    for ((ep, eligible), target) in episodes.iter_mut().zip(eligible).zip(pairs) {
+        if let Some(target) = target.filter(|_| eligible) {
+            // Disk cache is untrusted too; reapply the image gate on replay.
+            ep.thumbnail = normalize_image_url(&rows[target].image);
+        }
     }
 }
 

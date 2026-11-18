@@ -8,9 +8,10 @@ use std::borrow::Cow;
 // Re-exports keep the `providers::addons::X` surface unchanged.
 pub(crate) use stream_match::{
     language_mention_is_audio, normalize_separators, stream_conflicts_with_episode_targets,
-    stream_contains_batch_texts, stream_episode_match_texts, StreamEpisodeMatch,
-    StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary, StreamMatchText, StreamPackCoverage,
-    StreamReleaseKind, StreamResolutionTier, StreamTitleMatch,
+    stream_conflicts_with_work_years, stream_contains_batch_texts, stream_episode_match_texts,
+    stream_year_match, StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary,
+    StreamMatchText, StreamPackCoverage, StreamReleaseKind, StreamResolutionTier, StreamTitleMatch,
+    StreamYearMatch,
 };
 // Only test code calls this directly; production reads `StreamMatchText::flags`.
 #[cfg(test)]
@@ -222,6 +223,7 @@ impl AddonStream {
 pub(crate) struct SelectionPriority {
     pub(crate) episode_match: StreamEpisodeMatchKind,
     pub(crate) season_claim_verified: bool,
+    pub(crate) year_not_conflicting: bool,
     pub(crate) title_match: i8,
     pub(crate) viability: u8,
     pub(crate) language: u8,
@@ -232,6 +234,7 @@ impl SelectionPriority {
     pub(crate) fn covers(&self, best: &Self) -> bool {
         self.episode_match >= best.episode_match
             && self.season_claim_verified >= best.season_claim_verified
+            && self.year_not_conflicting >= best.year_not_conflicting
             && self.title_match >= best.title_match
             && self.viability >= best.viability
             && self.language >= best.language

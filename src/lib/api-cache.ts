@@ -191,10 +191,33 @@ function joinAbortable(
   });
 }
 
-/** Seeds a known result and revokes any older in-flight publisher for the key. */
-export function primeBestStreamRequest(cacheKey: string, value: BestResolvedStream): void {
-  bestStreamInFlight.delete(cacheKey);
-  setTimedCache(cacheKey, value);
+let nextPlayerLaunchId = 0;
+let pendingPlayerLaunch:
+  | {
+      id: number;
+      result: BestResolvedStream;
+      expires: ReturnType<typeof setTimeout>;
+    }
+  | undefined;
+
+function clearPendingPlayerLaunch() {
+  if (pendingPlayerLaunch) clearTimeout(pendingPlayerLaunch.expires);
+  pendingPlayerLaunch = undefined;
+}
+
+// The player may consume the freshly probed winner even if its source pool's reuse TTL is spent.
+export function stageResolvedPlayerLaunch(result: BestResolvedStream): number {
+  clearPendingPlayerLaunch();
+  const id = ++nextPlayerLaunchId;
+  pendingPlayerLaunch = { id, result, expires: setTimeout(clearPendingPlayerLaunch, 10_000) };
+  return id;
+}
+
+export function takeResolvedPlayerLaunch(id: number | undefined): BestResolvedStream | undefined {
+  if (!pendingPlayerLaunch || pendingPlayerLaunch.id !== id) return undefined;
+  const { result } = pendingPlayerLaunch;
+  clearPendingPlayerLaunch();
+  return result;
 }
 
 // Streaming writes always clear the best-stream cache — server re-ranks/cooldowns must not be re-served from TTL.
@@ -206,6 +229,7 @@ export function clearProviderDataCaches() {
   // Dropping in-flight ownership stops late responses from repopulating.
   bestStreamValues.clear();
   bestStreamInFlight.clear();
+  clearPendingPlayerLaunch();
 }
 
 export function buildStreamCacheKey(

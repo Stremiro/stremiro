@@ -26,6 +26,7 @@ export function useDetailsStreamSelector({
   baseRouteType,
   baseRouteId,
   locationState,
+  detailsEntryKey,
   spoilerProtection,
   titleProgress,
 }: {
@@ -35,6 +36,7 @@ export function useDetailsStreamSelector({
   baseRouteType: string;
   baseRouteId: string;
   locationState: unknown;
+  detailsEntryKey: string;
   spoilerProtection: boolean;
   titleProgress: TitleWatchProgress | undefined;
 }) {
@@ -162,6 +164,7 @@ export function useDetailsStreamSelector({
     navigateApp(currentPathWithSearch(), {
       replace: true,
       state: {
+        detailsEntryKey,
         ...(from !== undefined ? { from } : {}),
         season: handoff.season ?? navState?.season,
       },
@@ -171,7 +174,15 @@ export function useDetailsStreamSelector({
       const notice = getHistoryPlaybackFallbackNotice('select-episode');
       toast.error(notice.title, { description: notice.description });
     }
-  }, [item, isPlaceholderData, locationState, preferredStreamId, streamTarget, streamSelectorOpen]);
+  }, [
+    item,
+    isPlaceholderData,
+    locationState,
+    detailsEntryKey,
+    preferredStreamId,
+    streamTarget,
+    streamSelectorOpen,
+  ]);
 
   const handleSelectorClose = () => {
     setStreamSelectorOpen(false);

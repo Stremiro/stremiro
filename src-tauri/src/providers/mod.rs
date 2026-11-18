@@ -303,6 +303,9 @@ pub(crate) struct Episode {
     /// Backend-normalized source episode for stream resolution.
     #[serde(rename = "streamEpisode", skip_serializing_if = "Option::is_none")]
     pub stream_episode: Option<u32>,
+    /// Repair-only provider video identity; never changes public episode coordinates.
+    #[serde(skip)]
+    pub alternate_video_id: Option<String>,
 }
 
 pub(crate) mod addon_manifest;
@@ -401,7 +404,7 @@ pub(crate) fn read_cache_file(path: &std::path::Path, max_bytes: usize) -> Optio
 
 /// Writes one `.json` disk-cache file after evicting the oldest siblings down to
 /// `max_entries`. Callers hold their disk gate. A victim that cannot be deleted
-/// (e.g. held open by a scanner) is skipped, never blocking eviction or the write.
+/// is skipped; if no room can be made, the optional cache write is skipped too.
 pub(crate) fn write_cache_file(
     path: &std::path::Path,
     bytes: &[u8],
@@ -432,6 +435,9 @@ pub(crate) fn write_cache_file(
         if std::fs::remove_file(victim).is_ok() {
             excess -= 1;
         }
+    }
+    if excess > 0 {
+        return None;
     }
     std::fs::write(path, bytes).ok()
 }

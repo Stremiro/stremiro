@@ -51,8 +51,8 @@ export function SaveToCollectionPanel({
               if (!isLibraryBusy) toggleLibrary.mutate();
             }}
           >
-            <span className='grid size-7 shrink-0 place-items-center rounded-md bg-white/[0.06] text-zinc-300 ring-1 ring-inset ring-white/10'>
-              <Library size={15} strokeWidth={2.25} />
+            <span className='grid size-7 shrink-0 place-items-center text-zinc-400'>
+              <Library className='size-4' strokeWidth={1.75} />
             </span>
             <span className='min-w-0 flex-1'>
               <span className='block text-[13px] font-medium leading-4 text-zinc-200'>Library</span>

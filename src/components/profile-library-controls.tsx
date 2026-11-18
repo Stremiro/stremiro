@@ -198,7 +198,7 @@ export function LibraryToolbar({
               onSelect={() => onStatusFilterChange('all')}
             >
               All statuses
-              <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>{libraryCount}</span>
+              <span className='ml-auto text-[11px] tabular-nums text-zinc-500'>{libraryCount}</span>
             </FilterMenuItem>
             {WATCH_STATUSES.map((status) => (
               <FilterMenuItem
@@ -208,7 +208,7 @@ export function LibraryToolbar({
               >
                 <WatchStatusIcon status={status} className='size-3.5' strokeWidth={2.1} />
                 {WATCH_STATUS_LABELS[status]}
-                <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
+                <span className='ml-auto text-[11px] tabular-nums text-zinc-500'>
                   {statusesAvailable ? (statusCounts[status] ?? 0) : '—'}
                 </span>
               </FilterMenuItem>
@@ -218,7 +218,7 @@ export function LibraryToolbar({
               onSelect={() => onStatusFilterChange('none')}
             >
               No status
-              <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
+              <span className='ml-auto text-[11px] tabular-nums text-zinc-500'>
                 {statusesAvailable ? (statusCounts.none ?? 0) : '—'}
               </span>
             </FilterMenuItem>
@@ -569,7 +569,7 @@ export function CollectionBulkActionBar({
         >
           <X className='h-3.5 w-3.5' />
           Done
-          <kbd aria-hidden='true' className='ml-0.5 hidden text-[10px] text-zinc-500 sm:inline'>
+          <kbd aria-hidden='true' className='ml-0.5 hidden text-[11px] text-zinc-500 sm:inline'>
             Esc
           </kbd>
         </Button>

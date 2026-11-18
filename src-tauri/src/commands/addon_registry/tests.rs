@@ -3,7 +3,7 @@ use super::{
     catalog_fetch_page_from_source, catalog_page_next_skip, catalog_search_extras,
     collect_catalog_outcomes, collect_with_deadline, extra_skip_value,
     fetch_catalog_pages_for_target_groups, fetch_subtitles_for_addon, merge_catalog_pages,
-    merge_search_catalog_pages, run_catalog_work_pool, searchable_catalog_ids,
+    merge_search_catalog_pages, run_catalog_work_pool, searchable_catalogs,
     select_search_catalog_work, AddonResourceError, AddonResourceErrorKind, CatalogFetchPage,
     CatalogGroupSelection, CatalogTarget, CatalogWorkItem, SearchCatalogSource, SearchSourceCursor,
     SourcedAddonSubtitle, CATALOG_STRAGGLER_GRACE,
@@ -14,8 +14,8 @@ use crate::providers::addon_resource::{
     AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
 };
 use crate::test_helpers::{
-    cinemeta_addon, classified_cinemeta_addon, stalled_listener, test_addon, test_media_item,
-    TestHttpServer,
+    addon_at, cinemeta_addon, classified_cinemeta_addon, stalled_listener, test_addon,
+    test_media_item, TestHttpServer,
 };
 use futures_util::StreamExt;
 use std::collections::HashSet;
@@ -28,10 +28,83 @@ fn catalog_page(items: Vec<crate::providers::MediaItem>, source_item_count: usiz
     }
 }
 
+#[test]
+fn pinned_defaults_route_before_manifest_fetch_and_cinemeta_searches_each_type_once() {
+    let addons = resolve_addon_configs(Some(vec![
+        cinemeta_addon(),
+        addon_at("https://catalog.test", "custom", "Custom"),
+    ]));
+    let [cinemeta, opensubtitles, custom] = addons.as_slice() else {
+        panic!("expected both defaults and the custom addon");
+    };
+    assert!(addon_allows_resource(cinemeta, "meta", "series", "tt123"));
+    assert!(!addon_allows_resource(
+        cinemeta,
+        "stream",
+        "series",
+        "tt123:1:1"
+    ));
+    assert!(addon_allows_resource(
+        opensubtitles,
+        "subtitles",
+        "series",
+        "tt123:1:1"
+    ));
+    assert!(!addon_allows_resource(
+        opensubtitles,
+        "subtitles",
+        "series",
+        "kitsu:1:1"
+    ));
+
+    let (work, sources) = select_search_catalog_work(
+        &addons,
+        "dune",
+        &["movie"],
+        &[Some("Animation".into()), Some("Comedy".into())],
+        None,
+        false,
+    );
+    let cinemeta_work: Vec<_> = work
+        .iter()
+        .filter(|item| item.addon_url == cinemeta.url)
+        .collect();
+    assert_eq!(cinemeta_work.len(), 1);
+    assert_eq!(cinemeta_work[0].extras.len(), 1);
+    assert_eq!(cinemeta_work[0].extras[0].name, "search");
+    assert!(sources[0][0].supports_skip);
+    assert_eq!(
+        work.iter()
+            .filter(|item| item.addon_url == custom.url)
+            .count(),
+        2
+    );
+}
+
+fn item_page(id: &str, source_item_count: usize) -> CatalogPage {
+    catalog_page(vec![test_media_item(id, "movie")], source_item_count)
+}
+
 fn extra(name: &str, value: &str) -> CatalogExtra {
     CatalogExtra {
         name: name.into(),
         value: value.into(),
+    }
+}
+
+fn source_cursor(key: &str, skip: u32) -> SearchSourceCursor {
+    SearchSourceCursor {
+        key: key.into(),
+        skip,
+        retry: false,
+        page_hash: None,
+    }
+}
+
+fn search_source(key: &str, skip: u32) -> SearchCatalogSource {
+    SearchCatalogSource {
+        cursor: source_cursor(key, skip),
+        supports_skip: true,
     }
 }
 
@@ -54,14 +127,8 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
         None,
     )]);
     let addons = [
-        AddonConfig {
-            url: stalled_url,
-            ..test_addon("primary", "Primary")
-        },
-        AddonConfig {
-            url: server.url.clone(),
-            ..test_addon("fallback", "Fallback")
-        },
+        addon_at(&stalled_url, "primary", "Primary"),
+        addon_at(&server.url, "fallback", "Fallback"),
     ];
     let client = AddonResourceClient::new();
     for attempt in 0..2 {
@@ -95,6 +162,44 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
 }
 
 #[tokio::test]
+async fn metadata_imdb_anchor_rejects_wrong_titles_but_allows_provider_id_mapping() {
+    for (requested, response, accepted) in [
+        (
+            "tt0388629",
+            r#"{"meta":{"id":"tt9999999","name":"Wrong","type":"series"}}"#,
+            false,
+        ),
+        (
+            "tt0388629",
+            r#"{"meta":{"id":"kitsu:1","imdb_id":"tt9999999","name":"Wrong","type":"series"}}"#,
+            false,
+        ),
+        (
+            "tt0388629",
+            r#"{"meta":{"id":"kitsu:1","imdb_id":"tt0388629","name":"One Piece","type":"series"}}"#,
+            true,
+        ),
+        (
+            "kitsu:1",
+            r#"{"meta":{"id":"tt0388629","name":"One Piece","type":"series"}}"#,
+            true,
+        ),
+    ] {
+        let server = TestHttpServer::new(vec![(200, response, None)]);
+        let (_, result) = super::fetch_ranked_meta(
+            &AddonResourceClient::new(),
+            &server.url,
+            "series",
+            requested,
+            0,
+        )
+        .await;
+        assert_eq!(result.is_ok(), accepted, "{requested}: {response}");
+        assert_eq!(server.finish().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn metadata_source_selection_rejects_cross_kind_payloads_and_keeps_anime_aliases() {
     let wrong = TestHttpServer::new(vec![(
         200,
@@ -107,14 +212,8 @@ async fn metadata_source_selection_rejects_cross_kind_payloads_and_keeps_anime_a
         None,
     )]);
     let addons = [
-        AddonConfig {
-            url: wrong.url.clone(),
-            ..test_addon("primary", "Primary")
-        },
-        AddonConfig {
-            url: fallback.url.clone(),
-            ..test_addon("fallback", "Fallback")
-        },
+        addon_at(&wrong.url, "primary", "Primary"),
+        addon_at(&fallback.url, "fallback", "Fallback"),
     ];
     let client = AddonResourceClient::new();
     let details = super::fetch_meta_details_from_addons(&client, &addons, "series", "tt1", None)
@@ -127,6 +226,51 @@ async fn metadata_source_selection_rejects_cross_kind_payloads_and_keeps_anime_a
     assert_eq!(details.id, "kitsu:1");
     assert_eq!(wrong.finish(), ["/meta/series/tt1.json"]);
     assert_eq!(fallback.finish(), ["/meta/series/tt1.json"]);
+}
+
+#[tokio::test]
+async fn anime_metadata_uses_declared_type_and_preserves_series_fallbacks() {
+    for (types, expected_type) in [
+        (Some(vec!["anime"]), "anime"),
+        (Some(vec!["series"]), "series"),
+        (Some(vec!["anime", "series"]), "anime"),
+        (None, "series"),
+    ] {
+        let server = TestHttpServer::new(vec![(
+            200,
+            r#"{"meta":{"id":"kitsu:1","name":"Anime","type":"anime"}}"#,
+            None,
+        )]);
+        let addon = AddonConfig {
+            capabilities: types.map(|types| {
+                parse_addon_manifest(
+                    serde_json::json!({
+                        "id": "anime", "name": "Anime",
+                        "resources": [{"name": "meta", "types": types, "idPrefixes": ["kitsu:"]}],
+                        "types": types,
+                    })
+                    .to_string()
+                    .as_bytes(),
+                )
+                .unwrap()
+            }),
+            ..addon_at(&server.url, "anime", "Anime")
+        };
+        let details = super::fetch_meta_details_from_addons(
+            &AddonResourceClient::new(),
+            &[addon],
+            "anime",
+            "kitsu:1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(details.title, "Anime");
+        assert_eq!(
+            server.finish(),
+            [format!("/meta/{expected_type}/kitsu%3A1.json")]
+        );
+    }
 }
 
 #[tokio::test]
@@ -201,7 +345,7 @@ async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
 
 #[tokio::test(start_paused = true)]
 async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
-    let page = || catalog_page(vec![test_media_item("tt1", "movie")], 1);
+    let page = || item_page("tt1", 1);
     let outcomes = futures_util::stream::iter([
         (0, 0, Ok(CatalogPage::default())),
         (2, 0, Err("offline".to_string())),
@@ -244,24 +388,8 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
             assert!(elapsed < Duration::from_secs(5));
             let page = merge_search_catalog_pages(
                 vec![vec![
-                    SearchCatalogSource {
-                        cursor: SearchSourceCursor {
-                            key: "primary".into(),
-                            skip: 50,
-                            retry: false,
-                            page_hash: None,
-                        },
-                        supports_skip: true,
-                    },
-                    SearchCatalogSource {
-                        cursor: SearchSourceCursor {
-                            key: "straggler".into(),
-                            skip: 50,
-                            retry: false,
-                            page_hash: None,
-                        },
-                        supports_skip: true,
-                    },
+                    search_source("primary", 50),
+                    search_source("straggler", 50),
                 ]],
                 vec![collected
                     .into_iter()
@@ -299,6 +427,8 @@ async fn catalog_group_merge_marks_dropped_straggler_partial() {
         media_type: "movie".to_string(),
         catalog_id: catalog_id.to_string(),
         catalog_genre: None,
+        extras: Vec::new(),
+        supports_skip: true,
     };
     let groups = |targets: Vec<CatalogTarget>| -> Vec<CatalogGroupSelection> {
         vec![Ok((targets, Vec::new()))]
@@ -356,17 +486,13 @@ async fn catalog_group_merge_marks_dropped_straggler_partial() {
 #[test]
 fn classified_search_uses_only_declared_search_catalogs() {
     let addon = classified_cinemeta_addon();
-    assert_eq!(searchable_catalog_ids(&addon, "movie"), vec![("top", true)]);
-    assert!(searchable_catalog_ids(&addon, "series").is_empty());
+    assert!(searchable_catalogs(&addon, "movie").eq([("movie", "top", true)]));
+    assert!(searchable_catalogs(&addon, "series").next().is_none());
 
     let search = [extra("search", "dune")];
+    let with_genre = [extra("search", "dune"), extra("genre", "Animation")];
     assert!(addon_allows_catalog(&addon, "movie", "top", &search));
-    assert!(addon_allows_catalog(
-        &addon,
-        "movie",
-        "top",
-        &[extra("search", "dune"), extra("genre", "Animation"),]
-    ));
+    assert!(addon_allows_catalog(&addon, "movie", "top", &with_genre));
     assert!(!addon_allows_catalog(
         &addon,
         "movie",
@@ -380,10 +506,7 @@ fn unclassified_addon_is_not_skipped() {
     let addon = cinemeta_addon();
     let extras = [extra("search", "dune")];
     assert!(addon_allows_catalog(&addon, "movie", "top", &extras));
-    assert_eq!(
-        searchable_catalog_ids(&addon, "movie"),
-        vec![("top", false)]
-    );
+    assert!(searchable_catalogs(&addon, "movie").eq([("movie", "top", false)]));
 }
 
 #[test]
@@ -401,6 +524,179 @@ fn query_extras_include_skip_only_on_later_pages() {
     assert_eq!(next[0].value, "dune");
     assert_eq!(next[1].name, "skip");
     assert_eq!(extra_skip_value(&next), 50);
+}
+
+#[test]
+fn search_supplies_required_zero_offset_without_changing_optional_extras() {
+    for required in [false, true] {
+        let addon = AddonConfig {
+            capabilities: Some(
+                parse_addon_manifest(
+                    serde_json::json!({
+                        "id": "search", "name": "Search", "types": ["movie"],
+                        "catalogs": [{"type": "movie", "id": "search", "extra": [
+                            {"name": "search", "isRequired": true},
+                            {"name": "skip", "isRequired": required},
+                        ]}],
+                    })
+                    .to_string()
+                    .as_bytes(),
+                )
+                .unwrap(),
+            ),
+            ..test_addon("search", "Search")
+        };
+        let (work, _) =
+            select_search_catalog_work(&[addon], "dune", &["movie"], &[None], None, false);
+        assert_eq!(work.len(), 1, "required skip={required}");
+        assert_eq!(
+            work[0]
+                .extras
+                .iter()
+                .any(|extra| extra.name == "skip" && extra.value == "0"),
+            required,
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_uses_manifest_spelling_and_retries_a_single_page_source_once() {
+    let body = r#"{"metas":[{"id":"tt1","name":"Dune","type":"movie"}]}"#;
+    let server = TestHttpServer::new(vec![(200, body, None)]);
+    let addon = AddonConfig {
+        capabilities: Some(
+            parse_addon_manifest(
+                br#"{
+            "name":"Catalog", "catalogs":[{"type":"Movie","id":"Find",
+            "extra":[{"name":"search"},{"name":"genre","options":["Science Fiction"]}]}]
+        }"#,
+            )
+            .unwrap(),
+        ),
+        ..addon_at(&server.url, "catalog", "Catalog")
+    };
+    let snapshot = [addon];
+    let select = |cursors| {
+        select_search_catalog_work(
+            &snapshot,
+            "dune",
+            &["movie"],
+            &[Some("science fiction".into())],
+            cursors,
+            false,
+        )
+    };
+    let (_, sources) = select(None);
+    let first = merge_search_catalog_pages(sources, vec![vec![]], false).unwrap();
+    assert!(first.cursors[0].retry);
+
+    let (_, sources) = select(Some(&first.cursors));
+    let failed = merge_search_catalog_pages(sources, vec![vec![]], false).unwrap();
+    assert!(failed.partial && failed.cursors.is_empty());
+
+    let (work, sources) = select(Some(&first.cursors));
+    let outcomes = run_catalog_work_pool(&AddonResourceClient::new(), work, 1, None).await;
+    let page = merge_search_catalog_pages(sources, outcomes, false).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert!(page.cursors.is_empty());
+    assert_eq!(
+        server.finish(),
+        ["/catalog/Movie/Find/search=dune&genre=Science%20Fiction.json"]
+    );
+}
+
+#[test]
+fn search_deduplicates_requests_when_catalog_does_not_accept_genres() {
+    let addon = mixed_catalog_addon();
+    let (work, _) = select_search_catalog_work(
+        &[addon],
+        "dune",
+        &[],
+        &[Some("Comedy".into()), Some("Drama".into())],
+        None,
+        true,
+    );
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].extras, [extra("search", "dune")]);
+}
+
+#[tokio::test]
+async fn browse_supplies_required_zero_offset_for_typed_year_and_custom_catalogs() {
+    for required in [None, Some(false), Some(true)] {
+        for (media_type, catalog_id, genre) in [
+            ("movie", "top", None),
+            ("movie", "year", Some("2026")),
+            ("Podcast", "custom", Some("Tech")),
+        ] {
+            let server = TestHttpServer::new(vec![(
+                200,
+                r#"{"metas":[{"id":"one","name":"One","type":"movie"}]}"#,
+                None,
+            )]);
+            let mut declared_extras = Vec::new();
+            if let Some(required) = required {
+                declared_extras.push(serde_json::json!({"name":"skip", "isRequired":required}));
+            }
+            if let Some(genre) = genre {
+                declared_extras.push(
+                    serde_json::json!({"name":"genre", "isRequired":true, "options":[genre]}),
+                );
+            }
+            let addon = AddonConfig {
+                url: server.url.clone(),
+                capabilities: Some(
+                    parse_addon_manifest(
+                        serde_json::json!({
+                            "name":"Catalog", "catalogs":[{
+                                "type":media_type, "id":catalog_id, "extra":declared_extras
+                            }]
+                        })
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .unwrap(),
+                ),
+                ..test_addon("catalog", "Catalog")
+            };
+            let extras = crate::commands::search_commands::catalog_browse_extras(genre, 0);
+            let targets = if media_type == "Podcast" {
+                super::select_addon_catalog_targets(&[addon], &extras)
+            } else {
+                super::select_catalog_targets(
+                    &[addon],
+                    media_type,
+                    &catalog_id.to_uppercase(),
+                    &extras,
+                )
+            }
+            .unwrap();
+            let page = super::fetch_catalog_pages_for_target_groups(
+                &AddonResourceClient::new(),
+                vec![Ok((targets, extras))],
+                None,
+            )
+            .await
+            .remove(0)
+            .unwrap();
+            assert_eq!(page.items.len(), 1);
+            let mut sent_extras = genre
+                .map(|genre| format!("genre={genre}"))
+                .into_iter()
+                .collect::<Vec<_>>();
+            if required == Some(true) {
+                sent_extras.push("skip=0".into());
+            }
+            let suffix = if sent_extras.is_empty() {
+                String::new()
+            } else {
+                format!("/{}", sent_extras.join("&"))
+            };
+            assert_eq!(
+                server.finish(),
+                [format!("/catalog/{media_type}/{catalog_id}{suffix}.json")]
+            );
+        }
+    }
 }
 
 #[test]
@@ -459,8 +755,8 @@ fn search_merge_preserves_candidates_and_independent_offsets() {
             .collect::<Vec<_>>(),
         [
             ("tt1", "movie", "Primary title"),
-            (" TT1 ", "MOVIE", "Duplicate in primary"),
             ("TT1", "movie", "Secondary title"),
+            (" TT1 ", "MOVIE", "Duplicate in primary"),
             ("tt1", "series", "Primary title"),
             ("tt2", "movie", "Primary title"),
         ]
@@ -492,10 +788,11 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
         )
         .unwrap(),
     );
-    assert_eq!(
-        searchable_catalog_ids(&addon, "movie"),
-        [("single", false), ("paged", true), ("larger", true)]
-    );
+    assert!(searchable_catalogs(&addon, "movie").eq([
+        ("movie", "single", false),
+        ("movie", "paged", true),
+        ("movie", "larger", true)
+    ]));
     let (work, sources) =
         select_search_catalog_work(&[addon.clone()], "dune", &["movie"], &[None], None, false);
     assert_eq!(work.len(), 3);
@@ -503,10 +800,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
     let page = merge_search_catalog_pages(
         sources,
         vec![vec![
-            (
-                0,
-                Ok(catalog_page(vec![test_media_item("single", "movie")], 1)),
-            ),
+            (0, Ok(item_page("single", 1))),
             (1, Ok(catalog_page(vec![], 2))),
             (2, Ok(catalog_page(vec![], 4))),
         ]],
@@ -549,10 +843,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
         sources,
         vec![vec![
             (0, Ok(CatalogPage::default())),
-            (
-                1,
-                Ok(catalog_page(vec![test_media_item("next", "movie")], 3)),
-            ),
+            (1, Ok(item_page("next", 3))),
         ]],
         false,
     )
@@ -589,18 +880,8 @@ fn overlapping_search_sources_keep_their_later_unique_titles() {
             vec![cursors
                 .unwrap_or_else(|| {
                     vec![
-                        SearchSourceCursor {
-                            key: "0123456789abcdef".into(),
-                            skip: 0,
-                            retry: false,
-                            page_hash: None,
-                        },
-                        SearchSourceCursor {
-                            key: "1123456789abcdef".into(),
-                            skip: 0,
-                            retry: false,
-                            page_hash: None,
-                        },
+                        source_cursor("0123456789abcdef", 0),
+                        source_cursor("1123456789abcdef", 0),
                     ]
                 })
                 .into_iter()
@@ -610,7 +891,7 @@ fn overlapping_search_sources_keep_their_later_unique_titles() {
                 })
                 .collect()]
         };
-        let shared = || catalog_page(vec![test_media_item("shared", "movie")], 1);
+        let shared = || item_page("shared", 1);
         let merged = merge_search_catalog_pages(
             sources(None),
             vec![vec![(0, Ok(shared())), (1, Ok(shared()))]],
@@ -623,7 +904,7 @@ fn overlapping_search_sources_keep_their_later_unique_titles() {
             None,
             None,
             Some(merged.cursors),
-            merged.claims,
+            Default::default(),
         );
         assert_eq!(first.items.len(), 1);
         let continuation = serde_json::to_value(&first.continuation).unwrap();
@@ -639,7 +920,7 @@ fn overlapping_search_sources_keep_their_later_unique_titles() {
                     Ok(if cursor.key == "0123456789abcdef" {
                         shared()
                     } else {
-                        catalog_page(vec![test_media_item("later-unique", "movie")], 1)
+                        item_page("later-unique", 1)
                     }),
                 )
             })
@@ -652,7 +933,7 @@ fn overlapping_search_sources_keep_their_later_unique_titles() {
             None,
             None,
             Some(merged.cursors),
-            merged.claims,
+            Default::default(),
         );
         assert_eq!(
             next.items
@@ -685,27 +966,14 @@ fn all_search_sources_survive_overlap_but_stop_replayed_pages() {
         let sources = (0..6)
             .map(|group| {
                 (0..8)
-                    .map(|order| SearchCatalogSource {
-                        cursor: SearchSourceCursor {
-                            key: format!("{:016x}", group * 8 + order),
-                            skip: round,
-                            retry: false,
-                            page_hash: None,
-                        },
-                        supports_skip: true,
-                    })
+                    .map(|order| search_source(&format!("{:016x}", group * 8 + order), round))
                     .collect()
             })
             .collect();
         let outcomes = (0..6)
             .map(|_| {
                 (0..8)
-                    .map(|order| {
-                        (
-                            order,
-                            Ok(catalog_page(vec![test_media_item("shared", "movie")], 1)),
-                        )
-                    })
+                    .map(|order| (order, Ok(item_page("shared", 1))))
                     .collect()
             })
             .collect();
@@ -716,7 +984,7 @@ fn all_search_sources_survive_overlap_but_stop_replayed_pages() {
             None,
             None,
             Some(merged.cursors),
-            merged.claims,
+            Default::default(),
         );
         let wire = serde_json::to_value(&page).unwrap();
         assert_eq!(page.items.len(), if round == 0 { 1 } else { 0 });
@@ -744,12 +1012,7 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
             .collect()]
     };
     let page = merge_search_catalog_pages(
-        sources(vec![SearchSourceCursor {
-            key: "0123456789abcdef".into(),
-            skip: 50,
-            retry: false,
-            page_hash: None,
-        }]),
+        sources(vec![source_cursor("0123456789abcdef", 50)]),
         vec![vec![(0, Err("offline".into()))]],
         false,
     )
@@ -784,12 +1047,7 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
         .is_empty());
     assert!(merge_search_catalog_pages(vec![], vec![], true).is_err());
     let page = merge_search_catalog_pages(
-        sources(vec![SearchSourceCursor {
-            key: "0123456789abcdef".into(),
-            skip: u32::MAX,
-            retry: false,
-            page_hash: None,
-        }]),
+        sources(vec![source_cursor("0123456789abcdef", u32::MAX)]),
         vec![vec![(0, Ok(catalog_page(vec![], 3)))]],
         false,
     )
@@ -802,33 +1060,25 @@ fn catalog_page_next_skip_continues_on_any_non_empty_page() {
     // Live Cinemeta series `top` page 1 is full with `hasMore: false`
     // while `skip=100` still returns titles: only an empty page ends
     // pagination, never the `hasMore` hint.
-    assert_eq!(catalog_page_next_skip(0, 50), Some(50));
-    assert_eq!(catalog_page_next_skip(50, 50), Some(100));
-    assert_eq!(catalog_page_next_skip(0, 24), Some(24));
-    assert_eq!(catalog_page_next_skip(0, 49), Some(49));
-    assert_eq!(catalog_page_next_skip(0, 0), None);
-    assert_eq!(catalog_page_next_skip(100, 0), None);
+    for (skip, count, expected) in [
+        (0, 50, Some(50)),
+        (50, 50, Some(100)),
+        (0, 24, Some(24)),
+        (0, 49, Some(49)),
+        (0, 0, None),
+        (100, 0, None),
+    ] {
+        assert_eq!(catalog_page_next_skip(skip, count), expected);
+    }
 }
 
 #[test]
 fn catalog_cursor_counts_source_entries_before_cards_are_dropped() {
-    let page = catalog_fetch_page_from_source(
-        CatalogPage {
-            source_item_count: 3,
-            items: vec![test_media_item("tt1", "movie")],
-        },
-        50,
-    );
+    let page = catalog_fetch_page_from_source(item_page("tt1", 3), 50);
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.next_skip, Some(53));
 
-    let rejected_page = catalog_fetch_page_from_source(
-        CatalogPage {
-            source_item_count: 3,
-            items: Vec::new(),
-        },
-        50,
-    );
+    let rejected_page = catalog_fetch_page_from_source(catalog_page(vec![], 3), 50);
     assert_eq!(rejected_page.next_skip, Some(53));
     assert_eq!(
         catalog_fetch_page_from_source(CatalogPage::default(), 50).next_skip,
@@ -838,12 +1088,13 @@ fn catalog_cursor_counts_source_entries_before_cards_are_dropped() {
 
 #[test]
 fn extra_skip_value_reads_the_declared_skip_extra() {
-    assert_eq!(extra_skip_value(&[]), 0);
-    assert_eq!(extra_skip_value(&[extra("genre", "Animation")]), 0);
-    assert_eq!(
-        extra_skip_value(&[extra("genre", "Animation"), extra("skip", "50"),]),
-        50
-    );
+    for (extras, expected) in [
+        (vec![], 0),
+        (vec![extra("genre", "Animation")], 0),
+        (vec![extra("genre", "Animation"), extra("skip", "50")], 50),
+    ] {
+        assert_eq!(extra_skip_value(&extras), expected);
+    }
 }
 
 #[test]
@@ -886,15 +1137,7 @@ fn catalog_merge_preserves_candidates_and_the_earliest_next_skip() {
 fn empty_search_pages_preserve_constituent_failures_for_retry() {
     let sources = || {
         vec![(0..2)
-            .map(|index| SearchCatalogSource {
-                cursor: SearchSourceCursor {
-                    key: format!("{index:016x}"),
-                    skip: 0,
-                    retry: false,
-                    page_hash: None,
-                },
-                supports_skip: true,
-            })
+            .map(|index| search_source(&format!("{index:016x}"), 0))
             .collect()]
     };
     for failure_first in [false, true] {
@@ -932,17 +1175,16 @@ fn empty_search_pages_preserve_constituent_failures_for_retry() {
     let page = merge_search_catalog_pages(
         sources,
         vec![vec![
-            (
-                0,
-                Ok(catalog_page(vec![test_media_item("available", "movie")], 1)),
-            ),
+            (0, Ok(item_page("available", 1))),
             (1, Err("single-page source offline".into())),
         ]],
         true,
     )
     .unwrap();
-    assert!(page.partial);
-    assert_eq!(page.cursors.len(), 1);
+    assert!(!page.partial);
+    assert_eq!(page.cursors.len(), 2);
+    assert_eq!(page.cursors[1].skip, 0);
+    assert!(page.cursors[1].retry);
 }
 
 #[test]
@@ -1076,7 +1318,7 @@ fn catalog_targets_stamp_the_sent_genre_only_when_the_options_accept_it() {
     let stamped = super::select_addon_catalog_targets(&addons, &[genre("tech")]).unwrap();
     assert_eq!(stamped[0].catalog_id, "podcast");
     assert_eq!(stamped[0].media_type, "Podcast");
-    assert_eq!(stamped[0].catalog_genre.as_deref(), Some("tech"));
+    assert_eq!(stamped[0].catalog_genre.as_deref(), Some("Tech"));
 
     // Typed path: a closed options list rejecting the sent genre stamps nothing.
     let cinemeta = [classified_cinemeta_addon()];
@@ -1087,10 +1329,17 @@ fn catalog_targets_stamp_the_sent_genre_only_when_the_options_accept_it() {
     let free_form =
         super::select_catalog_targets(&cinemeta, "movie", "imdbRating", &[genre("Tech")]).unwrap();
     assert_eq!(free_form[0].catalog_genre.as_deref(), Some("Tech"));
-    // ...and an accepted option stamps the sent casing verbatim.
+    // An accepted option uses the manifest's spelling.
     let matched =
         super::select_catalog_targets(&cinemeta, "movie", "top", &[genre("animation")]).unwrap();
-    assert_eq!(matched[0].catalog_genre.as_deref(), Some("animation"));
+    assert_eq!(matched[0].catalog_genre.as_deref(), Some("Animation"));
+}
+
+fn sub_addon(url: &str) -> AddonConfig {
+    AddonConfig {
+        url: url.into(),
+        ..subtitle_addon()
+    }
 }
 
 fn subtitle_addon() -> AddonConfig {
@@ -1140,14 +1389,10 @@ async fn empty_subtitle_sources_do_not_cancel_the_first_usable_answer() {
         );
     });
     let addons = [
-        AddonConfig {
-            url: empty.url.clone(),
-            ..subtitle_addon()
-        },
+        sub_addon(&empty.url),
         AddonConfig {
             id: "slow".into(),
-            url,
-            ..subtitle_addon()
+            ..sub_addon(&url)
         },
     ];
     let result = super::fetch_subtitles_from_addons(
@@ -1170,16 +1415,7 @@ async fn empty_subtitle_sources_do_not_cancel_the_first_usable_answer() {
         None,
     )]);
     let (_stalled, stalled_url) = stalled_listener();
-    let addons = [
-        AddonConfig {
-            url: ready.url.clone(),
-            ..subtitle_addon()
-        },
-        AddonConfig {
-            url: stalled_url,
-            ..subtitle_addon()
-        },
-    ];
+    let addons = [sub_addon(&ready.url), sub_addon(&stalled_url)];
     let result = tokio::time::timeout(
         Duration::from_secs(2),
         super::fetch_subtitles_from_addons(
@@ -1236,10 +1472,18 @@ fn allows_subtitles(addon: &AddonConfig, type_: &str, id: &str) -> bool {
 #[test]
 fn subtitle_routing_follows_declared_resource_type_and_prefix() {
     let addon = subtitle_addon();
-    assert!(allows_subtitles(&addon, "movie", "tt1234567"));
-    assert!(allows_subtitles(&addon, "series", "tt1234567:1:2"));
-    assert!(!allows_subtitles(&addon, "movie", "kitsu:42"));
-    assert!(!allows_subtitles(&addon, "anime", "tt1234567:1:2"));
+    for (type_, id, expected) in [
+        ("movie", "tt1234567", true),
+        ("series", "tt1234567:1:2", true),
+        ("movie", "kitsu:42", false),
+        ("anime", "tt1234567:1:2", false),
+    ] {
+        assert_eq!(
+            allows_subtitles(&addon, type_, id),
+            expected,
+            "{type_} {id}"
+        );
+    }
 
     let catalog_only = classified_cinemeta_addon();
     assert!(!allows_subtitles(&catalog_only, "movie", "tt1234567"));
@@ -1249,6 +1493,39 @@ fn subtitle_routing_follows_declared_resource_type_and_prefix() {
         ..addon
     };
     assert!(allows_subtitles(&unclassified, "movie", "tt1234567"));
+}
+
+#[tokio::test]
+async fn anime_subtitles_use_each_addons_declared_type_and_prefix() {
+    let body = r#"{"subtitles":[{"id":"sub","url":"https://subs.test/sub.srt","lang":"eng"}]}"#;
+    let anime = TestHttpServer::new(vec![(200, body, None)]);
+    let series = TestHttpServer::new(vec![(200, body, None)]);
+    let addon = |url: &str, id: &str, manifest| AddonConfig {
+        capabilities: Some(parse_addon_manifest(manifest).unwrap()),
+        ..addon_at(url, id, id)
+    };
+    let addons = [
+        addon(&anime.url, "anime", br#"{"name":"Anime","resources":[{"name":"subtitles","types":["Anime"],"idPrefixes":["kitsu:"]}]}"#),
+        addon(&series.url, "series", br#"{"name":"Series","resources":[{"name":"subtitles","types":["series"],"idPrefixes":["tt"]}]}"#),
+    ];
+    let result = super::fetch_subtitles_from_addons(
+        &AddonResourceClient::new(),
+        &addons,
+        "anime",
+        &["tt1:2:3".into(), "kitsu:42:3".into()],
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result
+            .iter()
+            .map(|item| item.source_id.as_str())
+            .collect::<Vec<_>>(),
+        ["anime", "series"]
+    );
+    assert_eq!(anime.finish(), ["/subtitles/Anime/kitsu%3A42%3A3.json"]);
+    assert_eq!(series.finish(), ["/subtitles/series/tt1%3A2%3A3.json"]);
 }
 
 #[tokio::test]
@@ -1262,9 +1539,8 @@ async fn subtitle_queries_fall_back_in_order_and_cache_each_requested_id() {
         ),
     ]);
     let addon = AddonConfig {
-        url: server.url.clone(),
         capabilities: None,
-        ..subtitle_addon()
+        ..sub_addon(&server.url)
     };
     let client = AddonResourceClient::new();
     let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
@@ -1317,9 +1593,8 @@ async fn subtitle_queries_stop_at_first_nonempty_candidate_and_preserve_partial_
                 .collect(),
         );
         let addon = AddonConfig {
-            url: server.url.clone(),
             capabilities: None,
-            ..subtitle_addon()
+            ..sub_addon(&server.url)
         };
         let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
         let result =
@@ -1340,7 +1615,6 @@ async fn subtitle_queries_apply_resource_type_and_prefix_gates_to_each_candidate
         None,
     )]);
     let addon = AddonConfig {
-        url: server.url.clone(),
         capabilities: Some(
             parse_addon_manifest(
                 br#"{
@@ -1352,7 +1626,7 @@ async fn subtitle_queries_apply_resource_type_and_prefix_gates_to_each_candidate
             )
             .unwrap(),
         ),
-        ..subtitle_addon()
+        ..sub_addon(&server.url)
     };
     let client = AddonResourceClient::new();
     let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
@@ -1390,8 +1664,8 @@ fn subtitle_merge_dedupes_by_source_identity() {
         label: None,
     };
 
-    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, item.clone());
-    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, item);
+    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, &item);
+    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, &item);
     assert_eq!(subtitles.len(), 1);
     assert_eq!(subtitles[0].source_id, addon.id);
     assert_eq!(subtitles[0].source_name, addon.name);
@@ -1410,7 +1684,12 @@ fn sourced_subtitle(id: &str, label: Option<&str>) -> SourcedAddonSubtitle {
         label: label.map(str::to_string),
     };
     let mut subtitles = Vec::new();
-    add_subtitle_if_unique(&mut subtitles, &mut HashSet::new(), &subtitle_addon(), item);
+    add_subtitle_if_unique(
+        &mut subtitles,
+        &mut HashSet::new(),
+        &subtitle_addon(),
+        &item,
+    );
     subtitles.pop().unwrap()
 }
 
@@ -1483,8 +1762,7 @@ fn subtitle_merge_preserves_delimiter_containing_identities() {
             .enumerate()
             .map(|(index, (source_id, _))| AddonConfig {
                 id: (*source_id).to_string(),
-                url: format!("https://subtitles-addon.test/{index}"),
-                ..subtitle_addon()
+                ..sub_addon(&format!("https://subtitles-addon.test/{index}"))
             })
             .collect(),
     ));
@@ -1496,7 +1774,7 @@ fn subtitle_merge_preserves_delimiter_containing_identities() {
             &mut subtitles,
             &mut seen,
             addon,
-            AddonSubtitle {
+            &AddonSubtitle {
                 id: subtitle_id.to_string(),
                 url: "https://subtitles-addon.test/file.srt".to_string(),
                 lang: Some("eng".to_string()),
@@ -1527,9 +1805,9 @@ fn subtitle_merge_keeps_language_variants_of_same_url() {
         label: None,
     };
 
-    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle("eng"));
-    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle("English"));
+    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, &subtitle("eng"));
+    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, &subtitle("English"));
     // Same language in different case is still the same variant.
-    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle(" ENG "));
+    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, &subtitle(" ENG "));
     assert_eq!(subtitles.len(), 2);
 }

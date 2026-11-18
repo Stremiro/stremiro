@@ -37,6 +37,14 @@ pub(crate) fn test_addon(id: &str, name: &str) -> AddonConfig {
     }
 }
 
+/// `test_addon` pinned to a live test-server URL.
+pub(crate) fn addon_at(url: &str, id: &str, name: &str) -> AddonConfig {
+    AddonConfig {
+        url: url.into(),
+        ..test_addon(id, name)
+    }
+}
+
 pub(crate) fn test_media_item(id: &str, type_: &str) -> MediaItem {
     MediaItem {
         id: id.to_string(),

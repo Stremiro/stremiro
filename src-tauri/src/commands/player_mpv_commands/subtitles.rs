@@ -123,10 +123,13 @@ impl SubtitleRequest {
 }
 
 pub(super) fn validate_url(url: &str, title: &str, lang: Option<&str>) -> Result<Url, String> {
-    if [Some(url), Some(title), lang]
-        .into_iter()
-        .flatten()
-        .any(|value| value.len() > super::MPV_ARG_MAX_CHARS || value.contains('\0'))
+    // The URL is downloaded here, never handed to mpv, so it gets the playback URL budget.
+    if url.len() > crate::commands::streaming_helpers::PLAYBACK_URL_MAX_BYTES
+        || url.contains('\0')
+        || [Some(title), lang]
+            .into_iter()
+            .flatten()
+            .any(|value| value.len() > super::MPV_ARG_MAX_CHARS || value.contains('\0'))
     {
         return Err("Subtitle request contains an unsupported value.".to_string());
     }

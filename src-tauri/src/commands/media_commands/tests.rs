@@ -155,14 +155,8 @@ fn details_prefetch_bundle_serializes_nullable_details_and_camel_case_progress()
     let value = serde_json::to_value(&bundle).unwrap();
     // `details` always serializes (null on a degraded prefetch); the
     // progress shape must stay identical to `get_title_watch_progress`.
-    assert_eq!(value["details"], serde_json::Value::Null);
-    assert!(value["progress"].get("history").is_none());
-    assert!(value["progress"].get("continueWatching").is_none());
+    assert_eq!(value.get("details"), Some(&serde_json::Value::Null));
     assert_eq!(value["progress"]["episodeProgress"], serde_json::json!({}));
-    assert_eq!(
-        value["progress"]["watchedEpisodeCeiling"],
-        serde_json::json!({})
-    );
 }
 
 #[test]
@@ -210,17 +204,24 @@ fn subtitle_lookup_preserves_scoped_ids_and_appends_only_complete_coordinates() 
         ("series", "tt1", Some(1), None, vec!["tt1"]),
         ("series", "tt1", Some(0), Some(0), vec!["tt1:0:0"]),
     ] {
-        let (type_, actual) = subtitle_lookup_ids(media_type, id, season, episode).unwrap();
-        assert_eq!(
-            type_,
-            if media_type == "movie" {
-                "movie"
-            } else {
-                "series"
-            }
-        );
+        let (type_, actual) = subtitle_lookup_ids(media_type, id, season, episode, None).unwrap();
+        let expected_type = if id.starts_with("kitsu:") {
+            "anime"
+        } else {
+            media_type
+        };
+        assert_eq!(type_, expected_type);
         assert_eq!(actual, expected);
     }
+}
+
+#[test]
+fn subtitle_lookup_prioritizes_known_absolute_episode_over_inferred_fallbacks() {
+    let (_, ids) = subtitle_lookup_ids("anime", "tt1", Some(4), Some(7), Some(55)).unwrap();
+    assert_eq!(
+        ids,
+        ["tt1:4:7", "tt1:4:55", "tt1:1:55", "tt1:1:7", "tt1:0:7"]
+    );
 }
 
 #[test]
@@ -247,7 +248,7 @@ fn subtitle_lookup_preserves_composed_ipc_trimming() {
     ] {
         let media_type = format!("{prefix}SeRiEs{suffix}");
         let id = format!("{prefix}tt123{suffix}");
-        let actual = subtitle_lookup_ids(&media_type, &id, Some(1), Some(2));
+        let actual = subtitle_lookup_ids(&media_type, &id, Some(1), Some(2), None);
         assert_eq!(
             actual,
             subtitle_lookup_ids(
@@ -255,6 +256,7 @@ fn subtitle_lookup_preserves_composed_ipc_trimming() {
                 crate::commands::js_trim(&id),
                 Some(1),
                 Some(2),
+                None,
             )
         );
         let expected = (

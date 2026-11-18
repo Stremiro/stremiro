@@ -56,10 +56,12 @@ export function ShortcutsSection() {
   const [capture, setCapture] = useState<Capture | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const captureSequence = useRef(0);
+  const bindingRevision = useRef(0);
   const mountedRef = useMountedRef();
   const hasOverrides = Object.keys(preferences.playerKeybindings).length > 0;
 
   const save = (next: Record<string, string[]>): Promise<boolean> => {
+    bindingRevision.current += 1;
     setNotice(null);
     setIsSaving(true);
     return savePreferences({ playerKeybindings: next })
@@ -76,16 +78,16 @@ export function ShortcutsSection() {
     if (isSaving || !hasOverrides) return;
     cancelCapture();
     const previous = preferences.playerKeybindings;
-    void save({}).then((saved) => {
-      if (!saved) return;
-      let undoUsed = false;
+    const saving = save({});
+    const resetRevision = bindingRevision.current;
+    void saving.then((saved) => {
+      if (!saved || !mountedRef.current || bindingRevision.current !== resetRevision) return;
       toast.success('Player shortcuts reset to defaults.', {
         duration: 6000,
         action: {
           label: 'Undo',
           onClick: () => {
-            if (undoUsed) return;
-            undoUsed = true;
+            if (!mountedRef.current || bindingRevision.current !== resetRevision) return;
             cancelCapture();
             void save(previous).then((restored) => {
               if (restored) toast.success('Player shortcuts restored');
@@ -133,6 +135,8 @@ export function ShortcutsSection() {
       setNotice('Ctrl, Alt and Win combinations can’t be used in the player.');
       return;
     }
+    // A pending or rejected rebind still supersedes an older reset's Undo.
+    bindingRevision.current += 1;
     void api
       .bindPlayerKeybinding(
         keymap.overrides,

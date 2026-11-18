@@ -9,6 +9,7 @@ use crate::providers::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
@@ -21,7 +22,7 @@ pub(crate) struct AppShellState {
     preferences_hydrated: AtomicBool,
     start_hidden: AtomicBool,
     initial_reveal_pending: AtomicBool,
-    quit_pending: AtomicBool,
+    quit_forwarded_at: Mutex<Option<Instant>>,
     frontend_quit_ready: AtomicBool,
     exit_pending: AtomicBool,
     exit_ready: AtomicBool,
@@ -37,23 +38,27 @@ impl AppShellState {
             .store(preferences.minimize_to_tray, Ordering::Relaxed);
     }
 
-    fn begin_frontend_quit(&self) -> bool {
-        self.frontend_quit_ready.load(Ordering::Relaxed)
-            && !self.quit_pending.swap(true, Ordering::Relaxed)
-    }
-
-    fn reset_frontend(&self) {
-        self.frontend_quit_ready.store(false, Ordering::Relaxed);
-        self.quit_pending.store(false, Ordering::Relaxed);
+    fn forward_quit_to_frontend(&self, now: Instant) -> bool {
+        if !self.frontend_quit_ready.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut forwarded_at = lock_or_recover(&self.quit_forwarded_at);
+        // Allow the renderer's bounded save and teardown, with a manual escape for a hung renderer.
+        now.duration_since(*forwarded_at.get_or_insert(now)) < Duration::from_secs(30)
     }
 }
 
 pub(crate) fn frontend_loading(app: &AppHandle) {
-    app.state::<AppShellState>().reset_frontend();
+    let state = app.state::<AppShellState>();
+    state.frontend_quit_ready.store(false, Ordering::Relaxed);
+    *lock_or_recover(&state.quit_forwarded_at) = None;
 }
 
 fn request_quit(app: &AppHandle) {
-    if app.state::<AppShellState>().begin_frontend_quit()
+    // The renderer coalesces repeat requests while its write barrier is active.
+    if app
+        .state::<AppShellState>()
+        .forward_quit_to_frontend(Instant::now())
         && app
             .get_webview_window("main")
             .is_some_and(|window| window.emit("app://quit-requested", ()).is_ok())
@@ -194,7 +199,7 @@ pub(crate) fn reveal_main_window(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppShellState>() {
         state.start_hidden.store(false, Ordering::Relaxed);
         state.initial_reveal_pending.store(false, Ordering::Relaxed);
-        state.quit_pending.store(false, Ordering::Relaxed);
+        *lock_or_recover(&state.quit_forwarded_at) = None;
     }
     set_webview_memory_target(app, false);
     let _ = window.unminimize();
@@ -405,7 +410,7 @@ fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     tray.set_visible(true).map_err(|error| error.to_string())?;
     let state = app.state::<AppShellState>();
     state.initial_reveal_pending.store(false, Ordering::Relaxed);
-    state.quit_pending.store(false, Ordering::Relaxed);
+    *lock_or_recover(&state.quit_forwarded_at) = None;
     window.hide().map_err(|error| error.to_string())?;
     release_background_memory_when_idle(app);
     Ok(())
@@ -434,17 +439,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_quit_only_waits_for_a_ready_renderer_once() {
+    fn repeat_tray_quit_allows_the_save_barrier_and_a_later_hung_renderer_exit() {
         let state = AppShellState::default();
-        assert!(!state.begin_frontend_quit());
+        let first = Instant::now();
+        assert!(!state.forward_quit_to_frontend(first));
         state.frontend_quit_ready.store(true, Ordering::Relaxed);
-        assert!(state.begin_frontend_quit());
-        assert!(!state.begin_frontend_quit());
-
-        state.reset_frontend();
-        assert!(!state.begin_frontend_quit());
-        state.frontend_quit_ready.store(true, Ordering::Relaxed);
-        assert!(state.begin_frontend_quit());
+        assert!(state.forward_quit_to_frontend(first));
+        assert!(state.forward_quit_to_frontend(first + Duration::from_secs(1)));
+        assert!(!state.forward_quit_to_frontend(first + Duration::from_secs(30)));
     }
 
     #[test]

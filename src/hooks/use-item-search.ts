@@ -28,7 +28,7 @@ function useItemSearch<T>(
   const debouncedQuery = useDebounce(trimmedQuery, ITEM_SEARCH_DEBOUNCE_MS);
   const requestedSearch = enabled && trimmedQuery ? debouncedQuery : '';
   const listId = requestedSearch ? getItemListId(items) : 0;
-  const { data, isError, isFetched, isFetching, isLoading, isPlaceholderData, refetch } = useQuery({
+  const { data, isError, isFetching, isPlaceholderData, refetch } = useQuery({
     queryKey: [searchKey, listId, requestedSearch],
     queryFn: async () => {
       const indices = await searchIndices(items, requestedSearch);
@@ -59,8 +59,7 @@ function useItemSearch<T>(
   return {
     effectiveSearch,
     filteredItems: applied?.items ?? items,
-    searchError:
-      Boolean(requestedSearch) && (isError || (isFetched && (isLoading || isPlaceholderData))),
+    searchError: Boolean(requestedSearch) && isError,
     isSearchFetching: Boolean(requestedSearch) && isFetching,
     retrySearch: () => void refetch(),
     isSearchPending:

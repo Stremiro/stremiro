@@ -205,15 +205,6 @@ fn stream_request_registry_cleans_guards_and_bounds_requests() {
     );
 }
 
-fn episode_indices(rows: Vec<StreamPackRow>) -> Vec<u32> {
-    rows.into_iter()
-        .filter_map(|row| match row {
-            StreamPackRow::Episode { index } => Some(index),
-            StreamPackRow::Header { .. } => None,
-        })
-        .collect()
-}
-
 #[test]
 fn pack_rows_add_season_headers_only_for_multi_season_results() {
     let episodes: Vec<PackEpisodeCoordinates> = serde_json::from_value(json!([
@@ -241,116 +232,104 @@ fn pack_rows_add_season_headers_only_for_multi_season_results() {
 }
 
 #[test]
-fn pack_coverage_absent_or_unrestricted_keeps_all_episodes() {
-    let episodes: Vec<PackEpisodeCoordinates> = serde_json::from_value(
-        json!([{}, {"season": 0, "episode": 0}, {"season": 4, "episode": 9}]),
-    )
-    .expect("coordinates");
-    assert_eq!(
-        episode_indices(get_stream_pack_rows(None, episodes.clone()).expect("absent coverage")),
-        vec![0, 1, 2]
-    );
-    let coverage = serde_json::from_value(json!({"seasons": []})).expect("coverage");
-    assert_eq!(
-        episode_indices(
-            get_stream_pack_rows(Some(coverage), episodes).expect("unrestricted coverage")
+fn pack_rows_filter_by_source_or_canonical_coordinates() {
+    for (coverage, episodes, expected) in [
+        // Absent or season-unrestricted coverage keeps every episode.
+        (
+            json!(null),
+            json!([{}, {"season": 0, "episode": 0}, {"season": 4, "episode": 9}]),
+            vec![0, 1, 2],
         ),
-        vec![0, 1, 2]
-    );
+        (
+            json!({"seasons": []}),
+            json!([{}, {"season": 0, "episode": 0}, {"season": 4, "episode": 9}]),
+            vec![0, 1, 2],
+        ),
+        (
+            json!({"seasons": [2], "episodeRanges": [{"season": 2, "start": 3, "end": 5}]}),
+            json!([
+                {"season": 2, "episode": 4, "streamSeason": 1, "streamEpisode": 99},
+                {"season": 1, "episode": 99, "streamSeason": 2, "streamEpisode": 4},
+                {"season": 1, "episode": 99, "streamSeason": 3, "streamEpisode": 4},
+                {"season": 2, "episode": 8, "streamSeason": 2, "streamEpisode": 9}
+            ]),
+            vec![0, 1],
+        ),
+        // Source coordinates fall back independently and preserve zero.
+        (
+            json!({"seasons": [0], "episodeRanges": [{"start": 0, "end": 0}]}),
+            json!([
+                {"season": 0, "episode": 9, "streamEpisode": 0},
+                {"season": 8, "episode": 0, "streamSeason": 0},
+                {"season": 8, "episode": 9, "streamSeason": 0, "streamEpisode": 0},
+                {"season": 0, "episode": 9, "streamSeason": null, "streamEpisode": 0},
+                {"season": 8, "episode": 9}
+            ]),
+            vec![0, 1, 2, 3],
+        ),
+    ] {
+        let coverage = serde_json::from_value(coverage.clone()).expect("coverage");
+        let episodes = serde_json::from_value(episodes).expect("coordinates");
+        let indices: Vec<u32> = get_stream_pack_rows(coverage, episodes)
+            .expect("rows")
+            .into_iter()
+            .filter_map(|row| match row {
+                StreamPackRow::Episode { index } => Some(index),
+                StreamPackRow::Header { .. } => None,
+            })
+            .collect();
+        assert_eq!(indices, expected);
+    }
 }
 
 #[test]
-fn pack_coverage_bounds_are_inclusive_and_season_scoped() {
-    let coverage: StreamPackCoverage = serde_json::from_value(json!({
-        "seasons": [2],
-        "episodeRanges": [{"season": 2, "start": 3, "end": 5}]
-    }))
-    .expect("coverage");
-    assert!(coverage.covers(Some(2), Some(3)));
-    assert!(coverage.covers(Some(2), Some(5)));
-    assert!(!coverage.covers(Some(2), Some(2)));
-    assert!(!coverage.covers(Some(2), Some(6)));
-    assert!(!coverage.covers(Some(1), Some(4)));
-    assert!(!coverage.covers(None, Some(4)));
-    assert!(!coverage.covers(Some(2), None));
-}
-
-#[test]
-fn pack_coverage_matches_source_or_canonical_coordinates_but_not_uncovered_episodes() {
-    let coverage = serde_json::from_value(json!({
-        "seasons": [2],
-        "episodeRanges": [{"season": 2, "start": 3, "end": 5}]
-    }))
-    .expect("coverage");
-    let episodes = serde_json::from_value(json!([
-        {"season": 2, "episode": 4, "streamSeason": 1, "streamEpisode": 99},
-        {"season": 1, "episode": 99, "streamSeason": 2, "streamEpisode": 4},
-        {"season": 1, "episode": 99, "streamSeason": 3, "streamEpisode": 4},
-        {"season": 2, "episode": 8, "streamSeason": 2, "streamEpisode": 9}
-    ]))
-    .expect("coordinates");
-    assert_eq!(
-        episode_indices(get_stream_pack_rows(Some(coverage), episodes).expect("covered indices")),
-        vec![0, 1]
-    );
-}
-
-#[test]
-fn pack_coverage_source_coordinates_fall_back_independently_and_preserve_zero() {
-    let coverage = serde_json::from_value(json!({
-        "seasons": [0],
-        "episodeRanges": [{"start": 0, "end": 0}]
-    }))
-    .expect("coverage");
-    let episodes = serde_json::from_value(json!([
-        {"season": 0, "episode": 9, "streamEpisode": 0},
-        {"season": 8, "episode": 0, "streamSeason": 0},
-        {"season": 8, "episode": 9, "streamSeason": 0, "streamEpisode": 0},
-        {"season": 0, "episode": 9, "streamSeason": null, "streamEpisode": 0},
-        {"season": 8, "episode": 9}
-    ]))
-    .expect("coordinates");
-    assert_eq!(
-        episode_indices(get_stream_pack_rows(Some(coverage), episodes).expect("fallback indices")),
-        vec![0, 1, 2, 3]
-    );
-}
-
-#[test]
-fn pack_coverage_distinguishes_missing_ranges_from_empty_ranges() {
-    let unrestricted: StreamPackCoverage =
-        serde_json::from_value(json!({"seasons": [1]})).expect("coverage");
-    assert!(unrestricted.covers(Some(1), None));
-    assert!(!unrestricted.covers(None, Some(1)));
-    assert_eq!(
-        serde_json::to_value(&unrestricted).expect("serialized coverage"),
-        json!({"seasons": [1]})
-    );
-    let empty: StreamPackCoverage =
-        serde_json::from_value(json!({"seasons": [], "episodeRanges": []})).expect("coverage");
-    assert!(!empty.covers(Some(1), Some(1)));
-    assert_eq!(
-        serde_json::to_value(empty).expect("serialized coverage"),
-        json!({"seasons": [], "episodeRanges": []})
-    );
-}
-
-#[test]
-fn pack_coverage_unscoped_ranges_allow_missing_season_but_require_episode() {
-    let coverage: StreamPackCoverage = serde_json::from_value(json!({
-        "seasons": [],
-        "episodeRanges": [{"start": 3, "end": 5}]
-    }))
-    .expect("coverage");
-    assert!(coverage.covers(None, Some(4)));
-    assert!(coverage.covers(Some(9), Some(4)));
-    assert!(!coverage.covers(None, None));
-    let reversed: StreamPackCoverage = serde_json::from_value(json!({
-        "seasons": [],
-        "episodeRanges": [{"start": 5, "end": 3}]
-    }))
-    .expect("coverage");
-    assert!(!reversed.covers(Some(1), Some(4)));
+fn pack_coverage_bounds_are_inclusive_scoped_and_distinguish_missing_from_empty_ranges() {
+    for (coverage, cases) in [
+        (
+            json!({"seasons": [2], "episodeRanges": [{"season": 2, "start": 3, "end": 5}]}),
+            vec![
+                (Some(2), Some(3), true),
+                (Some(2), Some(5), true),
+                (Some(2), Some(2), false),
+                (Some(2), Some(6), false),
+                (Some(1), Some(4), false),
+                (None, Some(4), false),
+                (Some(2), None, false),
+            ],
+        ),
+        (
+            json!({"seasons": [1]}),
+            vec![(Some(1), None, true), (None, Some(1), false)],
+        ),
+        (
+            json!({"seasons": [], "episodeRanges": []}),
+            vec![(Some(1), Some(1), false)],
+        ),
+        (
+            json!({"seasons": [], "episodeRanges": [{"start": 3, "end": 5}]}),
+            vec![
+                (None, Some(4), true),
+                (Some(9), Some(4), true),
+                (None, None, false),
+            ],
+        ),
+        (
+            json!({"seasons": [], "episodeRanges": [{"start": 5, "end": 3}]}),
+            vec![(Some(1), Some(4), false)],
+        ),
+    ] {
+        let parsed: StreamPackCoverage =
+            serde_json::from_value(coverage.clone()).expect("coverage");
+        for (season, episode, expected) in cases {
+            assert_eq!(
+                parsed.covers(season, episode),
+                expected,
+                "{coverage}: {season:?}/{episode:?}"
+            );
+        }
+        // Missing and empty `episodeRanges` round-trip distinctly.
+        assert_eq!(serde_json::to_value(&parsed).expect("serialized"), coverage);
+    }
 }
 
 #[test]

@@ -58,7 +58,7 @@ export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-xl border border-white/[0.0
 export const SETTINGS_ROW_CLASS =
   'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-4 first:pt-0 last:pb-0';
 export const SETTINGS_ROW_DESCRIPTION_CLASS =
-  'mt-1 block max-w-[64ch] text-[14px] leading-normal text-zinc-400';
+  'mt-1 block max-w-[52ch] text-[14px] leading-6 text-zinc-400';
 
 export function settingsControlId(label: string) {
   return `setting-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
@@ -132,7 +132,7 @@ export function SettingsRow({
   );
 }
 
-export function SettingsSelect<Value extends string>({
+export function SettingsSelect<Value extends string | number>({
   ariaLabel,
   disabled,
   onChange,
@@ -155,7 +155,7 @@ export function SettingsSelect<Value extends string>({
           aria-label={`${ariaLabel}: ${valueLabel}`}
           disabled={disabled}
           className={cn(
-            'group/select h-10 w-44 min-w-0 max-w-full justify-between px-3.5 text-[15px] shadow-none',
+            'group/select h-10 w-48 min-w-0 max-w-full justify-between px-3.5 text-[14px] shadow-none',
             SETTINGS_OUTLINE_BUTTON_CLASS,
           )}
         >

@@ -262,8 +262,8 @@ fn merge_watch_progress_coordinates(target: &mut WatchProgress, source: &WatchPr
     target.absolute_episode = target
         .absolute_episode
         .or(watch_progress_absolute_episode(source));
-    target.stream_season = target.stream_season.or(source.stream_season);
-    target.stream_episode = target.stream_episode.or(source.stream_episode);
+    // Stream coordinates belong to the donor's lookup binding; only
+    // `replace_source_metadata_from_donor` may move them.
 }
 
 fn has_stream_key_watch_progress(item: &WatchProgress) -> bool {
@@ -322,6 +322,10 @@ fn replace_source_metadata_from_donor(target: &mut WatchProgress, donor: &WatchP
     target
         .last_stream_lookup_id
         .clone_from(&donor.last_stream_lookup_id);
+    // Stream coordinates are numbered within their lookup id; keeping the old pair
+    // with the donor's lookup would request the wrong episode on resume.
+    target.stream_season = donor.stream_season;
+    target.stream_episode = donor.stream_episode;
     target.last_stream_key.clone_from(&donor.last_stream_key);
     target.source_name.clone_from(&donor.source_name);
     target.source_id.clone_from(&donor.source_id);
@@ -354,10 +358,9 @@ fn merge_missing_source_metadata_from_donor(target: &mut WatchProgress, donor: &
 }
 
 fn has_usable_resume_lookup_id(item: &WatchProgress) -> bool {
-    item.last_stream_lookup_id.as_deref().is_some_and(|s| {
-        let trimmed = s.trim();
-        !trimmed.is_empty() && (!is_series_like_watch_progress(item) || trimmed.starts_with("tt"))
-    })
+    item.last_stream_lookup_id
+        .as_deref()
+        .is_some_and(|id| super::normalize_media_id(id).is_some())
 }
 
 fn has_meaningful_resume_position(item: &WatchProgress) -> bool {
@@ -499,7 +502,11 @@ fn donor_can_supply_episode_resume(target: &WatchProgress, donor: &WatchProgress
 }
 
 fn donor_has_materially_better_resume(target: &WatchProgress, donor: &WatchProgress) -> bool {
-    if donor.position <= target.position || !is_low_confidence_resume_position(target) {
+    if donor.position <= target.position
+        || !is_low_confidence_resume_position(target)
+        // An older completion must not erase the beginning of a newer rewatch.
+        || (donor.last_watched < target.last_watched && is_watched_progress(donor))
+    {
         return false;
     }
 
@@ -518,11 +525,8 @@ pub(crate) fn hydrate_watch_progress_lookup_id(item: &mut WatchProgress) {
         return;
     }
 
-    let fallback_id = item.id.trim();
-    if !fallback_id.is_empty()
-        && (!is_series_like_watch_progress(item) || fallback_id.starts_with("tt"))
-    {
-        item.last_stream_lookup_id = Some(fallback_id.to_string());
+    if let Some(fallback_id) = super::normalize_media_id(&item.id) {
+        item.last_stream_lookup_id = Some(fallback_id);
     }
 }
 
@@ -716,17 +720,17 @@ fn choose_latest_entry(
 /// The donor-merge half of `choose_latest_entry`, shared with the per-episode claimant
 /// map: hydrate the seed, then fold co-claimants (quality-sorted, `last_watched` ties)
 /// through `merge_watch_progress_from_donor`. Non-series seeds never take donors.
-/// Borrowed donors are already hydrated; owned donors must be scored before hydration.
 pub(crate) fn merge_watch_progress_donors<'a>(
     mut chosen: WatchProgress,
     donors: impl IntoIterator<Item = Cow<'a, WatchProgress>>,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> WatchProgress {
-    hydrate_watch_progress_lookup_id(&mut chosen);
-
     if !is_series_like_watch_progress(&chosen) {
+        hydrate_watch_progress_lookup_id(&mut chosen);
         return chosen;
     }
+
+    hydrate_watch_progress_coordinates(&mut chosen);
 
     // Donor scan always runs for series rows — sanitization strips the persisted stream URL, so no early-exit.
     let mut donors: Vec<_> = donors.into_iter().collect();
@@ -737,10 +741,7 @@ pub(crate) fn merge_watch_progress_donors<'a>(
         ))
     });
 
-    for mut donor in donors {
-        if let Cow::Owned(donor) = &mut donor {
-            hydrate_watch_progress_lookup_id(donor);
-        }
+    for donor in donors {
         merge_watch_progress_from_donor(&mut chosen, donor.as_ref(), source_health_priorities);
     }
 

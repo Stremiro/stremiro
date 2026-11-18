@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import type { MediaDetails } from '@/lib/api';
+import { isPlainKeyEvent } from '@/lib/dom';
 import { notifyAction } from '@/lib/notify';
 import {
   buildYouTubeEmbedUrl,
@@ -144,15 +145,7 @@ export function DetailsTrailer({ trailers, title, triggerClassName }: DetailsTra
   };
 
   const handleTrailerKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (
-      event.defaultPrevented ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.shiftKey ||
-      event.nativeEvent.isComposing
-    )
-      return;
+    if (!isPlainKeyEvent(event)) return;
     let nextIndex: number;
     switch (event.key) {
       case 'ArrowLeft':

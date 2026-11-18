@@ -111,7 +111,7 @@ impl EnrichmentClient {
             cache: TtlCache::new(MEMORY_ENTRIES, FULL_TTL, EMPTY_TTL),
             failures: TtlCache::new(FAILURE_ENTRIES, FAILURE_TTL, FAILURE_TTL),
             disk_dir: cache_dir.map(|dir| dir.join("enrichment-v1")),
-            in_flight: InFlight::new(MEMORY_ENTRIES),
+            in_flight: InFlight::default(),
             cooldowns: Mutex::new(HashMap::new()),
             gates: std::array::from_fn(|_| tokio::sync::Mutex::new(Instant::now())),
         }
@@ -191,7 +191,7 @@ impl EnrichmentClient {
         source: Source,
         request: RequestBuilder,
         max_body: usize,
-        compact: impl Fn(Vec<u8>) -> Result<Vec<u8>, String>,
+        compact: impl Fn(Vec<u8>) -> Result<Vec<u8>, String> + Send + 'static,
         decode: impl Fn(&[u8]) -> Result<(T, bool), String>,
     ) -> Result<T, String> {
         if let Some(hit) = self.cached(key) {
@@ -202,94 +202,99 @@ impl EnrichmentClient {
             return Err(error);
         }
         let key_lock = self.in_flight.claim(key);
-        let result = async {
-            let _permit = key_lock.lock().await;
-            if let Some(hit) = self.cached(key) {
-                return decode(&hit.bytes).map(|(value, _)| value);
+        let _permit = key_lock.lock().await;
+        if let Some(hit) = self.cached(key) {
+            return decode(&hit.bytes).map(|(value, _)| value);
+        }
+        if let Some(error) = self.failures.get(&failure_key) {
+            return Err(error);
+        }
+        if let Some((body, expires_at)) = self.read_disk(key).await {
+            let entry = Arc::new(CachedBody {
+                bytes: body,
+                expires_at,
+            });
+            let value = decode(&entry.bytes).map(|(value, is_empty)| (entry, value, is_empty));
+            if let Ok((entry, value, is_empty)) = value {
+                let ttl = entry
+                    .expires_at
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .min(if is_empty { EMPTY_TTL } else { FULL_TTL });
+                self.cache.put_for(key, entry, ttl, || true);
+                return Ok(value);
             }
-            if let Some(error) = self.failures.get(&failure_key) {
-                return Err(error);
+            // Undecodable disk bytes: fall through to a fresh fetch.
+        }
+        if self.cooling_down(source) {
+            return Err(TRANSIENT_ERROR.to_string());
+        }
+        // One gate per origin serializes pacing AND the whole HTTP read;
+        // the cooldown is re-checked under it so a 429 stamped by a
+        // concurrent caller still blocks this request.
+        let mut gate = self.gates[source.index()].lock().await;
+        if self.cooling_down(source) {
+            return Err(TRANSIENT_ERROR.to_string());
+        }
+        if let Some(gap) = source.min_request_gap() {
+            let now = Instant::now();
+            if *gate > now {
+                tokio::time::sleep(*gate - now).await;
             }
-            if let Some((body, expires_at)) = self.read_disk(key).await {
-                let entry = Arc::new(CachedBody {
-                    bytes: body,
-                    expires_at,
-                });
-                let value = decode(&entry.bytes).map(|(value, is_empty)| (entry, value, is_empty));
-                if let Ok((entry, value, is_empty)) = value {
-                    let ttl = entry
-                        .expires_at
-                        .duration_since(SystemTime::now())
-                        .unwrap_or_default()
-                        .min(if is_empty { EMPTY_TTL } else { FULL_TTL });
-                    self.cache.put_for(key, entry, ttl, || true);
-                    return Ok(value);
-                }
-                // Undecodable disk bytes: fall through to a fresh fetch.
-            }
-            if self.cooling_down(source) {
-                return Err(TRANSIENT_ERROR.to_string());
-            }
-            // One gate per origin serializes pacing AND the whole HTTP read;
-            // the cooldown is re-checked under it so a 429 stamped by a
-            // concurrent caller still blocks this request.
-            let mut gate = self.gates[source.index()].lock().await;
-            if self.cooling_down(source) {
-                return Err(TRANSIENT_ERROR.to_string());
-            }
-            if let Some(gap) = source.min_request_gap() {
-                let now = Instant::now();
-                if *gate > now {
-                    tokio::time::sleep(*gate - now).await;
-                }
-                *gate = Instant::now() + gap;
-            }
-            let fetched = self.fetch(request, source, max_body).await;
-            drop(gate);
-            let fetched = fetched.and_then(compact).and_then(|body| {
+            *gate = Instant::now() + gap;
+        }
+        let fetched = self.fetch(request, source, max_body).await;
+        drop(gate);
+        // Compaction parses, filters, and rewrites up to `max_body` bytes of
+        // JSON on one thread — blocking work, so it joins disk IO on the
+        // blocking pool instead of the runtime worker.
+        let fetched = match tokio::task::spawn_blocking(move || {
+            fetched.and_then(compact).and_then(|body| {
                 if body.len() > MAX_BODY_BYTES {
                     return Err(TOO_LARGE_ERROR.to_string());
                 }
                 Ok(Arc::<[u8]>::from(body))
-            });
-            let failed = |error: String| {
-                crate::operational_log::log_warn(
-                    "enrichment",
-                    source.name(),
-                    "request_failed",
-                    &[crate::operational_log::field("error", &error)],
-                );
-                self.failures
-                    .put(&failure_key, error.clone(), true, || true);
-                Err(error)
-            };
-            match fetched {
-                Ok(body) => match decode(&body) {
-                    Ok((value, is_empty)) => {
-                        // The producer stamp is assigned only once
-                        // definitive-empty is known; memory and disk share it.
-                        let expires_at =
-                            SystemTime::now() + if is_empty { EMPTY_TTL } else { FULL_TTL };
-                        self.cache.put(
-                            key,
-                            Arc::new(CachedBody {
-                                bytes: body.clone(),
-                                expires_at,
-                            }),
-                            is_empty,
-                            || true,
-                        );
-                        self.write_disk(key, body, expires_at).await;
-                        Ok(value)
-                    }
-                    Err(error) => failed(error),
-                },
+            })
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("compaction task failed: {error}")),
+        };
+        let failed = |error: String| {
+            crate::operational_log::log_warn(
+                "enrichment",
+                source.name(),
+                "request_failed",
+                &[crate::operational_log::field("error", &error)],
+            );
+            self.failures
+                .put(&failure_key, error.clone(), true, || true);
+            Err(error)
+        };
+        match fetched {
+            Ok(body) => match decode(&body) {
+                Ok((value, is_empty)) => {
+                    // The producer stamp is assigned only once
+                    // definitive-empty is known; memory and disk share it.
+                    let expires_at =
+                        SystemTime::now() + if is_empty { EMPTY_TTL } else { FULL_TTL };
+                    self.cache.put(
+                        key,
+                        Arc::new(CachedBody {
+                            bytes: body.clone(),
+                            expires_at,
+                        }),
+                        is_empty,
+                        || true,
+                    );
+                    self.write_disk(key, body, expires_at).await;
+                    Ok(value)
+                }
                 Err(error) => failed(error),
-            }
+            },
+            Err(error) => failed(error),
         }
-        .await;
-        self.in_flight.release(key, &key_lock);
-        result
     }
 
     /// Returns the raw body; the expiry stamp is assigned by `load` after

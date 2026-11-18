@@ -36,20 +36,24 @@ export function isKeyCaptureTarget(target: EventTarget | null, key?: string): bo
   );
 }
 
-/** Shared arrow/Home/End navigation for roving radio groups and tabs. */
-export function handleRovingGroupKeyDown(
-  event: KeyboardEvent<HTMLButtonElement>,
-  role: 'radio' | 'tab' = 'radio',
-): void {
-  if (
+/** True when a key press is unmodified, unhandled, and outside an IME composition. */
+export function isPlainKeyEvent(event: KeyboardEvent): boolean {
+  return !(
     event.defaultPrevented ||
     event.altKey ||
     event.ctrlKey ||
     event.metaKey ||
     event.shiftKey ||
     event.nativeEvent.isComposing
-  )
-    return;
+  );
+}
+
+/** Shared arrow/Home/End navigation for roving radio groups and tabs. */
+export function handleRovingGroupKeyDown(
+  event: KeyboardEvent<HTMLButtonElement>,
+  role: 'radio' | 'tab' = 'radio',
+): void {
+  if (!isPlainKeyEvent(event)) return;
   if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key))
     return;
   const buttons = Array.from(

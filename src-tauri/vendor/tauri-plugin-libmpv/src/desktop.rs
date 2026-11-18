@@ -112,6 +112,7 @@ pub unsafe extern "C" fn event_callback(event: *const c_char, userdata: *mut c_v
 }
 
 const FRONTEND_EVENTS: &[&str] = &[
+    "start-file",
     "seek",
     "playback-restart",
     "file-loaded",
@@ -427,14 +428,14 @@ impl<R: Runtime> Mpv<R> {
 
     pub fn get_property(
         &self,
-        name: String,
-        format: String,
+        name: impl Into<Vec<u8>> + AsRef<str>,
+        format: &str,
         window_label: &str,
     ) -> crate::Result<serde_json::Value> {
         self.with_instance(window_label, |instance| {
             let wrapper = self.get_wrapper()?;
 
-            trace!("GET PROPERTY '{}'", name);
+            trace!("GET PROPERTY '{}'", name.as_ref());
             let c_name = CString::new(name)?;
             let c_format = CString::new(format)?;
 

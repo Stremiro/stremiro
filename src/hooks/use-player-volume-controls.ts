@@ -4,6 +4,7 @@ import type { PlayerOsdAction } from '@/components/player-osd-overlay';
 import { useDebouncedPrefsPersist } from '@/hooks/use-debounced-prefs-persist';
 import type { MpvSetScheduler } from '@/hooks/use-mpv-set-scheduler';
 import type { AppUiPreferencesPatch } from '@/lib/api';
+import { createWheelStepAccumulator, wheelDeltaPixels } from '@/lib/player-dom';
 import { clamp } from '@/lib/utils';
 
 interface UsePlayerVolumeControlsArgs {
@@ -30,8 +31,9 @@ export function usePlayerVolumeControls({
   // Native echoes cannot replace explicit input; keep observations for failed-write rollback.
   const hasVolumeIntentRef = useRef(false);
   const hasMuteIntentRef = useRef(false);
-  const wheelDeltaAccumulatorRef = useRef(0);
-  const lastWheelEventAtRef = useRef(0);
+  const [wheelStepAccumulator] = useState(() =>
+    createWheelStepAccumulator({ windowMs: 250, pxPerStep: 4 }),
+  );
   // mpv re-inits (stream swap, recovery) read this so a muted session stays muted.
   const isMutedRef = useRef(false);
   const setIsMuted = (muted: boolean) => {
@@ -114,28 +116,16 @@ export function usePlayerVolumeControls({
   };
 
   const handleVolumeWheel = async (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => {
-    const normalizedDelta =
-      event.deltaY * (event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? 100 : 1);
+    const normalizedDelta = wheelDeltaPixels(event, 20, 100);
     if (!Number.isFinite(normalizedDelta) || normalizedDelta === 0) return;
-
-    const now = performance.now();
-    if (
-      now - lastWheelEventAtRef.current > 250 ||
-      Math.sign(normalizedDelta) !== Math.sign(wheelDeltaAccumulatorRef.current)
-    ) {
-      wheelDeltaAccumulatorRef.current = 0;
-    }
-    lastWheelEventAtRef.current = now;
-    wheelDeltaAccumulatorRef.current += normalizedDelta;
 
     // One notch is one 5% step whatever its pixel delta; fine trackpad input needs 4px for each 1%.
     if (Math.abs(normalizedDelta) >= 20) {
-      wheelDeltaAccumulatorRef.current = 0;
+      wheelStepAccumulator.reset();
       return stepVolume(-Math.sign(normalizedDelta) * 5);
     }
-    const steps = Math.trunc(wheelDeltaAccumulatorRef.current / 4);
+    const steps = wheelStepAccumulator.add(normalizedDelta);
     if (steps === 0) return;
-    wheelDeltaAccumulatorRef.current -= steps * 4;
     await stepVolume(-steps);
   };
 

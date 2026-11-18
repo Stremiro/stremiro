@@ -91,29 +91,7 @@ function getPreviewLibraryStatusCounts(): ProfileLibrary['statusCounts'] {
 }
 
 const EMPTY_SEARCH_CATALOG_PAGE = {
-  items: [
-    {
-      id: 'probe-1',
-      title: 'Probe Title One',
-      type: 'movie',
-      displayYear: '2024',
-      genres: ['Drama', 'Thriller'],
-      description:
-        'A deliberately long synopsis used only to measure how the hover panel behaves when a title carries a lot of text so that wrapping changes height.',
-      poster: 'https://picsum.photos/seed/probe1/400/600',
-      backdrop: 'https://picsum.photos/seed/probe1b/800/450',
-    },
-    {
-      id: 'probe-2',
-      title: 'Probe Title Two',
-      type: 'series',
-      displayYear: '2023',
-      genres: ['Comedy'],
-      description: 'Short.',
-      poster: 'https://picsum.photos/seed/probe2/400/600',
-      backdrop: 'https://picsum.photos/seed/probe2b/800/450',
-    },
-  ],
+  items: [],
   continuation: { seenKeys: [] },
   exhausted: true,
   partial: false,
@@ -385,7 +363,7 @@ function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
         ...previewAddonConfigs,
         {
           id,
-          name: '',
+          name: new URL(op.url).hostname,
           enabled: true,
           displayUrl: op.url,
           pinned: false,
@@ -397,6 +375,12 @@ function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
     case 'remove':
       previewAddonUrls.delete(op.id);
       previewAddonConfigs = previewAddonConfigs.filter((config) => config.id !== op.id);
+      return;
+    case 'replaceUrl':
+      previewAddonUrls.set(op.id, op.url);
+      previewAddonConfigs = previewAddonConfigs.map((config) =>
+        config.id === op.id ? { ...config, displayUrl: new URL(op.url).origin } : config,
+      );
       return;
     case 'setEnabled':
       previewAddonConfigs = previewAddonConfigs.map((config) =>

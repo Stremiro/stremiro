@@ -1,12 +1,31 @@
 use super::*;
 use crate::providers::addon_manifest::{parse_addon_manifest, snapshot_is_classified};
-use crate::test_helpers::{cinemeta_manifest, TempPath, TestHttpServer};
+use crate::test_helpers::{
+    cinemeta_manifest, test_details, test_episode, TempPath, TestHttpServer,
+};
 
 fn extra(name: &str, value: &str) -> CatalogExtra {
     CatalogExtra {
         name: name.to_string(),
         value: value.to_string(),
     }
+}
+
+fn anime_details(id: &str, type_: &str, episodes: Vec<Episode>) -> MediaDetails {
+    MediaDetails {
+        is_anime: true,
+        episodes: Some(episodes),
+        ..test_details(id, type_)
+    }
+}
+
+fn meta_cached(client: &AddonResourceClient, url: &str, details: MediaDetails) {
+    client.meta_cache.put(
+        &resource_cache_key("meta", url),
+        Arc::new(details),
+        false,
+        || true,
+    );
 }
 
 fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
@@ -24,9 +43,210 @@ fn parse_meta_item(value: serde_json::Value) -> Option<MediaDetails> {
 }
 
 #[tokio::test]
-async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity() {
-    use crate::test_helpers::{test_details, test_episode};
+async fn tvmaze_episode_artwork_compacts_large_responses_and_replays_gaps() {
+    use crate::providers::enrichment::{EnrichmentClient, Source};
 
+    for padding in [0, 150_000] {
+        let row = |name: &str, date: &str, special: bool| {
+            serde_json::json!({
+                "name": name, "airdate": date, "season": 2024,
+                "type": if special { "significant_special" } else { "regular" },
+                "number": if special { None } else { Some(999) },
+                "image": {"original": "http://static.tvmaze.com/blocked.jpg", "medium": format!("https://static.tvmaze.com/{date}-{special}.jpg")},
+                "summary": "x".repeat(padding),
+            })
+        };
+        let body = serde_json::to_string(&vec![
+            row("Different provider title", "2004-06-20", false),
+            row("A Really Long Episode Title", "2023-12-04", false),
+            row("Regular", "2024-01-01", false),
+            row("Special", "2024-01-01", true),
+        ])
+        .unwrap();
+        assert_eq!(body.len() > 256 * 1024, padding > 0);
+        let compacted = compact_tvmaze_episodes(body.clone().into_bytes()).unwrap();
+        assert!(compacted.len() < 200 * 1024);
+        let dir = TempPath::dir("episode-artwork");
+        let server = TestHttpServer::new(vec![
+            (200, r#"{"id":859}"#, None),
+            (200, Box::leak(body.into_boxed_str()), None),
+        ]);
+        let mut client = EnrichmentClient::new(Some(dir.to_path_buf()));
+        client.set_base_url(Source::Tvmaze, server.url.clone());
+        let episode = |id: &str, season, date: &str, title: &str| Episode {
+            title: Some(title.into()),
+            release_date: Some(date.into()),
+            ..test_episode(id, season, 1)
+        };
+        let details = anime_details(
+            "tt0388629",
+            "series",
+            vec![
+                Episode {
+                    thumbnail: Some(
+                        "https://episodes.metahub.space/tt0388629/10/1/w780.jpg".into(),
+                    ),
+                    ..episode("tt0388629:10:1", 10, "2004-06-20", "TVDB Title")
+                },
+                episode(
+                    "tt0388629:22:1",
+                    22,
+                    "2023-12-03",
+                    " a  REALLY long episode title ",
+                ),
+                episode("tt0388629:1:1", 1, "2024-01-01", "Regular"),
+                episode("tt0388629:0:1", 0, "2024-01-01", "Special"),
+            ],
+        );
+        let mut repaired = details.clone();
+        enrich_missing_episode_artwork(&client, &mut repaired, &[]).await;
+        let episodes = repaired.episodes.as_ref().unwrap();
+        for (index, suffix) in [
+            "2004-06-20-false",
+            "2023-12-04-false",
+            "2024-01-01-false",
+            "2024-01-01-true",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(
+                episodes[index].thumbnail,
+                Some(format!("https://static.tvmaze.com/{suffix}.jpg"))
+            );
+            assert!(episodes[index].alternate_video_id.is_none());
+        }
+        assert_eq!(
+            server.finish(),
+            [
+                "/lookup/shows?imdb=tt0388629",
+                "/shows/859/episodes?specials=1"
+            ]
+        );
+        let trap = TestHttpServer::new(vec![]);
+        let mut restarted = EnrichmentClient::new(Some(dir.to_path_buf()));
+        restarted.set_base_url(Source::Tvmaze, trap.url.clone());
+        let mut replay = details.clone();
+        enrich_missing_episode_artwork(&restarted, &mut replay, &[]).await;
+        assert_eq!(
+            serde_json::to_value(&replay).unwrap(),
+            serde_json::to_value(&repaired).unwrap()
+        );
+        let mut protected = details;
+        protected.episodes.as_mut().unwrap()[0].thumbnail =
+            Some("https://episodes.metahub.space/tt0388629/7/196/w780.jpg".into());
+        let before = protected.episodes.as_ref().unwrap()[0].thumbnail.clone();
+        enrich_missing_episode_artwork(&restarted, &mut protected, &[true]).await;
+        assert_eq!(protected.episodes.as_ref().unwrap()[0].thumbnail, before);
+        assert!(trap.finish().is_empty());
+    }
+}
+
+#[test]
+fn cinemeta_one_piece_matches_titles_dates_and_special_buckets_without_changing_identity() {
+    let episode = |id: &str, season, number, title: &str, date: &str| Episode {
+        title: Some(title.into()),
+        release_date: Some(date.into()),
+        thumbnail: Some(format!("https://episodes.metahub.space/{id}/w780.jpg")),
+        ..test_episode(id, season, number)
+    };
+    let mut details = anime_details(
+        "tt0388629",
+        "anime",
+        vec![
+            episode("tt0388629:10:1", 10, 1, "TVDB Title", "2004-06-20"),
+            Episode {
+                thumbnail: None,
+                ..episode("tt0388629:22:1", 22, 1, " A New  Adventure ", "2023-12-03")
+            },
+            Episode {
+                thumbnail: None,
+                ..episode("tt0388629:0:1", 0, 1, "A New Adventure", "2023-12-03")
+            },
+        ],
+    );
+    let artwork = MediaDetails {
+        episodes: Some(vec![
+            episode("tt0388629:7:196", 7, 196, "TMDB Title", "2004-06-20"),
+            episode(
+                "tt0388629:21:1086",
+                21,
+                1086,
+                "a new adventure",
+                "2023-12-03",
+            ),
+        ]),
+        ..test_details("tt0388629", "series")
+    };
+    assert!(needs_cinemeta_artwork(&details));
+    assert_eq!(
+        merge_cinemeta_artwork(&mut details, &artwork),
+        [true, true, false]
+    );
+    let episodes = details.episodes.as_ref().unwrap();
+    for (index, id) in ["tt0388629:7:196", "tt0388629:21:1086"].iter().enumerate() {
+        assert_eq!(episodes[index].alternate_video_id.as_deref(), Some(*id));
+        assert_eq!(
+            episodes[index].thumbnail,
+            Some(format!("https://episodes.metahub.space/{id}/w780.jpg"))
+        );
+        assert!(serde_json::to_value(&episodes[index])
+            .unwrap()
+            .get("alternate_video_id")
+            .is_none());
+    }
+    assert_eq!(
+        (&*episodes[0].id, episodes[0].season, episodes[0].episode),
+        ("tt0388629:10:1", 10, 1)
+    );
+    assert!(episodes[2].thumbnail.is_none());
+    let mut series = MediaDetails {
+        imdb_id: Some("tt0388629".into()),
+        episodes: Some(vec![Episode {
+            thumbnail: None,
+            ..artwork.episodes.as_ref().unwrap()[0].clone()
+        }]),
+        ..test_details("provider:1", "series")
+    };
+    assert!(needs_cinemeta_artwork(&series));
+    merge_cinemeta_artwork(&mut series, &artwork);
+    assert!(series.episodes.as_ref().unwrap()[0].thumbnail.is_some());
+    assert!(series.episodes.as_ref().unwrap()[0]
+        .alternate_video_id
+        .is_none());
+    assert!(normalize_image_url("http://images.example/episode.jpg").is_none());
+    assert_eq!(
+        normalize_image_url(" https://images.example/episode.jpg ").as_deref(),
+        Some("https://images.example/episode.jpg")
+    );
+}
+
+#[test]
+fn artwork_pairing_rejects_global_date_and_long_title_ambiguity() {
+    let identity = |special, title: &str, day| ArtworkIdentity {
+        special,
+        title: artwork_title(Some(title)),
+        day,
+    };
+    let source = [
+        identity(false, "First Episode", Some("2024-01-01")),
+        identity(false, "Other Episode", Some("2024-01-01")),
+        identity(false, "Generic", Some("2024-01-03")),
+        identity(true, "First Episode", Some("2024-01-01")),
+    ];
+    let target = [
+        identity(false, "first episode", Some("2024-01-01")),
+        identity(false, "Different Title", Some("2024-01-01")),
+        identity(false, "Generic", Some("2024-01-04")),
+    ];
+    assert_eq!(
+        pair_episode_artwork(&source, &target, 3),
+        [Some(0), None, None, None]
+    );
+}
+
+#[tokio::test]
+async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity() {
     let original_url = "https://episodes.metahub.space/tt0388629/2/1/w780.jpg";
     let corrected_url = "https://episodes.metahub.space/tt0388629/1/9/w780.jpg";
     let episode = Episode {
@@ -38,11 +258,7 @@ async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity
         stream_episode: Some(1),
         ..test_episode("tt0388629:2:1", 2, 1)
     };
-    let mut details = MediaDetails {
-        episodes: Some(vec![episode]),
-        is_anime: true,
-        ..test_details("tt0388629", "series")
-    };
+    let mut details = anime_details("tt0388629", "series", vec![episode]);
     let mut artwork = details.clone();
     let target = &mut artwork.episodes.as_mut().unwrap()[0];
     target.season = 1;
@@ -57,12 +273,7 @@ async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity
         &[],
     )
     .unwrap();
-    client.meta_cache.put(
-        &resource_cache_key("meta", &url),
-        Arc::new(artwork),
-        false,
-        || true,
-    );
+    meta_cached(&client, &url, artwork);
     for _ in 0..2 {
         client
             .repair_episode_artwork(&mut details, |_| panic!("cached artwork normalized again"))
@@ -84,12 +295,7 @@ async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity
         unrelated.id = id.into();
         unrelated.type_ = type_.into();
         unrelated.episodes.as_mut().unwrap()[0].thumbnail = Some(corrected_url.into());
-        client.meta_cache.put(
-            &resource_cache_key("meta", &url),
-            Arc::new(unrelated),
-            false,
-            || true,
-        );
+        meta_cached(&client, &url, unrelated);
         details.episodes.as_mut().unwrap()[0].thumbnail = Some(original_url.into());
         client
             .repair_episode_artwork(&mut details, |_| panic!("cached artwork normalized again"))
@@ -103,8 +309,6 @@ async fn cinemeta_artwork_cache_repairs_images_without_changing_episode_identity
 
 #[test]
 fn cinemeta_artwork_rejects_ambiguous_identity_and_preserves_other_artwork() {
-    use crate::test_helpers::{test_details, test_episode};
-
     let episode = |id: &str, title: Option<&str>, day: Option<&str>, thumbnail: &str| Episode {
         title: title.map(str::to_string),
         release_date: day.map(str::to_string),
@@ -160,8 +364,6 @@ fn cinemeta_artwork_rejects_ambiguous_identity_and_preserves_other_artwork() {
 
 #[tokio::test]
 async fn cinemeta_artwork_failure_and_metadata_only_shapes_preserve_original_details() {
-    use crate::test_helpers::{test_details, test_episode};
-
     let mut details = MediaDetails {
         is_anime: true,
         ..test_details("tt0388629", "series")
@@ -346,12 +548,7 @@ async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic()
         "id": "tt1", "name": "Title", "type": "series"
     }))
     .unwrap();
-    client.meta_cache.put(
-        &resource_cache_key("meta", &meta_url),
-        Arc::new(details),
-        false,
-        || true,
-    );
+    meta_cached(&client, &meta_url, details);
     let hit = client
         .fetch_meta(base, "series", "kitsu:1", |_| {
             panic!("cache hit normalized")
@@ -540,15 +737,46 @@ fn parse_catalog_skips_malformed_siblings() {
             {"name": "Missing id"},
             null,
             42,
+            false,
+            "invalid",
+            ["array", "Array row", "radio", null, null, null, null, null, null, null, null, null],
             {"id": "tt2", "name": "Also valid", "type": "series"}
         ]}"#,
     )
     .expect("catalog response");
     let page = parse_catalog_page(response, |item| item, None);
-    assert_eq!(page.source_item_count, 5);
-    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.source_item_count, 8);
+    assert_eq!(page.items.len(), 3);
     assert_eq!(page.items[0].id, "tt1");
-    assert_eq!(page.items[1].id, "tt2");
+    assert_eq!(page.items[1].id, "array");
+    assert_eq!(page.items[2].id, "tt2");
+}
+
+#[tokio::test]
+async fn sparse_catalog_near_payload_limit_keeps_late_valid_rows() {
+    let valid = r#"{"id":"late","name":"Late valid row","type":"radio"}"#;
+    let rejected_rows = (CATALOG_MAX_BYTES - valid.len() - 12) / 2;
+    let body = format!(r#"{{"metas":[{}{valid}]}}"#, "0,".repeat(rejected_rows));
+    assert!(body.len() <= CATALOG_MAX_BYTES);
+    assert!(CATALOG_MAX_BYTES - body.len() < 2);
+    let server = TestHttpServer::new(vec![(200, body.leak(), None)]);
+    let started = std::time::Instant::now();
+    let page = AddonResourceClient::new()
+        .fetch_catalog(&server.url, "radio", "live", &[], |item| item)
+        .await
+        .expect("sparse catalog");
+    assert_eq!(page.source_item_count, rejected_rows + 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, "late");
+    eprintln!("Sparse catalog fetch and decode: {:?}", started.elapsed());
+    assert_eq!(server.finish(), ["/catalog/radio/live.json"]);
+}
+
+#[test]
+fn catalog_rejects_invalid_json_after_the_accepted_row_limit() {
+    let row = r#"{"id":"tt1","name":"Valid","type":"movie"},"#;
+    let body = format!(r#"{{"metas":[{}{{"id":]}}"#, row.repeat(MAX_CATALOG_ITEMS));
+    assert!(serde_json::from_str::<CatalogResponse<'_>>(&body).is_err());
 }
 
 #[test]
@@ -830,18 +1058,19 @@ fn unused_episode_and_credit_fields_do_not_discard_valid_metadata() {
                 "id":"tt1:1:1","name":false,"title":"Pilot","season":"1","number":"2",
                 "ep\u0069sode":3,"episode":4,"overview":"Synopsis",
                 "addonExtension":{"overflow":1e999,"rows":[{},null,42]}
-            }]
+            },{"id":"tt1:1:5","season":1,"episode":5,"number":99}]
         }"#
         .into(),
     )
     .unwrap();
     let details = super::parse_meta_item(&raw).unwrap();
     let episodes = details.episodes.unwrap();
-    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes.len(), 2);
     let episode = &episodes[0];
     assert_eq!(episode.title.as_deref(), Some("Pilot"));
     assert_eq!((episode.season, episode.episode), (1, 4));
     assert_eq!(episode.overview.as_deref(), Some("Synopsis"));
+    assert_eq!(episodes[1].episode, 5);
 
     for (category, expected) in [("Cast", true), ("Genres", false)] {
         let links = RawValue::from_string(format!(
@@ -983,20 +1212,6 @@ fn meta_parses_writers_country_and_awards_without_coercing_scalars() {
     assert_eq!(lite.country, full.country);
     assert_eq!(lite.awards, full.awards);
     assert_eq!(lite.is_anime, full.is_anime);
-}
-
-#[test]
-fn parse_meta_prefers_episode_over_number() {
-    let details = parse_meta_item(serde_json::json!({
-        "id": "tt1",
-        "name": "Show",
-        "type": "series",
-        "videos": [
-            {"id": "tt1:1:1", "season": 1, "episode": 1, "number": 99}
-        ]
-    }))
-    .expect("meta");
-    assert_eq!(details.episodes.expect("episodes")[0].episode, 1);
 }
 
 #[test]
@@ -1387,7 +1602,7 @@ impl SubtitleDiskTest {
         client
     }
 
-    async fn fetch(&self, base: &str, type_: &str, id: &str) -> Vec<AddonSubtitle> {
+    async fn fetch(&self, base: &str, type_: &str, id: &str) -> Arc<[AddonSubtitle]> {
         self.client()
             .fetch_subtitles(base, type_, id)
             .await
@@ -1424,14 +1639,17 @@ async fn subtitle_disk_cache_reuses_positive_response_after_restart_without_rewr
     let path = disk.file(&server.url, "series", "tt1:1:2");
     let original = std::fs::read(&path).unwrap();
     let restarted = disk.client();
+    let disk_hit = restarted
+        .fetch_subtitles(&server.url, "series", "tt1:1:2")
+        .await
+        .unwrap();
+    assert_eq!(disk_hit, first);
     for _ in 0..2 {
-        assert_eq!(
-            restarted
-                .fetch_subtitles(&server.url, "series", "tt1:1:2")
-                .await
-                .unwrap(),
-            first
-        );
+        let memory_hit = restarted
+            .fetch_subtitles(&server.url, "series", "tt1:1:2")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&memory_hit, &disk_hit));
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
     std::fs::remove_file(&path).unwrap();

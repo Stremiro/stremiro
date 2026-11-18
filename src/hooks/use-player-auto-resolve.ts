@@ -2,7 +2,7 @@ import { type RefObject, useEffect, useEffectEvent, useRef } from 'react';
 
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
-import { clearProviderDataCaches } from '@/lib/api-cache';
+import { clearProviderDataCaches, takeResolvedPlayerLaunch } from '@/lib/api-cache';
 import { applyResolvedStreamToSession, resolvePlayerStream } from '@/lib/resolve-player-stream';
 import { withTimeout } from '@/lib/utils';
 
@@ -15,6 +15,7 @@ interface UsePlayerAutoResolveOptions {
   mountedRef: RefObject<boolean>;
   resolvedAbsoluteEpisode?: number;
   resolvedAbsoluteSeason?: number;
+  resolvedLaunchId?: number;
   resolvedStreamEpisode?: number;
   resolvedStreamSeason?: number;
   routeSelectedStreamKey?: string;
@@ -40,6 +41,7 @@ export function usePlayerAutoResolve({
   mountedRef,
   resolvedAbsoluteEpisode,
   resolvedAbsoluteSeason,
+  resolvedLaunchId,
   resolvedStreamEpisode,
   resolvedStreamSeason,
   routeRequestedStreamKey,
@@ -70,7 +72,7 @@ export function usePlayerAutoResolve({
   useEffect(() => {
     // While the manual selector is open the user owns stream choice.
     if (stream.activeStreamUrl || error || !type || !id || !mountedRef.current) return;
-    if (shouldWaitForResolvedLookupId || showStreamSelector) return;
+    if (showStreamSelector) return;
 
     const abort = new AbortController();
     const attemptGen = ++autoResolveGenRef.current;
@@ -79,6 +81,16 @@ export function usePlayerAutoResolve({
       !abort.signal.aborted && attemptGen === autoResolveGenRef.current && mountedRef.current;
 
     const resolve = async () => {
+      // A replayed effect can clean up before taking this launch's one-shot result.
+      await Promise.resolve();
+      if (!isCurrent()) return;
+      const staged = takeResolvedPlayerLaunch(resolvedLaunchId);
+      if (staged) {
+        applyResolvedStreamToSession(stream, staged);
+        setResolveStatus(null);
+        return;
+      }
+      if (shouldWaitForResolvedLookupId) return;
       setResolveStatus('');
       setError(null);
       const lookupId = streamLookupId || id;
@@ -138,6 +150,7 @@ export function usePlayerAutoResolve({
     resolvedStreamEpisode,
     resolvedAbsoluteSeason,
     resolvedAbsoluteEpisode,
+    resolvedLaunchId,
     error,
     shouldWaitForResolvedLookupId,
     showStreamSelector,

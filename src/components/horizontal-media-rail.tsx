@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { scrollEdgeMask, useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
+import { isPlainKeyEvent } from '@/lib/dom';
 import { boundedMapSet, cn, scrollBehavior, TITLE_ICON_CLASS } from '@/lib/utils';
 import { MediaCardSkeleton, MEDIA_CARD_SLOT_CLASS_NAME } from './media-card';
 
@@ -20,7 +21,7 @@ export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
   'pr-6 pl-[84px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
 
 const SCROLL_BUTTON_CLASS_NAME =
-  'h-9 w-9 rounded-md bg-white/[0.025] border border-white/10 text-zinc-300 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-30 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none';
+  'h-10 w-10 rounded-md bg-white/[0.03] border border-white/[0.08] text-zinc-300 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-35 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none';
 const DEFAULT_ITEM_CLASS_NAME = `flex-none ${MEDIA_CARD_SLOT_CLASS_NAME} snap-start`;
 const DEFAULT_SCROLLER_CLASS_NAME =
   'flex overflow-x-auto gap-4 px-1 pt-1 pb-8 scrollbar-hide snap-x snap-proximity';
@@ -247,7 +248,7 @@ export function HorizontalMediaRail<T>({
         <div className='flex min-h-10 flex-wrap items-center gap-x-6 gap-y-3'>
           <h2
             id={titleId}
-            className='mr-auto flex min-w-0 items-center gap-2.5 text-lg font-semibold leading-7 tracking-[-0.02em] text-zinc-100'
+            className='flex min-w-0 max-w-full items-center gap-2.5 text-xl font-semibold leading-7 tracking-[-0.02em] text-zinc-100'
           >
             {Icon ? (
               <Icon
@@ -256,8 +257,12 @@ export function HorizontalMediaRail<T>({
                 strokeWidth={2.25}
               />
             ) : null}
-            <span className='min-w-0 truncate'>{title}</span>
+            <span className='min-w-0 line-clamp-2 wrap-break-word'>{title}</span>
           </h2>
+          <span
+            aria-hidden='true'
+            className='hidden h-px min-w-8 flex-1 bg-linear-to-r from-white/[0.1] to-transparent sm:block'
+          />
 
           {!hasNotice && !isLoading && scrollState.hasOverflow && (
             <div className='ml-auto flex shrink-0 items-center gap-2'>
@@ -346,15 +351,7 @@ export function HorizontalMediaRail<T>({
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null);
             }}
             onKeyDown={(event) => {
-              if (
-                event.defaultPrevented ||
-                event.nativeEvent.isComposing ||
-                event.altKey ||
-                event.ctrlKey ||
-                event.metaKey ||
-                event.shiftKey
-              )
-                return;
+              if (!isPlainKeyEvent(event)) return;
               if (event.target !== event.currentTarget) {
                 if (!(event.target instanceof HTMLElement)) return;
                 if (!event.target.matches('[data-media-card-poster]')) return;

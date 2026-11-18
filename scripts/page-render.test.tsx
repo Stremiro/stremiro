@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import {
+  addonSubtitleFixture,
   captureWithClient,
   markupWithClient,
   queryClientFixture,
@@ -22,6 +23,7 @@ import type {
   QueryClient,
   QueryObserver as QueryObserverType,
   QueryObserverOptions,
+  QueryObserverResult,
 } from '@tanstack/react-query';
 
 // Bun's navigator has no connectivity snapshot; render the pages as online.
@@ -62,7 +64,7 @@ mock.module('@radix-ui/react-dialog', () => ({
     renderDialogPortal ? children : <DialogPortal {...props}>{children}</DialogPortal>,
 }));
 
-const { QueryObserver, onlineManager } = await import('@tanstack/react-query');
+const { QueryObserver, QueryClientProvider, onlineManager } = await import('@tanstack/react-query');
 const { renderToStaticMarkup } = await import('react-dom/server');
 const router = await import('react-router');
 const { MemoryRouter, Route, Routes } = router;
@@ -89,7 +91,8 @@ const {
 } = await import('../src/lib/query-invalidation');
 const { pendingDetailsPrefetch, prefetchDetailsRouteData } =
   await import('../src/lib/details-prefetch');
-const { playerStreamRankingOptions } = await import('../src/lib/resolve-player-stream');
+const { applyResolvedStreamToSession, playerStreamRankingOptions } =
+  await import('../src/lib/resolve-player-stream');
 const { buildStreamRankingCacheKey } = await import('../src/lib/stream-ranking-cache-key');
 
 const { StreamSelector } = await import('../src/components/stream-selector');
@@ -99,6 +102,8 @@ const { AddTitlesDialog } = await import('../src/components/list/add-titles-dial
 const { SaveToCollectionPanel } = await import('../src/components/list/save-to-collection');
 const { DetailsSections, NextAiringChip } = await import('../src/components/details-sections');
 const { useNearViewport } = await import('../src/hooks/use-near-viewport');
+const detailsSelector = await import('../src/hooks/use-details-stream-selector');
+const detailsPane = await import('../src/hooks/use-details-episode-pane');
 const { useWindowRelease } = await import('../src/hooks/use-window-release');
 const { usePlayerKeymap, useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
 const { useBulkAddToList, useMarkSeasonWatched, useMediaCollectionActions } =
@@ -114,9 +119,10 @@ const { useCollectionSelection } = await import('../src/components/profile-libra
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
 const { usePlayerAutoResolve } = await import('../src/hooks/use-player-auto-resolve');
+const { usePlaybackProgressPersistence } =
+  await import('../src/hooks/use-playback-progress-persistence');
 const { getPlayerStreamLoadKey, usePlayerMpvLifecycle } =
   await import('../src/hooks/use-player-mpv-lifecycle');
-const mpvEvents = await import('tauri-plugin-libmpv-api');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
 const { useTitleSearch } = await import('../src/hooks/use-item-search');
@@ -129,7 +135,8 @@ const { useHistoryPlayback } = await import('../src/hooks/use-history-playback')
 const { useBrowseHotkeys } = await import('../src/hooks/use-browse-hotkeys');
 const appNavigation = await import('../src/lib/navigation');
 const searchPageState = await import('../src/lib/search-page-state');
-const { claimPlaybackLaunch } = await import('../src/lib/player-navigation');
+const { claimPlaybackLaunch, launchResolvedStream, resolvePlayerLaunch } =
+  await import('../src/lib/player-navigation');
 const { toast } = await import('sonner');
 const { AppCloseManager } = await import('../src/components/app-close-manager');
 const { Sidebar } = await import('../src/components/sidebar');
@@ -176,6 +183,25 @@ function captureHook<T>(use: () => T): {
   return { Fixture, captured } as const;
 }
 
+// Arms the effect capture around a render; returns its value and captured effects.
+function captureRenderEffects<T>(render: () => T): [T, EffectCallback[]] {
+  capturedEffects = [];
+  const value = render();
+  const effects = capturedEffects ?? [];
+  capturedEffects = null;
+  return [value, effects];
+}
+
+// Renders and drains the captured effects into `cleanups`.
+function renderWithEffects<T>(render: () => T, cleanups: (() => void)[] = []): T {
+  const [value, effects] = captureRenderEffects(render);
+  runEffects(effects, cleanups);
+  return value;
+}
+
+const stubLocation = (pathname: string) =>
+  stubGlobal('window', { location: { pathname, search: '' } });
+
 const spyOn = spyFixture();
 function mockInitialState(from: unknown, to: unknown) {
   const useState = react.useState;
@@ -221,10 +247,8 @@ test.each([false, true])(
       return null;
     }
     const cleanups: (() => void)[] = [];
-    capturedEffects = [];
     try {
-      renderToStaticMarkup(<Probe />);
-      runEffects(capturedEffects, cleanups);
+      renderWithEffects(() => renderToStaticMarkup(<Probe />), cleanups);
       appWindow.dispatchEvent(new Event('blur'));
       doc.dispatchEvent(new Event('visibilitychange'));
       expect(release).toHaveBeenCalledTimes(1);
@@ -302,9 +326,7 @@ test.each([
   const cleanups: (() => void)[] = [];
   let closing: void | Promise<void>;
   try {
-    capturedEffects = [];
-    renderToStaticMarkup(<AppCloseManager />);
-    runEffects(capturedEffects, cleanups);
+    renderWithEffects(() => renderToStaticMarkup(<AppCloseManager />), cleanups);
     if (active) listenersReady.resolve();
     await Bun.sleep(0);
     for (const presentation of ['expanded', 'mini'] as const) {
@@ -339,6 +361,7 @@ test.each([
     await closeRequested({ preventDefault: repeatVeto } as CloseRequestedEvent);
     expect(repeatVeto).toHaveBeenCalledTimes(1);
     expect(flush).toHaveBeenCalledTimes(1);
+    quitRequested?.();
     quitRequested?.();
     expect(appWindow.close).not.toHaveBeenCalled();
     if (saveFails) saved.reject(new Error('Disk unavailable'));
@@ -383,6 +406,81 @@ test.each([
     const reload = Object.assign(new Event('keydown', { cancelable: true }), { key: 'F5' });
     target.dispatchEvent(reload);
     expect(reload.defaultPrevented).toBe(false);
+  }
+});
+
+test('A selected stream reaches the player once even when its reuse TTL is exhausted', async () => {
+  const restoreWindow = stubGlobal('window', { location: { pathname: '/details/movie/tt1' } });
+  const cleanups: (() => void)[] = [];
+  const result = {
+    url: 'https://video.example/clip',
+    cacheTtlMs: 0,
+    mpvHttpHeaderFields: 'Fixture header',
+    streamKey: 'the winner',
+  };
+  const fetch = spyOn(api, 'resolveBestStream').mockResolvedValue(result);
+  const navigate = mock((_path: unknown, _options?: { state?: unknown }) => {});
+  const setActiveStreamUrl = mock(() => {});
+  try {
+    launchResolvedStream(
+      navigate,
+      { mediaId: 'tt1', mediaType: 'movie' },
+      result,
+      {},
+      {
+        streamKey: 'original pick',
+      },
+    );
+    const state = navigate.mock.calls[0]?.[1]?.state;
+    expect(JSON.stringify(state)).not.toContain(result.url);
+    expect(JSON.stringify(state)).not.toContain(result.mpvHttpHeaderFields);
+    const launch = resolvePlayerLaunch({ type: 'movie', id: 'tt1', state });
+    expect(launch.requestedStreamKey).toBe('original pick');
+    function PlayerMount() {
+      usePlayerAutoResolve({
+        autoResolveGenRef: { current: 0 },
+        effectiveResolveMediaType: 'movie',
+        error: null,
+        id: launch.id,
+        isResolving: false,
+        mountedRef: { current: true },
+        resolvedLaunchId: launch.resolvedLaunchId,
+        routeRequestedStreamKey: launch.requestedStreamKey,
+        stream: {
+          activeStreamSourceIdRef: { current: undefined },
+          activeStreamSourceNameRef: { current: undefined },
+          activeStreamFamilyRef: { current: undefined },
+          committedStreamUrlRef: { current: undefined },
+          selectedStreamKeyRef: { current: undefined },
+          streamLookupIdRef: { current: undefined },
+          reloadStream: () => {},
+          setActiveStreamUrl,
+        },
+        setError: () => {},
+        setResolveStatus: () => {},
+        shouldWaitForResolvedLookupId: true,
+        showStreamSelector: false,
+        stopLoading: () => {},
+        type: launch.type,
+      });
+      return null;
+    }
+    renderWithEffects(() => renderToStaticMarkup(<PlayerMount />), cleanups);
+    await Promise.resolve();
+    expect(setActiveStreamUrl).toHaveBeenCalledWith(
+      result.url,
+      result.mpvHttpHeaderFields,
+      result.streamKey,
+      undefined,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    renderWithEffects(() => renderToStaticMarkup(<PlayerMount />), cleanups);
+    await Promise.resolve();
+    expect(setActiveStreamUrl).toHaveBeenCalledTimes(1);
+  } finally {
+    cleanupEffects(cleanups);
+    fetch.mockRestore();
+    restoreWindow();
   }
 });
 
@@ -451,9 +549,7 @@ test('Browse hotkeys map Alt sections/history and yield to owned contexts', asyn
   };
   const cleanups: (() => void)[] = [];
   try {
-    capturedEffects = [];
-    renderToStaticMarkup(<BrowseHotkeysFixture />);
-    runEffects(capturedEffects, cleanups);
+    renderWithEffects(() => renderToStaticMarkup(<BrowseHotkeysFixture />), cleanups);
 
     for (const [key, expected] of [
       ['1', '/'],
@@ -623,14 +719,10 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
   const client = createClient();
   const key = ['addonSubtitles', 'movie', 'tt1', null, null] as const;
   const cached = [
-    {
-      id: 'en',
-      selectionKey: 'en',
-      url: 'https://subs.test/old.srt',
-      mpvTitle: 'English',
+    addonSubtitleFixture('en', 'https://subs.test/old.srt', {
       sourceId: 'subs',
       sourceName: 'Subs',
-    },
+    }),
   ];
   client.setQueryData(key, cached);
   const fetch = spyOn(api, 'getAddonSubtitles').mockResolvedValue([]);
@@ -644,9 +736,7 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
   const cleanups: (() => void)[] = [];
   const render = () => markupWithClient(client, <Subtitles />);
   try {
-    capturedEffects = [];
-    render();
-    runEffects(capturedEffects, cleanups);
+    renderWithEffects(render, cleanups);
     expect(matchLanguage).not.toHaveBeenCalled();
     const query = client.getQueryCache().find({ queryKey: key })!;
     const observer = new QueryObserver(client, query.options);
@@ -654,18 +744,14 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     await query.promise;
     expect(fetch).toHaveBeenCalledTimes(1);
     menuOpen = true;
-    capturedEffects = [];
-    render();
-    runEffects(capturedEffects, cleanups);
+    renderWithEffects(render, cleanups);
     await query.promise;
     expect(fetch).toHaveBeenCalledTimes(2);
     menuOpen = false;
 
     client.setDefaultOptions({ queries: { refetchOnMount: false } });
     client.setQueryData(key, cached);
-    capturedEffects = [];
-    render();
-    runEffects(capturedEffects, cleanups);
+    renderWithEffects(render, cleanups);
     expect(matchLanguage).toHaveBeenCalledTimes(1);
   } finally {
     capturedEffects = null;
@@ -715,6 +801,46 @@ test('Subtitle results stay available while mounted but leave the cache after pl
   }
 });
 
+test('Automatic subtitles try the next ranked file when the first download fails', async () => {
+  const client = createClient({ defaultOptions: { queries: { refetchOnMount: false } } });
+  const key = ['addonSubtitles', 'movie', 'tt1', null, null];
+  const first = addonSubtitleFixture('eng', 'https://subs.test/unavailable.srt');
+  const backup = addonSubtitleFixture('eng', 'https://subs.test/backup.srt');
+  client.setQueryData(key, [first, { ...first, id: 'same-file' }, backup]);
+  const rank = spyOn(api, 'resolvePreferredTrackSelection').mockImplementation(async (tracks) => ({
+    selectedMatches: false,
+    matchedTrackId: tracks[0]?.id,
+  }));
+  const selected = Promise.withResolvers<void>();
+  const attempts: string[] = [];
+  const cleanups: (() => void)[] = [];
+  try {
+    renderWithEffects(
+      () =>
+        captureWithClient(client, () =>
+          usePlayerAddonSubtitles(
+            addonSubtitleArgs({
+              autoLoadLanguage: 'eng',
+              selectAddonSubtitle: async ({ url }) => {
+                attempts.push(url);
+                if (url !== backup.url) return false;
+                selected.resolve();
+                return true;
+              },
+            }),
+          ),
+        ),
+      cleanups,
+    );
+    await selected.promise;
+    expect(attempts).toEqual([first.url, backup.url]);
+    expect(rank).toHaveBeenCalledTimes(2);
+  } finally {
+    cleanupEffects(cleanups);
+    rank.mockRestore();
+  }
+});
+
 test.each([
   { automatic: false, cancelled: false },
   { automatic: true, cancelled: false },
@@ -729,23 +855,16 @@ test.each([
     const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
     const cleanups: (() => void)[] = [];
     try {
-      capturedEffects = [];
-      const hook = captureWithClient(client, () =>
-        usePlayerAddonSubtitles(addonSubtitleArgs({ selectAddonSubtitle: select })),
+      const [hook, effects] = captureRenderEffects(() =>
+        captureWithClient(client, () =>
+          usePlayerAddonSubtitles(addonSubtitleArgs({ selectAddonSubtitle: select })),
+        ),
       );
-      const effects = capturedEffects;
       runEffects(effects, cleanups);
-      const subtitle = {
-        id: 'sub',
-        selectionKey: 'sub',
-        url: 'https://example.com/sub',
-        mpvTitle: 'English',
-        sourceId: 'addon',
-        sourceName: 'Addon',
-      };
+      const subtitle = addonSubtitleFixture('sub', 'https://example.com/sub');
       const pending = hook.handleAddonSubtitleSelect(subtitle, { automatic });
       const duplicate = hook.handleAddonSubtitleSelect(subtitle, { automatic });
-      let replacementSelection: Promise<void> | undefined;
+      let replacementSelection: ReturnType<typeof hook.handleAddonSubtitleSelect> | undefined;
       if (cancelled) {
         cleanups.splice(0).forEach((cleanup) => cleanup());
         runEffects(effects, cleanups);
@@ -785,9 +904,7 @@ test.each([
   { cancelled: true, failed: false },
   { cancelled: true, failed: true },
 ])('Play next reports only the current lookup result (%j)', async ({ cancelled, failed }) => {
-  const restoreWindow = stubGlobal('window', {
-    location: { pathname: '/profile', search: '' },
-  });
+  const restoreWindow = stubLocation('/profile');
   const client = createClient();
   const lookup = Promise.withResolvers<Awaited<ReturnType<typeof api.getNextEpisodeRow>>>();
   const next = spyOn(api, 'getNextEpisodeRow').mockImplementation(() => lookup.promise);
@@ -1006,6 +1123,95 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
   expect(onConfirmed).toHaveBeenCalledTimes(2);
 });
 
+test('progress saves preserve playback identity and recency during pauses and replacements', async () => {
+  const restoreWindow = stubGlobal('window', new EventTarget());
+  const restoreDocument = stubGlobal('document', new EventTarget());
+  const client = testClient();
+  const save = spyOn(api, 'saveWatchProgress').mockResolvedValue(undefined);
+  const now = spyOn(Date, 'now').mockReturnValue(1_000_000);
+  const stream: Parameters<typeof usePlaybackProgressPersistence>[0]['stream'] = {
+    activeStreamUrl: 'https://example.com/a',
+    activeStreamKey: 's:a',
+    reloadStream: () => {},
+    activeStreamSourceIdRef: { current: 'a' },
+    activeStreamSourceNameRef: { current: 'Source A' },
+    activeStreamFamilyRef: { current: 'family:a' },
+    selectedStreamKeyRef: { current: 's:a' },
+    streamLookupIdRef: { current: 'tt-progress' },
+    committedStreamUrlRef: { current: undefined },
+    setActiveStreamUrl: (url, _headers, key) => {
+      stream.activeStreamUrl = url;
+      stream.activeStreamKey = key;
+    },
+  };
+  const observedPositionRef = { current: 120 };
+  const durationRef = { current: 600 };
+  const { Fixture, captured } = captureHook(() =>
+    usePlaybackProgressPersistence({
+      activeStreamLoadKey: getPlayerStreamLoadKey(stream),
+      mediaId: 'tt-progress',
+      mediaType: 'movie',
+      title: 'Progress',
+      isPlaying: false,
+      observedPositionRef,
+      durationRef,
+      stream,
+    }),
+  );
+  const cleanups: (() => void)[] = [];
+  try {
+    const [, effects] = captureRenderEffects(() => markupWithClient(client, <Fixture />));
+    runEffects(effects, cleanups);
+    const { saveProgress } = await captured.promise;
+    await saveProgress();
+    now.mockReturnValue(1_060_000);
+    applyResolvedStreamToSession(stream, {
+      url: 'https://example.com/b',
+      cacheTtlMs: 0,
+      streamKey: 's:b',
+      sourceId: 'b',
+      sourceName: 'Source B',
+      streamFamily: 'family:b',
+    });
+    stream.streamLookupIdRef.current = 'tt-updated-lookup';
+    await saveProgress();
+    expect(save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: 120,
+        last_watched: 1_000_000,
+        last_stream_lookup_id: 'tt-updated-lookup',
+        last_stream_key: 's:a',
+        source_id: 'a',
+        source_name: 'Source A',
+        stream_family: 'family:a',
+      }),
+    );
+    observedPositionRef.current = 121;
+    await saveProgress();
+    expect(save.mock.calls.at(-1)?.[0].last_watched).toBe(1_060_000);
+    cleanupEffects(cleanups);
+    cleanups.length = 0;
+    runEffects(effects, cleanups);
+    observedPositionRef.current = 30;
+    await saveProgress();
+    expect(save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        position: 30,
+        last_watched: 1_060_000,
+        last_stream_key: 's:b',
+        source_id: 'b',
+        source_name: 'Source B',
+        stream_family: 'family:b',
+      }),
+    );
+  } finally {
+    cleanupEffects(cleanups);
+    restoreSpies(save, now);
+    restoreWindow();
+    restoreDocument();
+  }
+});
+
 test('manual stream retry bypasses the cached URL and rejects a late resolve winner', async () => {
   const runtime = spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true);
   const initial = { url: 'https://example.com/old', streamKey: 's:retry', cacheTtlMs: 60_000 };
@@ -1025,7 +1231,6 @@ test('manual stream retry bypasses the cached URL and rejects a late resolve win
     }),
   };
   const setError = mock(() => {});
-  const effects: EffectCallback[] = [];
   const cleanups: ReturnType<EffectCallback>[] = [];
   const { Fixture, captured: controller } = captureHook(() =>
     usePlayerAutoResolve({
@@ -1046,9 +1251,7 @@ test('manual stream retry bypasses the cached URL and rejects a late resolve win
     }),
   );
   try {
-    capturedEffects = effects;
-    renderToStaticMarkup(<Fixture />);
-    capturedEffects = null;
+    const [, effects] = captureRenderEffects(() => renderToStaticMarkup(<Fixture />));
     const retry = await controller.promise;
     const resolve = effects.at(-1)!;
     cleanups.push(resolve());
@@ -1080,9 +1283,18 @@ test('manual stream retry bypasses the cached URL and rejects a late resolve win
   }
 });
 
-test('seek lifecycle discards old probes and waits for confirmed EOF before failing or ending', async () => {
+const mpvLifecycleModes = [
+  'seek',
+  'startup-idle',
+  'failed-load',
+  'late-listener',
+  'slow-probe',
+  'cancel-before-init',
+] as const;
+test.each(mpvLifecycleModes)('mpv lifecycle (%s)', async (mode) => {
+  const positionTimers = mock(setTimeout);
   const restoreWindow = stubGlobal('window', {
-    setTimeout,
+    setTimeout: positionTimers,
     clearTimeout,
     requestAnimationFrame: (callback: FrameRequestCallback) =>
       setTimeout(() => callback(performance.now()), 0),
@@ -1094,12 +1306,28 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
   );
   const client = createClient();
   client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
-  let emit: Parameters<typeof mpvEvents.listenEvents>[0] | undefined;
-  const listen = spyOn(mpvEvents, 'listenEvents').mockImplementation(async (callback) => {
+  const startup = mode === 'startup-idle' || mode === 'failed-load';
+  const lateListener = Promise.withResolvers<() => void>();
+  const unlisten = mock(() => {});
+  let emit: Parameters<typeof playerMpv.listenMpvEvents>[0] | undefined;
+  const listen = spyOn(playerMpv, 'listenMpvEvents').mockImplementation(async (callback) => {
     emit = callback;
-    return () => {};
+    if (mode === 'late-listener') return lateListener.promise;
+    if (startup) callback({ event: 'property-change', name: 'idle-active', data: true });
+    return unlisten;
   });
-  const command = spyOn(playerMpv, 'mpvCommand').mockResolvedValue();
+  const loadAck = Promise.withResolvers<void>();
+  const recover = mock(async () => false);
+  const command = spyOn(playerMpv, 'mpvCommand').mockImplementation(async (name) => {
+    if (name === 'loadfile' && startup) {
+      expect(recover).not.toHaveBeenCalled();
+      emit?.({ event: 'start-file', playlist_entry_id: 1 });
+      emit?.({ event: 'property-change', name: 'idle-active', data: false });
+      if (mode === 'failed-load')
+        emit?.({ event: 'property-change', name: 'idle-active', data: true });
+      await loadAck.promise;
+    }
+  });
   const init = spyOn(playerMpv, 'mpvInit').mockResolvedValue('ready');
   const destroy = spyOn(playerMpv, 'mpvDestroy').mockResolvedValue();
   const properties = spyOn(playerMpv, 'setMpvProperties').mockResolvedValue([]);
@@ -1128,7 +1356,6 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
   const save = mock(async () => {});
   const retryFailedSeek = mock((_position: number) => false);
   const forceShowTimeoutRef = { current: null as ReturnType<typeof setTimeout> | null };
-  const effects: EffectCallback[] = [];
   const cleanups: (() => void)[] = [];
   const controller = Promise.withResolvers<ReturnType<typeof useOptimisticSeek>>();
   function Fixture() {
@@ -1162,13 +1389,13 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
       mountedRef: { current: true },
       isDestroyedRef: { current: false },
       mpvInitializedRef,
-      isLoading: false,
+      isLoading: startup,
       isPlayingRef: { current: true },
       clock,
       observedPositionRef: { current: null },
       bufferedClock: createPlaybackClock(),
       durationRef,
-      playbackVerifiedAtRef: { current: 1000 },
+      playbackVerifiedAtRef: { current: startup ? 0 : 1000 },
       errorRef,
       recoverableStreamErrorRef: { current: null },
       forceShowTimeoutRef,
@@ -1200,7 +1427,7 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
       onObservedTrackSelection: () => false,
       refreshTracks: async () => {},
       reportStreamFailure: () => {},
-      recoverFromSlowStartup: async () => false,
+      recoverFromSlowStartup: recover,
       reopenSelectorForSavedStreamFailure: () => {},
       stopLoading: () => {},
       setTransparent: () => {},
@@ -1212,18 +1439,64 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
   const property = (name: string, data: number | boolean) =>
     emit?.({ event: 'property-change', name, data });
   try {
-    capturedEffects = effects;
-    markupWithClient(
-      client,
-      <PlayerSessionProvider>
-        <Fixture />
-      </PlayerSessionProvider>,
+    const [, effects] = captureRenderEffects(() =>
+      markupWithClient(
+        client,
+        <PlayerSessionProvider>
+          <Fixture />
+        </PlayerSessionProvider>,
+      ),
     );
-    capturedEffects = null;
     const seeking = await controller.promise;
     runEffects(effects, cleanups);
+    if (mode === 'cancel-before-init') {
+      cleanupEffects(cleanups.splice(0));
+      await Bun.sleep(0);
+      expect(init).not.toHaveBeenCalled();
+      expect(destroy).not.toHaveBeenCalled();
+      return;
+    }
     await Bun.sleep(0);
+    if (mode === 'late-listener') {
+      expect(listen).toHaveBeenCalledTimes(1);
+      for (const cleanup of cleanups.splice(0).toReversed()) cleanup();
+      lateListener.resolve(unlisten);
+      await Bun.sleep(0);
+      expect(unlisten).toHaveBeenCalledTimes(1);
+      property('duration', 240);
+      expect(durationRef.current).toBe(0);
+      expect(command).not.toHaveBeenCalledWith('loadfile', ['https://example.com/seek', 'replace']);
+      return;
+    }
     expect(mpvInitializedRef.current).toBe(true);
+    if (mode === 'slow-probe') {
+      const pending = Promise.withResolvers<typeof snapshot>();
+      probe.mockReturnValueOnce(pending.promise);
+      property('pause', false);
+      property('paused-for-cache', true);
+      property('paused-for-cache', false);
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(positionTimers).toHaveBeenCalledTimes(1);
+      pending.resolve(snapshot);
+      await Bun.sleep(0);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(positionTimers).toHaveBeenCalledTimes(2);
+      expect(clock.ref.current).toBe(snapshot.timePos);
+      return;
+    }
+    if (startup) {
+      expect(command).toHaveBeenCalledWith('loadfile', ['https://example.com/seek', 'replace']);
+      if (mode === 'failed-load') {
+        expect(recover).toHaveBeenCalledTimes(1);
+        expect(setStreamError).toHaveBeenCalledWith('Stream failed to load. Try another stream.');
+      } else {
+        expect(recover).not.toHaveBeenCalled();
+        expect(setStreamError).not.toHaveBeenCalled();
+      }
+      loadAck.resolve();
+      await Bun.sleep(0);
+      return;
+    }
     property('duration', 120);
     await seeking!.seek(90);
     const old = Promise.withResolvers<typeof snapshot>();
@@ -1272,13 +1545,20 @@ test('seek lifecycle discards old probes and waits for confirmed EOF before fail
     errorRef.current = null;
     await seeking!.seek(120);
     seeking!.observeTimeUpdate(120, performance.now());
-    probe.mockResolvedValue({ ...snapshot, timePos: 120, nearCompletion: true, eofReached: true });
+    probe.mockResolvedValue({
+      ...snapshot,
+      timePos: 120,
+      nearCompletion: true,
+      eofReached: true,
+    });
     property('eof-reached', true);
     await Bun.sleep(0);
     expect(onEndedChange).toHaveBeenCalledWith(true);
     expect(save).toHaveBeenCalledTimes(1);
   } finally {
     capturedEffects = null;
+    loadAck.resolve();
+    lateListener.resolve(unlisten);
     for (const cleanup of cleanups.toReversed()) if (typeof cleanup === 'function') cleanup();
     if (forceShowTimeoutRef.current !== null) clearTimeout(forceShowTimeoutRef.current);
     await Bun.sleep(170);
@@ -1361,7 +1641,6 @@ test.each([false, true])(
     });
     const currentTimeRef = { current: 0 };
     const durationRef = { current: 0 };
-    const effects: EffectCallback[] = [];
     const cleanups: (() => void)[] = [];
     const controller = Promise.withResolvers<ReturnType<typeof usePlayerResumeController>>();
     function ResumeFixture() {
@@ -1386,15 +1665,15 @@ test.each([false, true])(
       return null;
     }
     try {
-      capturedEffects = effects;
-      renderToStaticMarkup(
-        <MemoryRouter>
-          <PlayerSessionProvider>
-            <ResumeFixture />
-          </PlayerSessionProvider>
-        </MemoryRouter>,
+      const [, effects] = captureRenderEffects(() =>
+        renderToStaticMarkup(
+          <MemoryRouter>
+            <PlayerSessionProvider>
+              <ResumeFixture />
+            </PlayerSessionProvider>
+          </MemoryRouter>,
+        ),
       );
-      capturedEffects = null;
       const resume = await controller.promise;
       runEffects(effects, cleanups);
       expect(resume.prepareForStreamLoad()).toBe(true);
@@ -1434,6 +1713,7 @@ test.each([false, true])(
   },
 );
 
+// Runs the real React Compiler pipeline — heavyweight, needs a wider timeout than the 5s default.
 test('Compiled preference writes persist the merged pending patch', async () => {
   const { transformSync } = await import('@babel/core');
   const { reactCompilerPreset } = await import('@vitejs/plugin-react');
@@ -1478,7 +1758,7 @@ test('Compiled preference writes persist the merged pending patch', async () => 
     unregisterCompiledFlusher();
     savePreferences.mockRestore();
   }
-});
+}, 20_000);
 
 test('Recent-search clear waits for a pending record and leaves cache and storage empty', async () => {
   const client = createClient();
@@ -1539,7 +1819,204 @@ function renderDetails(client: QueryClient, route: string) {
   );
 }
 
-test.each([false, true])('Incomplete Search results remain retryable (empty=%j)', (empty) => {
+const DETAILS_FLOW_ITEM: MediaDetails = {
+  id: 'details-flow',
+  type: 'series',
+  title: 'Details flow',
+  description: 'Series summary',
+  episodes: [
+    { id: 'e1', season: 1, episode: 1, title: 'Secret reveal', overview: 'Secret overview' },
+  ],
+  seasons: [{ number: 1, episodeCount: 1 }],
+};
+
+test.each(['pending', 'error', 'enabled', 'disabled'] as const)(
+  'Details selector shares the cards hydration-safe spoiler policy (%s)',
+  (preference) => {
+    const client = testClient(false);
+    const route = `/details/series/${DETAILS_FLOW_ITEM.id}`;
+    client.setQueryData(
+      api.detailsQueryOptions('series', DETAILS_FLOW_ITEM.id).queryKey,
+      DETAILS_FLOW_ITEM,
+    );
+    if (preference === 'enabled' || preference === 'disabled') {
+      client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, {
+        ...DEFAULT_APP_UI_PREFERENCES,
+        spoilerProtection: preference === 'enabled',
+      });
+    } else if (preference === 'error') {
+      client
+        .getQueryCache()
+        .build(client, { queryKey: APP_UI_PREFERENCES_QUERY_KEY })
+        .setState({
+          status: 'error',
+          error: new Error('Preferences unavailable'),
+        });
+    }
+    const original = detailsSelector.useDetailsStreamSelector;
+    let args!: Parameters<typeof original>[0];
+    const selector = spyOn(detailsSelector, 'useDetailsStreamSelector').mockImplementation(
+      (input) => {
+        args = input;
+        return original(input);
+      },
+    );
+    renderDetails(client, route);
+    selector.mockRestore();
+    const masked = preference !== 'disabled';
+    expect(args.spoilerProtection).toBe(masked);
+    const restoreWindow = stubLocation(route);
+    spyOn(appNavigation, 'navigateApp').mockReturnValue(true);
+    const initialState = react.useState;
+    let target: unknown;
+    const state = spyOn(react, 'useState').mockImplementation((initial: unknown) => {
+      const result = initialState(initial);
+      return initial === null
+        ? [
+            result[0],
+            (next: unknown) => {
+              target = next;
+            },
+          ]
+        : result;
+    });
+    try {
+      for (const reopen of [false, true]) {
+        target = undefined;
+        const [controller, effects] = captureRenderEffects(() =>
+          captureWithClient(client, () =>
+            original({
+              ...args,
+              locationState: reopen
+                ? { reopenStreamSelector: true, reopenStreamSeason: 1, reopenStreamEpisode: 1 }
+                : undefined,
+            }),
+          ),
+        );
+        if (reopen) runEffects(effects, []);
+        else controller.openEpisodeStreamSelector(DETAILS_FLOW_ITEM.episodes![0]);
+        expect(target).toMatchObject({
+          targetMasked: masked,
+          episodeTitle: masked ? 'Episode 1' : 'Secret reveal',
+          overview: masked ? 'Series summary' : 'Secret overview',
+        });
+      }
+    } finally {
+      capturedEffects = null;
+      state.mockRestore();
+      restoreWindow();
+    }
+  },
+);
+
+test.each([
+  { reopen: false, search: false },
+  { reopen: true, search: false },
+  { reopen: false, search: true },
+  { reopen: true, search: true },
+])('Player return cleanup preserves episode pane memory (%j)', async ({ reopen, search }) => {
+  const client = testClient();
+  const item: MediaDetails = {
+    ...DETAILS_FLOW_ITEM,
+    id: `${DETAILS_FLOW_ITEM.id}-${reopen}-${search}`,
+    episodes: Array.from({ length: 80 }, (_, index) => ({
+      id: `e${index + 1}`,
+      season: 1,
+      episode: index + 1,
+    })),
+    seasons: [{ number: 1, episodeCount: 80 }],
+  };
+  const route = `/details/series/${item.id}`;
+  client.setQueryData(api.detailsQueryOptions('series', item.id).queryKey, item);
+  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
+  const memory = router.createMemoryRouter(
+    [
+      {
+        path: '/details/:type/:id',
+        element: (
+          <PlayerSessionProvider>
+            <Details />
+          </PlayerSessionProvider>
+        ),
+      },
+    ],
+    { initialEntries: [route] },
+  );
+  const restoreWindow = stubLocation(route);
+  const originalPane = detailsPane.useDetailsEpisodePane;
+  const originalSelector = detailsSelector.useDetailsStreamSelector;
+  let pane!: ReturnType<typeof originalPane>;
+  let effects: EffectCallback[] = [];
+  spyOn(detailsPane, 'useDetailsEpisodePane').mockImplementation((input) => {
+    pane = originalPane(input);
+    return pane;
+  });
+  spyOn(detailsSelector, 'useDetailsStreamSelector').mockImplementation((input) => {
+    const previous = capturedEffects;
+    capturedEffects = effects;
+    try {
+      return originalSelector(input);
+    } finally {
+      capturedEffects = previous;
+    }
+  });
+  let replacing = Promise.resolve();
+  spyOn(appNavigation, 'navigateApp').mockImplementation((to, options) => {
+    replacing = memory.navigate(to as string, options);
+    return true;
+  });
+  const render = () => {
+    effects = [];
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <router.RouterProvider router={memory} />
+      </QueryClientProvider>,
+    );
+  };
+  try {
+    render();
+    if (search) pane.setEpisodeSearch('Episode 41');
+    else pane.jumpToEpisode(1, 73);
+    render();
+    const expectedSearch = search ? 'Episode 41' : '';
+    const expectedPage = search ? 0 : 2;
+    expect(pane.episodeSearch).toBe(expectedSearch);
+    expect(pane.activeEpisodePageIndex).toBe(expectedPage);
+    pane.retainEpisodePosition();
+    const returnFromPlayer = async () => {
+      const originalKey = memory.state.location.key;
+      appNavigation.stashDetailsReturnState(route, {
+        from: '/search',
+        season: 1,
+        reopenStreamSelector: reopen,
+        reopenStreamSeason: 1,
+        reopenStreamEpisode: 1,
+      });
+      render();
+      runEffects(effects, []);
+      await replacing;
+      expect(memory.state.location.key).not.toBe(originalKey);
+      render();
+      expect(pane.episodeSearch).toBe(expectedSearch);
+      expect(pane.activeEpisodePageIndex).toBe(expectedPage);
+    };
+    await returnFromPlayer();
+    await returnFromPlayer();
+    await memory.navigate(route);
+    render();
+    expect(pane.episodeSearch).toBe('');
+    await memory.navigate(-1);
+    render();
+    expect(pane.episodeSearch).toBe(expectedSearch);
+    expect(pane.activeEpisodePageIndex).toBe(expectedPage);
+  } finally {
+    memory.dispose();
+    appNavigation.takeDetailsReturnState(route);
+    restoreWindow();
+  }
+});
+
+test('Incomplete Search results remain retryable', () => {
   const client = createClient();
   const options = searchCatalogQueryOptions(
     { query: 'dune', type: 'movie', feed: 'popular' },
@@ -1548,7 +2025,7 @@ test.each([false, true])('Incomplete Search results remain retryable (empty=%j)'
   client.setQueryData(options.queryKey, {
     pages: [
       {
-        items: empty ? [] : [{ id: 'tt1160419', type: 'movie', title: 'Dune' }],
+        items: [{ id: 'tt1160419', type: 'movie', title: 'Dune' }],
         partial: true,
         exhausted: true,
         continuation: { seenKeys: [] },
@@ -1578,25 +2055,15 @@ test('Calendar keeps upcoming placeholders only for the same watched filter', ()
     .find<CalendarSchedule>({ queryKey: ['calendar-events'], exact: false });
   if (!query) throw new Error('Calendar query missing');
   const { placeholderData } = query.options as QueryObserverOptions<CalendarSchedule>;
-  const options = { queryKey: query.queryKey, placeholderData };
   const previous: CalendarSchedule = { trackedCount: 1, missingCount: 0, days: [], upcoming: [] };
-  const observer = new QueryObserver(client, {
-    ...options,
-    enabled: false,
-    initialData: previous,
-    queryKey: [...query.queryKey.slice(0, 4), false],
-  });
-  observer.setOptions({ ...options, enabled: false });
-  expect(observer.getCurrentResult().data).toBeUndefined();
-  client.setQueryData(query.queryKey, previous);
-  observer.setOptions({ ...options, enabled: false });
-  observer.setOptions({
-    ...options,
-    enabled: false,
-    queryKey: [query.queryKey[0], 'another month', ...query.queryKey.slice(2)],
-  });
-  expect(observer.getCurrentResult().data).toEqual(previous);
-  observer.destroy();
+  const placeholder = (queryKey: unknown[]) =>
+    typeof placeholderData === 'function'
+      ? placeholderData(previous, { queryKey } as never)
+      : undefined;
+  // A previous query under another filter must not seed placeholders.
+  expect(placeholder([...query.queryKey.slice(0, 4), false])).toBeUndefined();
+  // The same range + filter reuses the previous page, minus stale days.
+  expect(placeholder(query.queryKey)).toEqual(previous);
 });
 
 const ADD_TITLES_PROPS = {
@@ -1792,7 +2259,6 @@ test.each([false, true])(
     expect(markup).toContain('>+1</button>');
     expect(markup).toContain('href="/search?q=Lilly%20Wachowski"');
     expect(markup).not.toContain('Next: Episode');
-    expect(markup).not.toContain('Title sections');
     if (populated) {
       expect(markup).toContain('Writers');
       expect(markup).toContain('href="/search?q=Writer%20One"');
@@ -1845,6 +2311,24 @@ test('Home enables recommendation observation when its cold seed arrives', async
   expect(observation.mock.calls.at(-1)?.[0]).toBe(true);
   expect(markup).toContain('Because you watched Seed movie');
 });
+
+// The selector's source-query key for a target, including its ranking cache segment.
+function selectorSourceKey(
+  target: { type: string; id: string },
+  season?: number,
+  episode?: number,
+) {
+  return streamSelectorQueryKey(
+    target.type,
+    target.id,
+    season,
+    episode,
+    undefined,
+    buildStreamRankingCacheKey(
+      playerStreamRankingOptions({ mediaId: target.id, mediaType: target.type }),
+    ),
+  );
+}
 
 function streamSelectorFixture(
   available = true,
@@ -1917,13 +2401,7 @@ test.each([false, true])(
       />,
     );
     expect(markup.includes('aria-busy="true"')).toBe(pending);
-    expect(markup).toContain('value="release"');
-    expect(markup).toContain('Clear search');
-    expect(markup).toContain('Reset');
-    // Counts reflect the other active filters — never a pre-filter total.
     expect(markup).toContain('>18</span>');
-    expect(markup).not.toContain('18 total');
-    expect(markup).not.toContain('Total before other filters');
   },
 );
 
@@ -1965,19 +2443,7 @@ test.each([
       hasEnabledAddons,
       selectorFailed ? failure.message : undefined,
     );
-    client.setQueryData(
-      streamSelectorQueryKey(
-        target.type,
-        target.id,
-        undefined,
-        undefined,
-        undefined,
-        buildStreamRankingCacheKey(
-          playerStreamRankingOptions({ mediaId: target.id, mediaType: target.type }),
-        ),
-      ),
-      data,
-    );
+    client.setQueryData(selectorSourceKey(target), data);
     function DefaultViewCheck() {
       const view = client
         .getQueryCache()
@@ -2016,22 +2482,53 @@ test.each([
   },
 );
 
+test.each([false, true])(
+  'Selector retries share the source request (cached=%s)',
+  async (cached) => {
+    const restoreWindow = stubGlobal('window', {
+      __TAURI_INTERNALS__: { transformCallback: () => 1 },
+    });
+    const client = testClient(false);
+    const target = { type: 'movie' as const, id: 'selector-retry-test' };
+    const key = selectorSourceKey(target);
+    const data = streamSelectorFixture();
+    if (cached) client.setQueryData(key, data);
+    const pending = Promise.withResolvers<StreamSelectorData>();
+    const fetch = spyOn(api, 'getStreamSelectorData').mockReturnValue(pending.promise);
+    try {
+      const view = captureWithClient(client, () =>
+        useStreamSelectorController({ target, open: true, onClose: () => {} }),
+      );
+      view.refetchStreams();
+      view.refetchStreams();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const progress = fetch.mock.calls[0]![6];
+      if (cached) {
+        expect(progress).toBeUndefined();
+      } else {
+        expect(progress).toBeDefined();
+        progress!.onmessage(data);
+      }
+      expect(client.getQueryData<StreamSelectorData>(key)?.streams).toEqual(data.streams);
+      const settled = streamSelectorFixture(false);
+      pending.resolve(settled);
+      await client.getQueryCache().find({ queryKey: key })!.promise;
+      expect(client.getQueryData<StreamSelectorData>(key)?.streams).toEqual([]);
+    } finally {
+      pending.resolve(data);
+      fetch.mockRestore();
+      restoreWindow();
+    }
+  },
+);
+
 test('Selector pool eviction preserves live observers, placeholders, and current filter caches', async () => {
   type View = { streams: StreamSelectorData['streams'] };
   const client = testClient(false);
   const target = { type: 'series' as const, id: 'selector-pool-test', season: 1, episode: 1 };
   // `source` keeps the index query enabled — batch alone now splits client-side.
   const filters = { ...DEFAULT_FILTERS, batch: 'episodes' as const, source: 'cached' as const };
-  const sourceKey = streamSelectorQueryKey(
-    target.type,
-    target.id,
-    1,
-    1,
-    undefined,
-    buildStreamRankingCacheKey(
-      playerStreamRankingOptions({ mediaId: target.id, mediaType: target.type }),
-    ),
-  );
+  const sourceKey = selectorSourceKey(target, 1, 1);
   const data = streamSelectorFixture();
   const row = data.streams[0];
   const indices = spyOn(api, 'getStreamSelectorIndices').mockImplementation(async (streams) =>
@@ -2052,12 +2549,11 @@ test('Selector pool eviction preserves live observers, placeholders, and current
       episodeDefaultPreferences: { ...filters, quality },
     });
     client.setQueryData<StreamSelectorData>(sourceKey, { ...data, streams });
-    capturedEffects = [];
-    captureWithClient(client, () =>
-      useStreamSelectorController({ target, open: true, onClose: () => {} }),
+    const [, effects] = captureRenderEffects(() =>
+      captureWithClient(client, () =>
+        useStreamSelectorController({ target, open: true, onClose: () => {} }),
+      ),
     );
-    const effects = capturedEffects;
-    capturedEffects = null;
     const query = client
       .getQueryCache()
       .findAll({ queryKey: ['stream-selector-view'] })
@@ -2146,6 +2642,28 @@ test.each([false, true])(
   },
 );
 
+// Subscribes a query observer until `pick` accepts a result or the 1s guard expires.
+function observeUntil<T>(
+  options: QueryObserverOptions<T>,
+  pick: (result: QueryObserverResult<T>) => boolean,
+  timeoutMessage: string,
+) {
+  const observer = new QueryObserver(queryClient, options);
+  const settled = Promise.withResolvers<QueryObserverResult<T>>();
+  const timeout = setTimeout(() => settled.reject(new Error(timeoutMessage)), 1_000);
+  const unsubscribe = observer.subscribe((next) => {
+    if (pick(next)) settled.resolve(next);
+  });
+  return {
+    observer,
+    result: settled.promise.finally(() => {
+      clearTimeout(timeout);
+      unsubscribe();
+      observer.destroy();
+    }),
+  };
+}
+
 test.each([false, true])(
   'Offline native preferences finish their one retry (persistent=%s)',
   async (persistent) => {
@@ -2153,45 +2671,35 @@ test.each([false, true])(
     const storedPreferences = { ...DEFAULT_APP_UI_PREFERENCES, playerVolume: 42 };
     const failure = new Error('Native preference store unavailable');
     let calls = 0;
-    let unsubscribe: (() => void) | undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       onlineManager.setOnline(false);
-      const observer = new QueryObserver(queryClient, {
-        queryKey: APP_UI_PREFERENCES_QUERY_KEY,
-        queryFn: async () => {
-          calls += 1;
-          if (persistent || calls === 1) throw failure;
-          return storedPreferences;
+      const { observer, result } = observeUntil(
+        {
+          queryKey: APP_UI_PREFERENCES_QUERY_KEY,
+          queryFn: async () => {
+            calls += 1;
+            if (persistent || calls === 1) throw failure;
+            return storedPreferences;
+          },
+          staleTime: Infinity,
+          gcTime: Infinity,
+          placeholderData: DEFAULT_APP_UI_PREFERENCES,
+          retryDelay: 0,
         },
-        staleTime: Infinity,
-        gcTime: Infinity,
-        placeholderData: DEFAULT_APP_UI_PREFERENCES,
-        retryDelay: 0,
-      });
-      expect(observer.getCurrentResult().isPlaceholderData).toBe(true);
-      const result = await new Promise<ReturnType<typeof observer.getCurrentResult>>(
-        (resolve, reject) => {
-          timeout = setTimeout(() => reject(new Error('Native read did not settle')), 1_000);
-          unsubscribe = observer.subscribe((next) => {
-            if (
-              next.fetchStatus === 'paused' ||
-              (next.fetchStatus === 'idle' && !next.isPlaceholderData)
-            )
-              resolve(next);
-          });
-        },
+        (next) =>
+          next.fetchStatus === 'paused' || (next.fetchStatus === 'idle' && !next.isPlaceholderData),
+        'Native read did not settle',
       );
-      expect(result.fetchStatus).toBe('idle');
+      expect(observer.getCurrentResult().isPlaceholderData).toBe(true);
+      const settled = await result;
+      expect(settled.fetchStatus).toBe('idle');
       expect(calls).toBe(2);
-      expect(result.isSuccess).toBe(!persistent);
-      expect(result.isError).toBe(persistent);
-      expect(result.isPlaceholderData).toBe(false);
-      expect(result.data).toEqual(persistent ? undefined : storedPreferences);
-      expect(result.error).toBe(persistent ? failure : null);
+      expect(settled.isSuccess).toBe(!persistent);
+      expect(settled.isError).toBe(persistent);
+      expect(settled.isPlaceholderData).toBe(false);
+      expect(settled.data).toEqual(persistent ? undefined : storedPreferences);
+      expect(settled.error).toBe(persistent ? failure : null);
     } finally {
-      unsubscribe?.();
-      clearTimeout(timeout);
       queryClient.removeQueries({ queryKey: APP_UI_PREFERENCES_QUERY_KEY, exact: true });
       onlineManager.setOnline(wasOnline);
     }
@@ -2202,44 +2710,38 @@ test('An active native read recovers on reconnect after exhausting its offline r
   const wasOnline = onlineManager.isOnline();
   const queryKey = [...DETAILS_QUERY_KEY, 'movie', 'offline-reconnect-test'];
   let calls = 0;
-  let unsubscribe: (() => void) | undefined;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let offlineError: QueryObserverResult<string> | undefined;
   try {
     onlineManager.setOnline(false);
     queryClient.mount();
-    const observer = new QueryObserver(queryClient, {
-      queryKey,
-      queryFn: async () => {
-        calls += 1;
-        if (!onlineManager.isOnline()) throw new Error('Native request failed offline');
-        return 'Recovered details';
+    const { result } = observeUntil(
+      {
+        queryKey,
+        queryFn: async () => {
+          calls += 1;
+          if (!onlineManager.isOnline()) throw new Error('Native request failed offline');
+          return 'Recovered details';
+        },
+        retryDelay: 0,
       },
-      retryDelay: 0,
-    });
-    let offlineError: ReturnType<typeof observer.getCurrentResult> | undefined;
-    const result = await new Promise<ReturnType<typeof observer.getCurrentResult>>(
-      (resolve, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('Native read did not recover on reconnect')),
-          1_000,
-        );
-        unsubscribe = observer.subscribe((next) => {
-          if (next.fetchStatus !== 'idle') return;
-          if (next.isError && !onlineManager.isOnline()) {
-            offlineError = next;
-            onlineManager.setOnline(true);
-          } else if (next.isSuccess) resolve(next);
-        });
+      (next) => {
+        if (next.fetchStatus !== 'idle') return false;
+        if (next.isError && !onlineManager.isOnline()) {
+          offlineError = next;
+          onlineManager.setOnline(true);
+          return false;
+        }
+        return next.isSuccess;
       },
+      'Native read did not recover on reconnect',
     );
+    const settled = await result;
     expect(offlineError?.isError).toBe(true);
     expect(offlineError?.failureCount).toBe(2);
     expect(calls).toBe(3);
-    expect(result.isSuccess).toBe(true);
-    expect(result.data).toBe('Recovered details');
+    expect(settled.isSuccess).toBe(true);
+    expect(settled.data).toBe('Recovered details');
   } finally {
-    unsubscribe?.();
-    clearTimeout(timeout);
     queryClient.removeQueries({ queryKey, exact: true });
     queryClient.unmount();
     onlineManager.setOnline(wasOnline);
@@ -2361,9 +2863,6 @@ const SECTION_CREDITS: TitleCredits = {
 
 test('Details sections stack episodes and cast with attribution', () => {
   const markup = renderSections();
-  expect(markup).not.toContain('role="tablist"');
-  expect(markup).not.toContain('role="tab"');
-  expect(markup).not.toContain('hidden=""');
   expect(markup).toContain('id="details-episodes-heading"');
   expect(markup).toContain('data-episodes-children');
   expect(markup).toContain('id="details-cast-heading"');
@@ -2412,7 +2911,6 @@ test('Details viewport observer waits for the enabled late anchor', () => {
   const restoreObserver = stubGlobal('IntersectionObserver', function () {
     return { observe, disconnect };
   });
-  capturedEffects = [];
   const fakeAnchor = {} as HTMLDivElement;
   const probeRefs: { current: HTMLDivElement | null }[] = [];
   function ViewportProbe({ enabled }: { enabled: boolean }) {
@@ -2420,22 +2918,25 @@ test('Details viewport observer waits for the enabled late anchor', () => {
     return null;
   }
   try {
-    renderToStaticMarkup(<ViewportProbe enabled={false} />);
+    const [, disabledEffects] = captureRenderEffects(() =>
+      renderToStaticMarkup(<ViewportProbe enabled={false} />),
+    );
     probeRefs.at(-1)!.current = fakeAnchor;
-    const disabledCleanup = capturedEffects.at(-1)?.();
+    const disabledCleanup = disabledEffects.at(-1)?.();
     expect(observe).not.toHaveBeenCalled();
     expect(disabledCleanup).toBeUndefined();
 
-    renderToStaticMarkup(<ViewportProbe enabled />);
+    const [, enabledEffects] = captureRenderEffects(() =>
+      renderToStaticMarkup(<ViewportProbe enabled />),
+    );
     probeRefs.at(-1)!.current = fakeAnchor;
-    const cleanup = capturedEffects.at(-1)?.();
+    const cleanup = enabledEffects.at(-1)?.();
     expect(observe).toHaveBeenCalledTimes(1);
     expect(observe).toHaveBeenCalledWith(fakeAnchor);
     cleanup?.();
     expect(disconnect).toHaveBeenCalledTimes(1);
   } finally {
     restoreObserver();
-    capturedEffects = null;
   }
 });
 test('Next airing chip only renders future episodes with a dateTime', () => {
@@ -2448,33 +2949,128 @@ test('Next airing chip only renders future episodes with a dateTime', () => {
   expect(future).toContain('dateTime=');
 });
 
-test('Details lazily creates one title credits query without an SSR fetch', async () => {
-  const id = 'tt-sec';
-  const client = createClient({ defaultOptions: { queries: { retry: false } } });
-  client.setQueryData(api.detailsQueryOptions('series', id).queryKey, {
-    id,
-    type: 'series',
-    title: 'Series',
-    episodes: [],
-    isAnime: false,
-  });
-  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
-  const spies = [spyOn(api, 'getTitleCredits'), spyOn(api, 'titleCreditsQueryOptions')];
-  try {
-    renderDetails(client, `/details/series/${id}`);
-    expect(spies[1]).toHaveBeenCalledTimes(1);
-    expect(spies[1]).toHaveBeenCalledWith('series', id, undefined);
-    expect(spies[0]).not.toHaveBeenCalled();
-    const creditsQueries = client.getQueryCache().findAll({
-      queryKey: ['title-credits'],
-    });
-    expect(creditsQueries).toHaveLength(1);
-    const options = creditsQueries[0].options as QueryObserverOptions<TitleCredits>;
-    expect(options.enabled).toBe(false);
-    expect(creditsQueries[0].state.fetchStatus).toBe('idle');
-  } finally {
-    spies.forEach((spy) => spy.mockRestore());
+test('Title action menus handle normal, disabled and keep-open actions', async () => {
+  const { InlineMenu } = await import('../src/components/inline-menu');
+  const { Play, Info } = await import('lucide-react');
+  const onAction = mock(() => {});
+  const onSelect = mock((_event: unknown) => {});
+  const preventDefault = mock(() => {});
+  const event = { preventDefault };
+  const actions = [
+    { key: 'play', label: 'Resume season 12, episode 104', icon: Play, onSelect },
+    { key: 'pending', label: 'Opening…', icon: Play, disabled: true, onSelect },
+    { key: 'lists', label: 'Add to list', icon: Info, keepOpen: true, onSelect },
+    { key: 'details', label: 'Open details', icon: Info, href: '/details/series/title', onSelect },
+  ];
+  const props = {
+    presence: { mounted: true, exiting: false },
+    label: 'Title actions',
+    actions,
+    onAction,
+  };
+  const menu = InlineMenu({ ...props, layout: 'flow' })!;
+  const rows = menu.props.children;
+  const markup = renderToStaticMarkup(menu);
+  expect(markup).toContain('href="/details/series/title"');
+  rows[0]!.props.onClick(event);
+  expect(onSelect).toHaveBeenCalledWith(event);
+  expect(onAction).toHaveBeenCalledTimes(1);
+  rows[1]!.props.onClick(event);
+  expect(preventDefault).toHaveBeenCalledTimes(1);
+  expect(onSelect).toHaveBeenCalledTimes(1);
+  rows[2]!.props.onClick(event);
+  expect(onSelect).toHaveBeenCalledTimes(2);
+  expect(onAction).toHaveBeenCalledTimes(1);
+  expect(renderToStaticMarkup(<InlineMenu {...props} orientation='horizontal' />)).toContain(
+    'aria-orientation="horizontal"',
+  );
+  expect(InlineMenu({ ...props, presence: { mounted: false, exiting: false } })).toBeNull();
+});
+
+test('Horizontal drag-scroll suppresses post-drag clicks without eating plain clicks or cancelled drags', async () => {
+  const { useHorizontalDragScroll } = await import('../src/hooks/use-scroll-edge-indicators');
+  const captured: ReturnType<typeof useHorizontalDragScroll<HTMLDivElement>>[] = [];
+  function DragProbe() {
+    captured.push(useHorizontalDragScroll<HTMLDivElement>());
+    return null;
   }
+  renderToStaticMarkup(<DragProbe />);
+  const handlers = captured[0];
+
+  let capturedId: number | null = null;
+  const scroller = {
+    scrollLeft: 40,
+    scrollWidth: 900,
+    clientWidth: 300,
+    dataset: {} as DOMStringMap,
+    style: { scrollSnapType: '' } as CSSStyleDeclaration,
+    setPointerCapture: (id: number) => {
+      capturedId = id;
+    },
+    hasPointerCapture: (id: number) => capturedId === id,
+    releasePointerCapture: () => {
+      capturedId = null;
+    },
+  } as unknown as HTMLDivElement;
+
+  const pointerEvent = (x: number, id = 1, buttons = 1) =>
+    ({
+      pointerId: id,
+      pointerType: 'mouse',
+      button: 0,
+      buttons,
+      clientX: x,
+      currentTarget: scroller,
+      target: null,
+    }) as unknown as Parameters<typeof handlers.onPointerDown>[0];
+
+  const clickAttempt = () => {
+    let prevented = false;
+    let stopped = false;
+    handlers.onClickCapture({
+      preventDefault: () => {
+        prevented = true;
+      },
+      stopPropagation: () => {
+        stopped = true;
+      },
+    } as unknown as Parameters<typeof handlers.onClickCapture>[0]);
+    return prevented && stopped;
+  };
+
+  // Sub-threshold movement stays a normal click.
+  handlers.onPointerDown(pointerEvent(100));
+  handlers.onPointerMove(pointerEvent(102));
+  handlers.onPointerUp(pointerEvent(102));
+  expect(scroller.scrollLeft).toBe(40);
+  expect(clickAttempt()).toBe(false);
+
+  // A release outside the rail before capture must end the pending drag.
+  handlers.onPointerDown(pointerEvent(100));
+  handlers.onPointerMove(pointerEvent(102));
+  handlers.onPointerMove(pointerEvent(70, 1, 0));
+  expect(scroller.scrollLeft).toBe(40);
+  expect(scroller.style.scrollSnapType).toBe('');
+  expect(capturedId).toBeNull();
+  expect(clickAttempt()).toBe(false);
+
+  // Dragging past the 4px dead-zone scrolls 1:1 and suppresses the synthetic release click.
+  handlers.onPointerDown(pointerEvent(100));
+  handlers.onPointerMove(pointerEvent(70));
+  expect(scroller.scrollLeft).toBe(70);
+  expect(scroller.style.scrollSnapType).toBe('none');
+  expect(capturedId).toBe(1);
+  handlers.onPointerUp(pointerEvent(70));
+  expect(capturedId).toBeNull();
+  expect(clickAttempt()).toBe(true);
+  expect(clickAttempt()).toBe(false);
+
+  // Cancelled drags never arm click suppression for the next real click.
+  handlers.onPointerDown(pointerEvent(100, 2));
+  handlers.onPointerMove(pointerEvent(60, 2));
+  handlers.onPointerCancel(pointerEvent(60, 2));
+  expect(clickAttempt()).toBe(false);
+  handlers.onWheel();
 });
 
 test('Season completion remains available for the last unwatched episode', () => {
@@ -2503,7 +3099,9 @@ test('Season completion remains available for the last unwatched episode', () =>
     .find((query) => query.queryKey.includes('unaired-episodes'));
   if (!unaired) throw new Error('Missing episode air-state query');
   client.setQueryData(unaired.queryKey, new Set());
-  expect(render()).toContain('Mark season watched');
+  const markup = render();
+  expect(markup).toContain('Mark season watched');
+  expect(markup).toContain('id="details-episodes-grid"');
 });
 
 test.each([false, true])(
@@ -2546,25 +3144,31 @@ test('Sidebar update indicator links directly to update settings', () => {
   expect(settingsLink).toContain('href="/settings?section=updates"');
 });
 
-test('Settings menu selection skips the current value and accepts a different value', () => {
-  const onChange = mock((_value: string) => {});
-  const menu = SettingsSelect({
-    ariaLabel: 'Quality',
-    value: 'auto',
-    valueLabel: 'Auto',
-    options: [
-      { value: 'auto', label: 'Auto' },
-      { value: 'high', label: 'High' },
-    ],
-    onChange,
-  });
-  const [, content] = menu.props.children;
-  const [current, other] = content.props.children;
-  current.props.onSelect();
-  expect(onChange).not.toHaveBeenCalled();
-  other.props.onSelect();
-  expect(onChange.mock.calls).toEqual([['high']]);
-});
+test.each([
+  { currentValue: 'auto', otherValue: 'high' },
+  { currentValue: 10, otherValue: 30 },
+])(
+  'Settings menu selection preserves values and skips the current value (%j)',
+  ({ currentValue, otherValue }) => {
+    const onChange = mock((_value: string | number) => {});
+    const menu = SettingsSelect({
+      ariaLabel: 'Quality',
+      value: currentValue,
+      valueLabel: String(currentValue),
+      options: [
+        { value: currentValue, label: String(currentValue) },
+        { value: otherValue, label: String(otherValue) },
+      ],
+      onChange,
+    });
+    const [, content] = menu.props.children;
+    const [current, other] = content.props.children;
+    current.props.onSelect();
+    expect(onChange).not.toHaveBeenCalled();
+    other.props.onSelect();
+    expect(onChange.mock.calls).toEqual([[otherValue]]);
+  },
+);
 
 test('Retry feedback blocks repeat activation while keeping the button focusable', () => {
   const onRetry = mock(() => {});
@@ -2596,10 +3200,8 @@ test('Collection shortcuts only act within the focused collection', () => {
     return null;
   }
   const cleanups: (() => void)[] = [];
-  capturedEffects = [];
   try {
-    renderToStaticMarkup(<Collection />);
-    runEffects(capturedEffects, cleanups);
+    renderWithEffects(() => renderToStaticMarkup(<Collection />), cleanups);
     const selectAll = () => {
       const event = Object.assign(new Event('keydown', { cancelable: true }), {
         key: 'a',

@@ -45,6 +45,12 @@
     display: none;
   }
 
+  @media (prefers-reduced-motion: no-preference) {
+    #root.player-background-restoring {
+      transition: background-color 400ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+  }
+
   :root {
     --app-accent-rgb: 255 255 255;
     /* Ambient tint strength 0..1 — the glow slider drives it live. */
@@ -338,10 +344,10 @@
   .nav-sliding-pill,
   .nav-sliding-bar {
     transition:
-      transform 190ms cubic-bezier(0.22, 1, 0.36, 1),
-      width 190ms cubic-bezier(0.22, 1, 0.36, 1),
-      height 190ms cubic-bezier(0.22, 1, 0.36, 1),
-      opacity 140ms ease;
+      transform 300ms cubic-bezier(0.25, 0.1, 0.25, 1),
+      width 300ms cubic-bezier(0.25, 0.1, 0.25, 1),
+      height 300ms cubic-bezier(0.25, 0.1, 0.25, 1),
+      opacity 180ms ease;
   }
 
   .scrollbar-hide {

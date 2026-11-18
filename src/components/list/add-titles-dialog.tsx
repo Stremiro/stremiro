@@ -47,6 +47,7 @@ export function AddTitlesDialog({
   onOpenChange: (open: boolean) => void;
   returnFocusRef: RefObject<HTMLElement | null>;
 }) {
+  // The compiler caches getVirtualItems() on the stable virtualizer instance, freezing rows on scroll.
   'use no memo';
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
@@ -305,7 +306,7 @@ export function AddTitlesDialog({
                           {mediaTypeLabel(item.type)}
                         </span>
                       </span>
-                      {inList && <span className='text-[10px] text-zinc-500'>In list</span>}
+                      {inList && <span className='text-[11px] text-zinc-500'>In list</span>}
                       <span
                         aria-hidden='true'
                         className={cn(

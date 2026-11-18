@@ -117,7 +117,12 @@ impl<V: Clone> TtlCache<V> {
     }
 
     pub(crate) fn purge_expired(&self) {
-        Self::retain_fresh(&mut lock_or_recover(&self.state), Instant::now());
+        let mut state = lock_or_recover(&self.state);
+        Self::retain_fresh(&mut state, Instant::now());
+        // Idle sweeps reclaim empty tables without rehashing populated caches.
+        if state.entries.is_empty() {
+            state.entries.shrink_to_fit();
+        }
     }
 
     fn retain_fresh(state: &mut CacheState<V>, now: Instant) {
@@ -131,53 +136,53 @@ impl<V: Clone> TtlCache<V> {
 
     pub(crate) fn clear(&self) {
         let mut state = lock_or_recover(&self.state);
-        state.entries.clear();
+        state.entries = HashMap::new();
         state.next_expiry = None;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        lock_or_recover(&self.state).entries.len()
     }
 }
 
-/// Single-flight registry keyed like the sibling cache: callers for one key
-/// wait on the leader and re-read the cache. Orphans (dropped fetch futures)
-/// sweep on insert past `sweep_at`.
+/// Single-flight registry keyed like the sibling cache. Callers for one key
+/// wait on the leader and re-read the cache.
+#[derive(Default)]
 pub(crate) struct InFlight {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    sweep_at: usize,
 }
 
 impl InFlight {
-    pub(crate) fn new(sweep_at: usize) -> Self {
-        Self {
-            locks: Mutex::new(HashMap::new()),
-            sweep_at,
+    pub(crate) fn claim<'a>(&'a self, key: &'a str) -> InFlightClaim<'a> {
+        let mut locks = lock_or_recover(&self.locks);
+        let lock = match locks.get(key) {
+            Some(lock) => Arc::clone(lock),
+            None => Arc::clone(locks.entry(key.to_owned()).or_default()),
+        };
+        InFlightClaim {
+            registry: self,
+            key,
+            lock: Some(lock),
         }
     }
+}
 
-    pub(crate) fn claim(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = lock_or_recover(&self.locks);
-        if locks.len() >= self.sweep_at {
-            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
-        }
-        // Get-first: `entry` would allocate the key String even on repeat hits.
-        if let Some(lock) = locks.get(key) {
-            return lock.clone();
-        }
-        locks.entry(key.to_string()).or_default().clone()
+pub(crate) struct InFlightClaim<'a> {
+    registry: &'a InFlight,
+    key: &'a str,
+    lock: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl InFlightClaim<'_> {
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lock.as_ref().expect("live fetch claim").lock().await
     }
+}
 
-    /// Removes the key only while this caller is provably the last holder —
-    /// under the map mutex, so no waiter slips in and no stale release evicts
-    /// a replacement lock.
-    pub(crate) fn release(&self, key: &str, key_lock: &Arc<tokio::sync::Mutex<()>>) {
-        let mut locks = lock_or_recover(&self.locks);
-        let last_holder = matches!(locks.get(key), Some(mapped) if Arc::ptr_eq(mapped, key_lock))
-            && Arc::strong_count(key_lock) == 2;
-        if last_holder {
-            locks.remove(key);
+impl Drop for InFlightClaim<'_> {
+    fn drop(&mut self) {
+        // Count after dropping our reference under the map lock so concurrent drops
+        // cannot both leave the entry behind.
+        let mut locks = lock_or_recover(&self.registry.locks);
+        drop(self.lock.take());
+        if matches!(locks.get(self.key), Some(lock) if Arc::strong_count(lock) == 1) {
+            locks.remove(self.key);
         }
     }
 }
@@ -464,85 +469,115 @@ impl FetchContract<'_> {
 
         // Single-flight: wait on the leader, then re-read its cached result.
         let key_lock = self.in_flight.claim(key);
-        let result = async {
-            let _fetch_permit = key_lock.lock().await;
-            if self.generation.load(Ordering::SeqCst) != generation {
-                return Err("Addon request was superseded. Please try again.".to_string());
+        let _fetch_permit = key_lock.lock().await;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err("Addon request was superseded. Please try again.".to_string());
+        }
+        if let Some(cached) = cache.get_fresh(key, not_before) {
+            return Ok(cached);
+        }
+        if let Some(error) = self.failure_cache.get(key) {
+            return Err(error);
+        }
+        // The leader may have marked the addon while this caller waited.
+        if probe_guard.is_none() {
+            match self.fetch_failures.gate(addon_key) {
+                CooldownGate::Cooldown => return Err(self.cooldown_message.to_string()),
+                CooldownGate::Open => {}
+                CooldownGate::Probe(guard) => probe_guard = Some(guard),
             }
-            if let Some(cached) = cache.get_fresh(key, not_before) {
-                return Ok(cached);
-            }
-            if let Some(error) = self.failure_cache.get(key) {
-                return Err(error);
-            }
-            // The leader may have marked the addon while this caller waited.
-            if probe_guard.is_none() {
-                match self.fetch_failures.gate(addon_key) {
-                    CooldownGate::Cooldown => return Err(self.cooldown_message.to_string()),
-                    CooldownGate::Open => {}
-                    CooldownGate::Probe(guard) => probe_guard = Some(guard),
+        }
+        let mut attempt = 0u8;
+        loop {
+            if attempt > 0 {
+                tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
+                if self.generation.load(Ordering::SeqCst) != generation {
+                    return Err("Addon request was superseded. Please try again.".to_string());
                 }
             }
-            let mut attempt = 0u8;
-            loop {
-                if attempt > 0 {
-                    tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
-                    if self.generation.load(Ordering::SeqCst) != generation {
-                        return Err("Addon request was superseded. Please try again.".to_string());
-                    }
+            let started_at = Instant::now();
+            match fetch().await {
+                Ok(value) => {
+                    self.fetch_failures
+                        .clear_for_success(addon_key, self.generation, generation);
+                    cache.put(key, value.clone(), is_empty(&value), || {
+                        self.generation.load(Ordering::SeqCst) == generation
+                    });
+                    return Ok(value);
                 }
-                let started_at = Instant::now();
-                match fetch().await {
-                    Ok(value) => {
-                        self.fetch_failures.clear_for_success(
-                            addon_key,
-                            self.generation,
-                            generation,
-                        );
-                        cache.put(key, value.clone(), is_empty(&value), || {
-                            self.generation.load(Ordering::SeqCst) == generation
-                        });
-                        return Ok(value);
-                    }
-                    Err(FetchFailure::Fatal(error)) => {
-                        self.cache_failure(key, &error, generation);
-                        self.fetch_failures.clear_for_success(
-                            addon_key,
-                            self.generation,
-                            generation,
-                        );
-                        return Err(error);
-                    }
-                    Err(FetchFailure::Retryable(error)) => {
-                        attempt += 1;
-                        if attempt >= FETCH_ATTEMPTS || started_at.elapsed() >= self.request_timeout
-                        {
-                            if let Some(probe) = &probe_guard {
-                                self.fetch_failures.note_probe_failure(
-                                    addon_key,
-                                    probe.probe_id,
-                                    self.generation,
-                                    generation,
-                                );
-                            } else {
-                                self.fetch_failures
-                                    .note(addon_key, self.generation, generation);
-                            }
-                            return Err(error);
+                Err(FetchFailure::Fatal(error)) => {
+                    self.cache_failure(key, &error, generation);
+                    self.fetch_failures
+                        .clear_for_success(addon_key, self.generation, generation);
+                    return Err(error);
+                }
+                Err(FetchFailure::Retryable(error)) => {
+                    attempt += 1;
+                    if attempt >= FETCH_ATTEMPTS || started_at.elapsed() >= self.request_timeout {
+                        if let Some(probe) = &probe_guard {
+                            self.fetch_failures.note_probe_failure(
+                                addon_key,
+                                probe.probe_id,
+                                self.generation,
+                                generation,
+                            );
+                        } else {
+                            self.fetch_failures
+                                .note(addon_key, self.generation, generation);
                         }
+                        return Err(error);
                     }
                 }
             }
         }
-        .await;
-        self.in_flight.release(key, &key_lock);
-        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn len<V>(cache: &TtlCache<V>) -> usize {
+        lock_or_recover(&cache.state).entries.len()
+    }
+
+    fn marked_cooldown() -> (FetchFailureCooldown, AtomicU64) {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
+        let generation = AtomicU64::new(0);
+        cooldown.note("k", &generation, 0);
+        (cooldown, generation)
+    }
+
+    struct Harness {
+        cache: TtlCache<u32>,
+        failures: TtlCache<String>,
+        cooldown: FetchFailureCooldown,
+        in_flight: InFlight,
+        generation: AtomicU64,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self {
+                cache: TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30)),
+                failures: TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30)),
+                cooldown: FetchFailureCooldown::new(Duration::from_secs(60)),
+                in_flight: InFlight::default(),
+                generation: AtomicU64::new(0),
+            }
+        }
+
+        fn contract(&self, request_timeout: Duration) -> FetchContract<'_> {
+            FetchContract {
+                failure_cache: &self.failures,
+                fetch_failures: &self.cooldown,
+                in_flight: &self.in_flight,
+                generation: &self.generation,
+                request_timeout,
+                cooldown_message: "cooling",
+            }
+        }
+    }
 
     #[test]
     fn cache_roundtrips_stays_bounded_and_clears() {
@@ -553,34 +588,36 @@ mod tests {
         assert_eq!(cache.get("key-0"), Some(0));
         assert_eq!(cache.get("key-3"), Some(3));
         cache.put("key-4", 4, false, || true);
-        assert_eq!(cache.len(), 4);
+        assert_eq!(len(&cache), 4);
         assert_eq!(cache.get("key-4"), Some(4));
         cache.clear();
-        assert_eq!(cache.len(), 0);
+        assert_eq!(len(&cache), 0);
+        assert_eq!(lock_or_recover(&cache.state).entries.capacity(), 0);
         for index in 0..5 {
             assert_eq!(cache.get(&format!("key-{index}")), None);
         }
+        cache.put_for("expired", 5, Duration::ZERO, || true);
+        cache.purge_expired();
+        assert_eq!(lock_or_recover(&cache.state).entries.capacity(), 0);
     }
 
     #[test]
     fn transient_http_statuses_retry_without_changing_rate_limit_policy() {
-        for status in [408, 500, 502, 503, 504] {
-            let failure = FetchFailure::from_http_status(
-                reqwest::StatusCode::from_u16(status).unwrap(),
-                status.to_string(),
-            );
-            assert!(
-                matches!(failure, FetchFailure::Retryable(message) if message == status.to_string())
-            );
-        }
-        for status in [400, 401, 403, 404, 409, 422, 429, 501, 505] {
-            let failure = FetchFailure::from_http_status(
-                reqwest::StatusCode::from_u16(status).unwrap(),
-                status.to_string(),
-            );
-            assert!(
-                matches!(failure, FetchFailure::Fatal(message) if message == status.to_string())
-            );
+        for (statuses, retryable) in [
+            (&[408, 500, 502, 503, 504][..], true),
+            (&[400, 401, 403, 404, 409, 422, 429, 501, 505], false),
+        ] {
+            for &status in statuses {
+                let message = status.to_string();
+                let failure = FetchFailure::from_http_status(
+                    reqwest::StatusCode::from_u16(status).unwrap(),
+                    message.clone(),
+                );
+                assert!(match failure {
+                    FetchFailure::Retryable(text) => retryable && text == message,
+                    FetchFailure::Fatal(text) => !retryable && text == message,
+                });
+            }
         }
     }
 
@@ -641,7 +678,7 @@ mod tests {
             retained.upgrade().is_none(),
             "insert must sweep expired payloads"
         );
-        assert_eq!(cache.len(), 1);
+        assert_eq!(len(&cache), 1);
         assert_eq!(cache.get("fresh").as_deref(), Some(&vec![1]));
     }
 
@@ -697,7 +734,7 @@ mod tests {
             retained.upgrade().is_some(),
             "a revoked write must not sweep"
         );
-        assert_eq!(cache.len(), 2);
+        assert_eq!(len(&cache), 2);
         assert!(cache.get("expired").is_none());
         assert!(retained.upgrade().is_none());
         cache.purge_expired();
@@ -711,54 +748,25 @@ mod tests {
         assert_eq!(lock_or_recover(&cache.state).next_expiry, None);
         cache.put("after-clear", Arc::new(vec![3]), false, || true);
         cache.purge_expired();
-        assert_eq!(cache.len(), 0);
+        assert_eq!(len(&cache), 0);
     }
 
-    // Observation helpers must not clone the stored Arc — an extra strong
-    // ref would masquerade as a live claimant to `release`'s count check.
-    fn has_entry(inflight: &InFlight, key: &str) -> bool {
-        lock_or_recover(&inflight.locks).contains_key(key)
-    }
-
-    fn mapped_is(inflight: &InFlight, key: &str, lock: &Arc<tokio::sync::Mutex<()>>) -> bool {
-        matches!(lock_or_recover(&inflight.locks).get(key), Some(mapped) if Arc::ptr_eq(mapped, lock))
-    }
-
-    #[test]
-    fn release_keeps_entry_while_a_waiter_still_holds_the_lock() {
-        let inflight = InFlight::new(8);
-        let leader = inflight.claim("k");
-        let waiter = inflight.claim("k");
-        assert!(Arc::ptr_eq(&leader, &waiter));
-
-        // First release belongs to one of two live claimants: the entry must
-        // stay so the remaining holder still owns single-flight for the key.
-        inflight.release("k", &leader);
-        assert!(mapped_is(&inflight, "k", &waiter));
-
-        // Callers drop their claim Arc after release returns; with the
-        // leader's clone gone the waiter's release is the last holder's.
+    #[tokio::test]
+    async fn cancelled_claims_release_the_key_after_the_last_waiter_leaves() {
+        let inflight = InFlight::default();
+        let leader = inflight.claim("key");
+        let permit = leader.lock().await;
+        let waiting = async {
+            let follower = inflight.claim("key");
+            let _permit = follower.lock().await;
+        };
+        let mut waiting = Box::pin(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        drop(waiting);
+        assert!(lock_or_recover(&inflight.locks).contains_key("key"));
+        drop(permit);
         drop(leader);
-        inflight.release("k", &waiter);
-        assert!(!has_entry(&inflight, "k"));
-
-        let fresh = inflight.claim("k");
-        assert!(!Arc::ptr_eq(&fresh, &waiter));
-    }
-
-    #[test]
-    fn stale_release_cannot_evict_a_replacement_lock() {
-        let inflight = InFlight::new(8);
-        let stale = inflight.claim("k");
-        inflight.release("k", &stale);
-
-        // A later claim parks a different Arc at the same key.
-        let replacement = inflight.claim("k");
-        assert!(!Arc::ptr_eq(&replacement, &stale));
-
-        // The dropped fetch's late release must not remove the replacement.
-        inflight.release("k", &stale);
-        assert!(mapped_is(&inflight, "k", &replacement));
+        assert!(lock_or_recover(&inflight.locks).is_empty());
     }
 
     #[test]
@@ -783,9 +791,7 @@ mod tests {
 
     #[test]
     fn cancelled_probe_timeout_re_arms_with_a_gap_before_the_next_probe() {
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let generation = AtomicU64::new(0);
-        cooldown.note("k", &generation, 0);
+        let (cooldown, generation) = marked_cooldown();
         let gate = cooldown.gate("k");
         assert!(matches!(gate, CooldownGate::Probe(_)));
 
@@ -798,9 +804,7 @@ mod tests {
 
     #[test]
     fn late_ordinary_failure_preserves_the_active_probe_claim() {
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let generation = AtomicU64::new(0);
-        cooldown.note("k", &generation, 0);
+        let (cooldown, generation) = marked_cooldown();
         let gate = cooldown.gate("k");
         assert!(matches!(gate, CooldownGate::Probe(_)));
 
@@ -812,9 +816,7 @@ mod tests {
 
     #[test]
     fn failed_probe_re_arms_with_a_gap_before_the_next_probe() {
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let generation = AtomicU64::new(0);
-        cooldown.note("k", &generation, 0);
+        let (cooldown, generation) = marked_cooldown();
 
         let CooldownGate::Probe(gate) = cooldown.gate("k") else {
             panic!("probe expected");
@@ -830,9 +832,7 @@ mod tests {
 
     #[test]
     fn failed_probe_does_not_reinstall_a_lifted_mark() {
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let generation = AtomicU64::new(0);
-        cooldown.note("k", &generation, 0);
+        let (cooldown, generation) = marked_cooldown();
 
         let CooldownGate::Probe(gate) = cooldown.gate("k") else {
             panic!("probe expected");
@@ -849,9 +849,7 @@ mod tests {
 
     #[test]
     fn stale_probe_guard_cannot_release_a_newer_claim() {
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let generation = AtomicU64::new(0);
-        cooldown.note("k", &generation, 0);
+        let (cooldown, generation) = marked_cooldown();
 
         let CooldownGate::Probe(stale) = cooldown.gate("k") else {
             panic!("probe expected");
@@ -873,24 +871,13 @@ mod tests {
 
     #[tokio::test]
     async fn probe_success_lifts_the_mark_early_for_the_next_caller() {
-        let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
-        let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let in_flight = InFlight::new(8);
-        let generation = AtomicU64::new(0);
-        let contract = FetchContract {
-            failure_cache: &failures,
-            fetch_failures: &cooldown,
-            in_flight: &in_flight,
-            generation: &generation,
-            request_timeout: Duration::from_secs(20),
-            cooldown_message: "cooling",
-        };
+        let h = Harness::new();
+        let contract = h.contract(Duration::from_secs(20));
 
         let attempts = AtomicU64::new(0);
         let outcome: Result<u32, String> = contract
             .run(
-                &cache,
+                &h.cache,
                 "k",
                 "addon",
                 |_| false,
@@ -907,46 +894,35 @@ mod tests {
             .await;
         assert!(outcome.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), FETCH_ATTEMPTS as u64);
-        assert_eq!(failures.get("k"), None);
-        assert!(cooldown.cooling_down("addon"));
+        assert_eq!(h.failures.get("k"), None);
+        assert!(h.cooldown.cooling_down("addon"));
 
         // The first retryable failure marked the addon; the next call rides
         // through as the liveness probe — and its success lifts the mark.
         let recovered: Result<u32, String> = contract
-            .run(&cache, "k", "addon", |_| false, || async { Ok(7u32) })
+            .run(&h.cache, "k", "addon", |_| false, || async { Ok(7u32) })
             .await;
         assert_eq!(recovered, Ok(7));
-        assert!(!cooldown.cooling_down("addon"));
+        assert!(!h.cooldown.cooling_down("addon"));
 
         // Mark lifted: callers fetch normally again.
         let after: Result<u32, String> = contract
-            .run(&cache, "k3", "addon", |_| false, || async { Ok(9u32) })
+            .run(&h.cache, "k3", "addon", |_| false, || async { Ok(9u32) })
             .await;
         assert_eq!(after, Ok(9));
     }
 
     #[tokio::test]
     async fn fatal_response_during_probe_lifts_the_transport_mark() {
-        let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
-        let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
-        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-        let in_flight = InFlight::new(8);
-        let generation = AtomicU64::new(0);
-        let contract = FetchContract {
-            failure_cache: &failures,
-            fetch_failures: &cooldown,
-            in_flight: &in_flight,
-            generation: &generation,
-            request_timeout: Duration::from_secs(20),
-            cooldown_message: "cooling",
-        };
-        cooldown.note("addon", &generation, 0);
+        let h = Harness::new();
+        let contract = h.contract(Duration::from_secs(20));
+        h.cooldown.note("addon", &h.generation, 0);
 
         // A status/parse failure is still a response — the host answered,
         // so the transport mark is wrong and must lift.
         let outcome: Result<u32, String> = contract
             .run(
-                &cache,
+                &h.cache,
                 "k",
                 "addon",
                 |_| false,
@@ -954,31 +930,20 @@ mod tests {
             )
             .await;
         assert!(outcome.is_err());
-        assert!(!cooldown.cooling_down("addon"));
+        assert!(!h.cooldown.cooling_down("addon"));
     }
 
     #[tokio::test(start_paused = true)]
     async fn cleared_fetches_cannot_retry_or_repopulate_caches_and_cooldowns() {
         for outcome in 0..4 {
-            let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
-            let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
-            let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
-            let in_flight = InFlight::new(8);
-            let generation = AtomicU64::new(0);
-            let contract = FetchContract {
-                failure_cache: &failures,
-                fetch_failures: &cooldown,
-                in_flight: &in_flight,
-                generation: &generation,
-                request_timeout: Duration::from_secs(if outcome == 3 { 20 } else { 0 }),
-                cooldown_message: "cooling",
-            };
+            let h = Harness::new();
+            let contract = h.contract(Duration::from_secs(if outcome == 3 { 20 } else { 0 }));
             let finish_leader = tokio::sync::Notify::new();
             let leader_loads = AtomicU64::new(0);
             let obsolete_loads = AtomicU64::new(0);
             let fresh_loads = AtomicU64::new(0);
             let mut leader = std::pin::pin!(contract.run(
-                &cache,
+                &h.cache,
                 "k",
                 "addon",
                 |_| false,
@@ -994,7 +959,7 @@ mod tests {
                 },
             ));
             let mut follower = std::pin::pin!(contract.run(
-                &cache,
+                &h.cache,
                 "k",
                 "addon",
                 |_| false,
@@ -1010,12 +975,12 @@ mod tests {
                 finish_leader.notify_one();
                 assert!(futures_util::poll!(leader.as_mut()).is_pending());
             }
-            generation.fetch_add(1, Ordering::SeqCst);
-            cache.clear();
-            failures.clear();
-            cooldown.clear();
+            h.generation.fetch_add(1, Ordering::SeqCst);
+            h.cache.clear();
+            h.failures.clear();
+            h.cooldown.clear();
             let mut fresh = std::pin::pin!(contract.run(
-                &cache,
+                &h.cache,
                 "k",
                 "addon",
                 |_| false,
@@ -1034,9 +999,9 @@ mod tests {
             };
             assert_eq!(leader.await, expected);
             assert_eq!(leader_loads.load(Ordering::SeqCst), 1);
-            assert_eq!(cache.get("k"), None);
-            assert_eq!(failures.get("k"), None);
-            assert!(!cooldown.cooling_down("addon"));
+            assert_eq!(h.cache.get("k"), None);
+            assert_eq!(h.failures.get("k"), None);
+            assert!(!h.cooldown.cooling_down("addon"));
             assert!(futures_util::poll!(fresh.as_mut()).is_pending());
             assert_eq!(fresh_loads.load(Ordering::SeqCst), 0);
             assert_eq!(
@@ -1051,10 +1016,10 @@ mod tests {
                 std::task::Poll::Ready(Ok(3))
             );
             assert_eq!(fresh_loads.load(Ordering::SeqCst), 1);
-            assert_eq!(cache.get("k"), Some(3));
-            assert_eq!(failures.get("k"), None);
-            assert!(!cooldown.cooling_down("addon"));
-            assert!(!has_entry(&in_flight, "k"));
+            assert_eq!(h.cache.get("k"), Some(3));
+            assert_eq!(h.failures.get("k"), None);
+            assert!(!h.cooldown.cooling_down("addon"));
+            assert!(lock_or_recover(&h.in_flight.locks).is_empty());
         }
     }
 }

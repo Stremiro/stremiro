@@ -1,6 +1,6 @@
 import type { LucideIcon } from 'lucide-react';
 import type { ComponentProps, ReactNode } from 'react';
-import { cn, ICON_CHIP_CLASS } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 
 /** Elevated content surface — the one card style shared by settings, calendar and panel states. */
 export function PageCard({ children, className, ...props }: ComponentProps<'div'>) {
@@ -8,7 +8,7 @@ export function PageCard({ children, className, ...props }: ComponentProps<'div'
     <div
       {...props}
       className={cn(
-        'relative min-w-0 overflow-hidden rounded-xl border border-white/[0.07] bg-linear-to-b from-white/[0.04] to-white/[0.02] shadow-[0_1px_2px_rgba(0,0,0,0.3),0_12px_30px_-18px_rgba(0,0,0,0.55)] transition-colors duration-300 motion-reduce:transition-none',
+        'relative min-w-0 overflow-hidden rounded-xl border border-white/[0.08] bg-[#121214] transition-colors duration-200 motion-reduce:transition-none',
         className,
       )}
     >
@@ -45,7 +45,7 @@ export function PageSectionHeader({
     <div className='flex flex-wrap items-start justify-between gap-3 px-1 pb-3'>
       <div className='flex min-w-0 flex-1 basis-48 items-start gap-3'>
         {Icon ? (
-          <span aria-hidden='true' className={cn(ICON_CHIP_CLASS, 'size-9 shrink-0 rounded-lg')}>
+          <span aria-hidden='true' className='flex size-9 shrink-0 items-center justify-center'>
             <Icon className='size-[17px] text-(--accent-nav)' strokeWidth={1.75} />
           </span>
         ) : null}

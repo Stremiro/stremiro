@@ -77,10 +77,6 @@ export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] l
 export const PAGE_NOTICE_CLASS =
   'flex items-center gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[13px] leading-relaxed text-zinc-400';
 
-/** Gradient icon tile next to section headers and empty states — callers add size + radius. */
-export const ICON_CHIP_CLASS =
-  'flex items-center justify-center bg-linear-to-b from-white/[0.08] to-white/[0.02] ring-1 ring-inset ring-white/[0.08]';
-
 /** Bare title icons (rails, page h1s) settle in just after the page fade — callers add size. */
 export const TITLE_ICON_CLASS =
   'shrink-0 text-white motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95 motion-safe:duration-500 motion-safe:fill-mode-backwards motion-safe:[animation-delay:120ms]';

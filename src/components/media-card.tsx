@@ -3,9 +3,8 @@ import {
   Bookmark,
   Check,
   ChevronLeft,
-  Info,
+  Heart,
   Library,
-  Link2,
   Play,
   SkipForward,
   Star,
@@ -24,6 +23,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import {
   currentPathWithSearch,
@@ -34,7 +34,6 @@ import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { InlineMenu, INLINE_MENU_EXIT_MS } from '@/components/inline-menu';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { RemoteImage } from '@/components/remote-image';
-import { SaveIndicator } from '@/components/ui/button';
 import { IndeterminateBar } from '@/components/ui/skeleton';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { SelectionCheck, WatchStatusIcon } from '@/components/watch-status-icon';
@@ -52,16 +51,13 @@ import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePointerIdle } from '@/hooks/use-pointer-idle';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
-import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { api, type MediaItem, WATCH_STATUS_LABELS, type WatchStatus } from '@/lib/api';
-import { buildTitleShareLink } from '@/lib/app-links';
 import { pendingDetailsPrefetch } from '@/lib/details-prefetch';
 import {
   buildDetailsRoute,
   resolvePlayerRouteMediaType,
   type PlayerRouteMediaType,
 } from '@/lib/player-navigation';
-import { copyText } from '@/lib/notify';
 import { usePlayerSession } from '@/lib/player-session';
 import { routeChunks, warmPlayerChunk } from '@/lib/route-chunks';
 import { searchGenrePath } from '@/lib/search-page-state';
@@ -71,7 +67,9 @@ import {
   formatRuntime,
   isHttpUrl,
   mediaTypeLabel,
+  prefersReducedMotion,
   primaryGenrePills,
+  subscribeReducedMotion,
 } from '@/lib/utils';
 
 const loadSaveToCollectionPanel = () => import('@/components/list/save-to-collection');
@@ -93,9 +91,10 @@ function ratingToneClassName(score: number) {
 const HOVER_EXPAND_DELAY_MS = 180;
 const HOVER_CHAIN_DELAY_MS = 70;
 const HOVER_CHAIN_WINDOW_MS = 1200;
+// Module-scope by design: the chain window spans card instances and unmounts.
 let lastCardCollapseAt = 0;
 const MIN_PROGRESS_BAR_PERCENT = 2;
-const POPOUT_WIDTH_PX = 270;
+const POPOUT_WIDTH_PX = 280;
 const POPOUT_EXIT_MS = 100;
 // Bounds embeds spent on titles whose first trailers refuse embedding.
 const MAX_TRAILER_ATTEMPTS = 3;
@@ -108,7 +107,7 @@ export const MEDIA_CARD_SLOT_CLASS_NAME = 'w-[170px] md:w-[190px]';
 export const MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX = 82;
 const MEDIA_CARD_TEXT_BLOCK_CLASS_NAME = 'mt-1.5 min-h-[76px] px-0.5 space-y-0.5';
 const CARD_ICON_BUTTON_CLASS_NAME =
-  'group/collection flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 not-aria-disabled:hover:border-white/30 not-aria-disabled:active:bg-white/[0.14] motion-reduce:transition-none';
+  'group/collection flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 not-aria-disabled:hover:border-white/30 not-aria-disabled:active:bg-white/[0.14] motion-reduce:transition-none';
 const CARD_INACTIVE_ICON_BUTTON_CLASS_NAME =
   'border-white/15 bg-white/[0.05] text-zinc-300 not-aria-disabled:hover:bg-white/[0.11] not-aria-disabled:hover:text-white';
 type CardPanel = 'details' | 'menu' | 'lists';
@@ -199,7 +198,7 @@ function NewEpisodeBadge({ hidden = false }: { hidden?: boolean }) {
   return (
     <span
       className={cn(
-        'pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-md border border-white/15 bg-zinc-950/85 px-2 py-1 text-[10px] font-medium leading-none text-zinc-100 shadow-sm backdrop-blur-sm transition-opacity duration-300 motion-reduce:transition-none',
+        'pointer-events-none absolute left-2 top-2 z-10 flex items-center gap-1.5 rounded-md border border-white/15 bg-zinc-950/85 px-2 py-1 text-[11px] font-medium leading-none text-zinc-100 shadow-sm backdrop-blur-sm transition-opacity duration-300 motion-reduce:transition-none',
         hidden && 'opacity-0',
       )}
     >
@@ -329,7 +328,8 @@ function MediaCardPoster({
         )}
 
         {subtitle && (
-          <div className='absolute bottom-1.5 left-1.5 z-10 max-w-[calc(100%-12px)] rounded-[5px] border border-white/10 bg-black/75 px-1.5 py-1 text-[10.5px] font-semibold leading-none tabular-nums text-white/90'>
+          <div className='absolute bottom-2 left-2 z-10 flex max-w-[calc(100%-16px)] items-center gap-1.5 rounded-md border border-white/15 bg-black/85 px-2 py-1.5 text-xs font-semibold leading-none tabular-nums text-white'>
+            {onPlay && <Play aria-hidden='true' className='size-3 shrink-0 fill-current' />}
             {subtitle}
           </div>
         )}
@@ -356,7 +356,7 @@ function MediaCardPoster({
       <p
         dir='auto'
         title={item.title}
-        className='line-clamp-2 min-h-10 [overflow-wrap:anywhere] text-[14px] font-medium leading-5 text-zinc-100'
+        className='line-clamp-2 min-h-10 [overflow-wrap:anywhere] text-[14px] font-semibold leading-5 text-zinc-100'
       >
         {item.title}
       </p>
@@ -638,7 +638,7 @@ function MediaCardOverlay({
     trailerIndex < MAX_TRAILER_ATTEMPTS ? details?.trailers?.[trailerIndex]?.id : undefined;
   // Reduced-motion CSS cannot stop playback inside an iframe.
   const { session } = usePlayerSession();
-  const reducedMotion = useReducedMotion();
+  const reducedMotion = useSyncExternalStore(subscribeReducedMotion, prefersReducedMotion);
   const trailersEnabled = useTrailerPreviews() && !session && !reducedMotion;
 
   // A still pointer over a playing trailer fades the remaining artwork chrome.
@@ -677,7 +677,7 @@ function MediaCardOverlay({
         aria-label={`Actions for ${item.title}`}
         inert={exiting}
         className={cn(
-          'absolute top-0 z-20 flex max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.12] bg-zinc-950 shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
+          'absolute top-0 z-20 flex max-h-full max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.12] bg-zinc-950 shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
           exiting ? 'pointer-events-none animate-surface-out' : 'animate-surface-in',
           popoverAlign === 'left' && 'left-0',
           popoverAlign === 'right' && 'right-0',
@@ -738,7 +738,7 @@ function MediaCardOverlay({
               remaining={remainingLabel(metaLine, hideArtworkChrome)}
             />
           )}
-          {onRemoveFromContinue && (
+          {onRemoveFromContinue && !menu.mounted && (
             <button
               type='button'
               aria-label={`Remove ${item.title} from ${removeFrom}`}
@@ -753,20 +753,20 @@ function MediaCardOverlay({
           )}
         </div>
 
-        <div className='relative flex flex-1 flex-col'>
+        <div className='relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain'>
           {panel === 'lists' ? (
             <div
               data-media-card-picker
-              className='page-enter relative z-10 flex flex-1 flex-col p-2.5'
+              className='page-enter relative z-10 flex flex-1 flex-col p-3'
             >
-              <div className='mb-1 flex shrink-0 items-center gap-1.5'>
+              <div className='mb-2 flex shrink-0 items-center gap-2'>
                 <button
                   type='button'
                   aria-label='Back to actions'
-                  className='h-8 w-8 rounded-md flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition-colors duration-150 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+                  className='h-9 w-9 rounded-md flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition-colors duration-150 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
                   onClick={onToggleListPicker}
                 >
-                  <ChevronLeft className='h-3.5 w-3.5' />
+                  <ChevronLeft className='h-4 w-4' />
                 </button>
                 <span className='text-[14px] font-semibold text-white'>Add to List</span>
               </div>
@@ -788,16 +788,20 @@ function MediaCardOverlay({
             </div>
           ) : (
             <>
-              <div
-                inert={panel === 'menu'}
-                className={cn(
-                  'relative z-10 flex flex-col gap-2 bg-linear-to-b from-white/[0.025] to-transparent p-3 pt-2.5 transition-opacity duration-150 ease-out motion-reduce:transition-none',
-                  menu.mounted && 'opacity-0 duration-0',
-                )}
-              >
+              <div className='sticky top-0 z-30 shrink-0 bg-zinc-950 px-3 pb-2.5 pt-3'>
                 {/* Facts hug the title so a one-line title leaves no dead band above the actions. */}
                 <div className='flex flex-col gap-1.5'>
                   <div className='flex items-start justify-between gap-2'>
+                    {menu.mounted && (
+                      <button
+                        type='button'
+                        aria-label='Back to title summary'
+                        onClick={closeMenu}
+                        className='-ml-1 -mt-1 flex size-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
+                      >
+                        <ChevronLeft aria-hidden='true' className='size-4' />
+                      </button>
+                    )}
                     <h3
                       dir='auto'
                       className='min-w-0 flex-1 text-[15px] font-semibold leading-5 text-white line-clamp-2 [overflow-wrap:anywhere]'
@@ -877,160 +881,144 @@ function MediaCardOverlay({
                     })}
                   </div>
                 </div>
-
-                <div className='flex items-center gap-1.5'>
-                  <button
-                    type='button'
-                    data-media-card-primary
-                    className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[14px] font-semibold tracking-[-0.005em] not-aria-disabled:hover:brightness-110 not-aria-disabled:active:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 aria-disabled:cursor-default aria-disabled:opacity-70 motion-reduce:transition-none'
-                    onPointerEnter={warmPlayerChunk}
-                    onFocus={warmPlayerChunk}
-                    onClick={handlePrimaryAction}
-                    aria-disabled={isPrimaryPending || undefined}
-                    aria-busy={isPrimaryPending || undefined}
-                  >
-                    <Play aria-hidden='true' className='h-4 w-4 shrink-0 fill-current' />
-                    <span className='truncate'>
-                      {isPrimaryPending ? 'Opening…' : primaryActionLabel}
-                    </span>
-                  </button>
-
-                  <button
-                    type='button'
-                    className={cn(
-                      CARD_ICON_BUTTON_CLASS_NAME,
-                      isInLibrary
-                        ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
-                        : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
-                    )}
-                    aria-label={libraryActionLabel}
-                    title={libraryActionLabel}
-                    aria-busy={
-                      toggleLibrary.isPending || (!libraryReady && !libraryError) || undefined
-                    }
-                    // Disabling a focused control would blur and collapse the card.
-                    aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
-                    onClick={handleToggleLibrary}
-                  >
-                    <SaveIndicator saved={isInLibrary} className='size-4' />
-                  </button>
-
-                  <button
-                    type='button'
-                    className={cn(
-                      CARD_ICON_BUTTON_CLASS_NAME,
-                      isInAnyList
-                        ? 'border-white/20 bg-white/[0.12] text-white hover:bg-white/[0.16]'
-                        : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
-                    )}
-                    aria-label='Add to List'
-                    title='Add to list'
-                    aria-pressed={isInAnyList}
-                    onPointerEnter={warmSaveToCollectionPanel}
-                    onFocus={warmSaveToCollectionPanel}
-                    onClick={onToggleListPicker}
-                  >
-                    <Bookmark
-                      aria-hidden='true'
-                      className={cn(
-                        'h-4 w-4 transition-[fill,color] duration-150 motion-reduce:transition-none',
-                        isInAnyList
-                          ? 'fill-current'
-                          : 'fill-transparent group-hover/collection:fill-white/10',
-                      )}
-                    />
-                  </button>
-                </div>
-
-                <p
-                  dir='auto'
+              </div>
+              <div className='grid min-w-0'>
+                <div
+                  inert={menu.mounted}
                   className={cn(
-                    'min-h-10 text-[13px] leading-5 line-clamp-2',
-                    synopsis ? 'text-zinc-300' : 'text-zinc-500',
+                    'col-start-1 row-start-1 flex flex-col gap-2.5 px-3 pb-3 transition-opacity duration-150 ease-out motion-reduce:transition-none',
+                    menu.mounted && 'invisible pointer-events-none opacity-0 duration-0',
                   )}
                 >
-                  {synopsis || 'No synopsis available yet.'}
-                </p>
+                  <div className='flex items-center gap-2'>
+                    <button
+                      type='button'
+                      data-media-card-primary
+                      className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2.5 text-[14px] font-semibold tracking-[-0.005em] not-aria-disabled:hover:brightness-110 not-aria-disabled:active:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 aria-disabled:cursor-default aria-disabled:opacity-70 motion-reduce:transition-none'
+                      onPointerEnter={warmPlayerChunk}
+                      onFocus={warmPlayerChunk}
+                      onClick={handlePrimaryAction}
+                      aria-disabled={isPrimaryPending || undefined}
+                      aria-busy={isPrimaryPending || undefined}
+                    >
+                      <Play aria-hidden='true' className='h-4 w-4 shrink-0 fill-current' />
+                      <span className='truncate'>
+                        {isPrimaryPending ? 'Opening…' : primaryActionLabel}
+                      </span>
+                    </button>
+
+                    <button
+                      type='button'
+                      className={cn(
+                        CARD_ICON_BUTTON_CLASS_NAME,
+                        isInLibrary
+                          ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
+                          : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
+                      )}
+                      aria-label={libraryActionLabel}
+                      title={libraryActionLabel}
+                      aria-busy={
+                        toggleLibrary.isPending || (!libraryReady && !libraryError) || undefined
+                      }
+                      // Disabling a focused control would blur and collapse the card.
+                      aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
+                      onClick={handleToggleLibrary}
+                    >
+                      <Heart
+                        aria-hidden='true'
+                        className={cn(
+                          'size-4 transition-[fill,color] duration-150 motion-reduce:transition-none',
+                          isInLibrary
+                            ? 'fill-current'
+                            : 'fill-transparent group-hover/collection:fill-white/10',
+                        )}
+                      />
+                    </button>
+
+                    <button
+                      type='button'
+                      className={cn(
+                        CARD_ICON_BUTTON_CLASS_NAME,
+                        isInAnyList
+                          ? 'border-white/20 bg-white/[0.12] text-white hover:bg-white/[0.16]'
+                          : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
+                      )}
+                      aria-label='Add to List'
+                      title='Add to list'
+                      aria-pressed={isInAnyList}
+                      onPointerEnter={warmSaveToCollectionPanel}
+                      onFocus={warmSaveToCollectionPanel}
+                      onClick={onToggleListPicker}
+                    >
+                      <Bookmark
+                        aria-hidden='true'
+                        className={cn(
+                          'h-4 w-4 transition-[fill,color] duration-150 motion-reduce:transition-none',
+                          isInAnyList
+                            ? 'fill-current'
+                            : 'fill-transparent group-hover/collection:fill-white/10',
+                        )}
+                      />
+                    </button>
+                  </div>
+
+                  <p
+                    dir='auto'
+                    className={cn(
+                      'min-h-10 text-[13px] leading-5 line-clamp-2',
+                      synopsis ? 'text-zinc-300' : 'text-zinc-500',
+                    )}
+                  >
+                    {synopsis || 'No synopsis available yet.'}
+                  </p>
+                </div>
+                {/* Both panels share a grid cell so actions can grow without squeezing into the synopsis. */}
+                <InlineMenu
+                  presence={menu}
+                  label={`More actions for ${item.title}`}
+                  layout='flow'
+                  className='col-start-1 row-start-1 self-start bg-zinc-950 pt-0'
+                  onAction={closeMenu}
+                  actions={[
+                    onPlayNext && {
+                      key: 'play-next',
+                      label: 'Play next episode',
+                      icon: SkipForward,
+                      disabled: isPrimaryPending,
+                      onWarm: warmPlayerChunk,
+                      onSelect: onPlayNext,
+                    },
+                    onMarkWatched && {
+                      key: 'mark-watched',
+                      label: 'Mark watched',
+                      icon: Check,
+                      onSelect: onMarkWatched,
+                    },
+                    !hasResumeActions && {
+                      key: 'library',
+                      label: libraryActionLabel,
+                      icon: Library,
+                      disabled: !libraryReady || toggleLibrary.isPending,
+                      onSelect: handleToggleLibrary,
+                    },
+                    !hasResumeActions && {
+                      key: 'lists',
+                      label: 'Add to list',
+                      icon: Bookmark,
+                      keepOpen: true,
+                      onWarm: warmSaveToCollectionPanel,
+                      onSelect: onToggleListPicker,
+                    },
+                    onRemoveFromContinue && {
+                      key: 'remove',
+                      label: `Remove from ${removeFrom}`,
+                      icon: Trash2,
+                      destructive: true,
+                      onSelect: onRemoveFromContinue,
+                    },
+                  ]}
+                />
               </div>
-              {/* Right-click crossfades the info panel into actions in place; the panel keeps its height. */}
-              <InlineMenu
-                presence={menu}
-                label={`More actions for ${item.title}`}
-                className='bg-zinc-950'
-                onAction={closeMenu}
-                actions={[
-                  {
-                    key: 'back',
-                    label: 'Back',
-                    icon: ChevronLeft,
-                    muted: true,
-                    onSelect: closeMenu,
-                  },
-                  {
-                    key: 'play',
-                    label: isPrimaryPending ? 'Opening…' : primaryActionLabel,
-                    icon: Play,
-                    iconClassName: 'fill-current',
-                    disabled: isPrimaryPending,
-                    onWarm: warmPlayerChunk,
-                    onSelect: handlePrimaryAction,
-                  },
-                  onPlayNext && {
-                    key: 'play-next',
-                    label: 'Play next episode',
-                    icon: SkipForward,
-                    disabled: isPrimaryPending,
-                    onWarm: warmPlayerChunk,
-                    onSelect: onPlayNext,
-                  },
-                  onMarkWatched && {
-                    key: 'mark-watched',
-                    label: 'Mark watched',
-                    icon: Check,
-                    onSelect: onMarkWatched,
-                  },
-                  {
-                    key: 'details',
-                    label: 'Open details',
-                    icon: Info,
-                    href: detailsPath,
-                    onSelect: openDetails,
-                  },
-                  !hasResumeActions && {
-                    key: 'library',
-                    label: libraryActionLabel,
-                    icon: Library,
-                    disabled: !libraryReady || toggleLibrary.isPending,
-                    onSelect: handleToggleLibrary,
-                  },
-                  !hasResumeActions && {
-                    key: 'lists',
-                    label: 'Add to list',
-                    icon: Bookmark,
-                    keepOpen: true,
-                    onWarm: warmSaveToCollectionPanel,
-                    onSelect: onToggleListPicker,
-                  },
-                  {
-                    key: 'copy-link',
-                    label: 'Copy link',
-                    icon: Link2,
-                    onSelect: () =>
-                      void copyText(buildTitleShareLink(detailsRouteType, item.id), {
-                        success: 'Title link copied',
-                        successDetail: item.title,
-                        failure: 'Could not copy title link',
-                      }),
-                  },
-                  onRemoveFromContinue && {
-                    key: 'remove',
-                    label: `Remove from ${removeFrom}`,
-                    icon: Trash2,
-                    destructive: true,
-                    onSelect: onRemoveFromContinue,
-                  },
-                ]}
-              />
             </>
           )}
         </div>
@@ -1305,7 +1293,7 @@ export function MediaCard({
           ? '[data-media-card-primary]'
           : hoverFocusRef.current
             ? '[data-inline-menu]'
-            : '[data-inline-menu] [role="menuitem"] + [role="menuitem"]',
+            : '[data-inline-menu] [role="menuitem"]:not([aria-disabled="true"])',
     );
     target?.focus({ preventScroll: true });
   }, [expanded, panel]);

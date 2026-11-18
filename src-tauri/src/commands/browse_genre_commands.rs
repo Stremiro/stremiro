@@ -1,5 +1,8 @@
 use super::addon_registry::load_enabled_addons_snapshot;
 use super::config_store::AddonConfig;
+use crate::providers::addon_resource::{
+    catalog_request_extras, snapshot_supports_catalog, CatalogExtra,
+};
 use serde::Serialize;
 use std::collections::HashSet;
 use tauri::{command, AppHandle};
@@ -111,14 +114,19 @@ fn collect_addon_catalog_genres(addons: &[AddonConfig]) -> Vec<String> {
     let catalogs = addons
         .iter()
         .filter_map(|addon| addon.capabilities.as_ref())
-        .flat_map(|manifest| &manifest.catalogs)
-        .filter(|catalog| {
+        .flat_map(|manifest| {
+            manifest
+                .catalogs
+                .iter()
+                .map(move |catalog| (manifest, catalog))
+        })
+        .filter(|(_, catalog)| {
             !matches!(
                 catalog.type_.trim().to_ascii_lowercase().as_str(),
                 "movie" | "series"
             )
         });
-    for catalog in catalogs {
+    for (manifest, catalog) in catalogs {
         let genre_options = catalog
             .extras
             .iter()
@@ -127,6 +135,18 @@ fn collect_addon_catalog_genres(addons: &[AddonConfig]) -> Vec<String> {
         for option in genre_options {
             let option = option.trim();
             if option.is_empty() || is_year_option(option) || option.eq_ignore_ascii_case("all") {
+                continue;
+            }
+            let extras = catalog_request_extras(
+                Some(manifest),
+                &catalog.type_,
+                &catalog.id,
+                vec![CatalogExtra {
+                    name: "genre".to_string(),
+                    value: option.to_string(),
+                }],
+            );
+            if snapshot_supports_catalog(manifest, &catalog.type_, &catalog.id, &extras).is_err() {
                 continue;
             }
             if seen.insert(option.to_ascii_lowercase()) {
@@ -248,6 +268,32 @@ mod tests {
                 .addon
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn addon_genres_exclude_catalogs_with_unsatisfied_required_extras() {
+        let mut provider = addon(vec![
+            ("podcast", vec!["Tech"]),
+            ("radio", vec!["Live"]),
+            ("channel", vec!["Private"]),
+        ]);
+        let catalogs = &mut provider.capabilities.as_mut().unwrap().catalogs;
+        catalogs[0].extras.push(AddonCatalogExtra {
+            name: "search".into(),
+            is_required: true,
+            options: Vec::new(),
+        });
+        catalogs[1].extras.push(AddonCatalogExtra {
+            name: "skip".into(),
+            is_required: true,
+            options: Vec::new(),
+        });
+        catalogs[2].extras.push(AddonCatalogExtra {
+            name: "token".into(),
+            is_required: true,
+            options: Vec::new(),
+        });
+        assert_eq!(build_browse_genres(&[provider]).addon, ["Live"]);
     }
 
     #[test]

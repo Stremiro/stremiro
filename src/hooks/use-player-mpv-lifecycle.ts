@@ -8,8 +8,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { listenEvents } from 'tauri-plugin-libmpv-api';
-
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { SubtitleAdjustmentSettings } from '@/hooks/use-subtitle-adjustments';
@@ -18,6 +16,7 @@ import { notifyAction } from '@/lib/notify';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { enqueuePlayerLifecycle } from '@/lib/player-lifecycle';
 import {
+  listenMpvEvents,
   mpvCommand,
   mpvDestroy,
   mpvInit,
@@ -274,6 +273,7 @@ export function usePlayerMpvLifecycle({
     mpvInitializedRef.current = false;
 
     let cancelled = false;
+    let nativeInitStarted = false;
     let unlisten: (() => void) | undefined;
     let loadfileSent = false;
     let trackRefreshTimer: TimerHandle | null = null;
@@ -463,7 +463,6 @@ export function usePlayerMpvLifecycle({
       }
       if (
         playbackRestarted &&
-        !seeking &&
         !isBufferingRef.current &&
         !getCallbacks().isResumePending() &&
         isLoadingNow()
@@ -476,7 +475,6 @@ export function usePlayerMpvLifecycle({
         loadfileSent &&
         isPlayingRef.current &&
         !isBufferingRef.current &&
-        !seeking &&
         !seekPending &&
         !getCallbacks().isResumePending()
       ) {
@@ -563,11 +561,10 @@ export function usePlayerMpvLifecycle({
     const schedulePositionPoll = (delay = nextPollDelay()) => {
       if (positionPollTimer !== null) clearTimeout(positionPollTimer);
       positionPollTimer = null;
-      if (!shouldPollPosition()) return;
+      if (positionPollInFlight || !shouldPollPosition()) return;
       positionPollTimer = window.setTimeout(() => {
         positionPollTimer = null;
         void pollPlaybackPosition();
-        schedulePositionPoll();
       }, delay);
     };
 
@@ -580,12 +577,18 @@ export function usePlayerMpvLifecycle({
         probeFailuresSince = null;
         return;
       }
+      if (positionPollTimer !== null) {
+        clearTimeout(positionPollTimer);
+        positionPollTimer = null;
+      }
       positionPollInFlight = true;
+      const startedAt = performance.now();
+      let retryPolling = true;
       const generation = positionGeneration;
       const eofReadGeneration = eofGeneration;
       const streamError = recoverableStreamErrorRef.current;
       const seekTarget = getCallbacks().getSeekTarget();
-      return (async () => {
+      try {
         const {
           timePos,
           bufferedAhead,
@@ -640,29 +643,30 @@ export function usePlayerMpvLifecycle({
         if (
           probeFailuresSince !== null &&
           now - probeFailuresSince >= POSITION_POLL_FAILURE_BUDGET_MS &&
-          positionPollTimer !== null &&
           !errorRef.current &&
           !isResolvingRef.current
         ) {
-          clearTimeout(positionPollTimer);
-          positionPollTimer = null;
+          retryPolling = false;
           if (isDev) console.warn('[player] position probe stopped: mpv IPC unreachable');
           // Dead IPC is a player fault, not a stream fault: surface the dead end (retry re-inits via a fresh
           // resolve) without benching an innocent source. Gates match the idle-dead verdict's.
           setError('The player stopped responding. Try again.');
         }
-      })().finally(() => {
+      } finally {
         positionPollInFlight = false;
-        if (positionPollRequested) {
-          positionPollRequested = false;
+        const requested = positionPollRequested;
+        positionPollRequested = false;
+        if (retryPolling && requested) {
           void pollPlaybackPosition(true);
+        } else if (retryPolling) {
+          // Keep the normal cadence while leaving no timer running during a slow native read.
+          schedulePositionPoll(Math.max(0, nextPollDelay() - (performance.now() - startedAt)));
         }
-      });
+      }
     };
 
     refreshPositionRef.current = () => {
       pausedPollGraceUntil = performance.now() + PAUSED_POLL_GRACE_MS;
-      schedulePositionPoll(POSITION_POLL_MS);
       void pollPlaybackPosition(true);
     };
 
@@ -688,6 +692,7 @@ export function usePlayerMpvLifecycle({
         const shouldStartPaused = resumeStartPaused || trayPause.getSnapshot();
         const initialVolume = volumeRef.current;
         const initialMuted = isMutedRef.current;
+        nativeInitStarted = true;
         await mpvInit({
           initialVolume,
           initialMuted,
@@ -699,11 +704,13 @@ export function usePlayerMpvLifecycle({
         // One parallel batch before loadfile — headers and listener registration are independent;
         // allSettled so a listener rejection can't strand still-pending property writes.
         const startupResults = await Promise.allSettled([
-          listenEvents((event) => {
+          listenMpvEvents((event) => {
             if (streamGone()) return;
 
             if (event.event !== 'property-change') {
-              if (event.event === 'seek') {
+              if (event.event === 'start-file') {
+                loadfileSent = true;
+              } else if (event.event === 'seek') {
                 previousNativePosition = null;
                 positionGeneration += 1;
                 seeking = true;
@@ -919,13 +926,15 @@ export function usePlayerMpvLifecycle({
       getCallbacks().clearUiTimers();
       getCallbacks().clearResumeRetryTimer();
       getCallbacks().clearRecoveryTimers();
-      // Teardown serializes through the lifecycle queue — a remount's init waits out this destroy + settle.
-      void enqueuePlayerLifecycle(async () => {
-        await mpvDestroy();
-        await sleep(MPV_TEARDOWN_SETTLE_MS);
-      }).catch(() => {
-        if (isDev) console.warn('[player] mpv teardown destroy best-effort failed');
-      });
+      if (nativeInitStarted) {
+        // A remount waits for teardown only when this load reached native initialization.
+        void enqueuePlayerLifecycle(async () => {
+          await mpvDestroy();
+          await sleep(MPV_TEARDOWN_SETTLE_MS);
+        }).catch(() => {
+          if (isDev) console.warn('[player] mpv teardown destroy best-effort failed');
+        });
+      }
       getCallbacks().restorePlayerSurface();
       void saveProgressRef.current?.();
     };

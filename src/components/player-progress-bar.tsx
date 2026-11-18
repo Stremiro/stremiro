@@ -496,7 +496,7 @@ export function PlayerProgressBar({
           {tooltipSegment && (
             <span
               className={cn(
-                'max-w-full truncate text-[9px] font-bold uppercase tracking-widest px-2 py-[3px] rounded-sm leading-none shadow-lg',
+                'max-w-full truncate text-[10px] font-bold uppercase tracking-widest px-2 py-[3px] rounded-sm leading-none shadow-lg',
                 getSegmentStyle(tooltipSegment.type).badge,
               )}
             >

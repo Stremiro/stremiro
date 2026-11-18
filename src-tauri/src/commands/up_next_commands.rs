@@ -158,10 +158,18 @@ pub async fn get_resume_rail(
     }
     let (continue_watching, sources) = playback_state
         .run_store_op(&app, move |service, app| {
-            let rows = resume_rows(service.load_continue_watching_entries(app)?);
+            let mut rows = resume_rows(service.load_continue_watching_entries(app)?);
             let continue_watching =
                 annotate_watch_progress_list(build_continue_watching_entries(&rows));
-            if !rows.iter().any(is_series_like_watch_progress) {
+            let resumable: HashSet<(&str, &str)> = continue_watching
+                .iter()
+                .map(|row| (row.type_.as_str(), row.id.as_str()))
+                .collect();
+            rows.retain(|row| {
+                is_series_like_watch_progress(row)
+                    && !resumable.contains(&(row.type_.as_str(), row.id.as_str()))
+            });
+            if rows.is_empty() {
                 return Ok((continue_watching, Vec::new()));
             }
             let statuses = match super::open_store(app, super::WATCH_STATUS_STORE_FILE)
@@ -178,19 +186,13 @@ pub async fn get_resume_rail(
                     return Ok((continue_watching, Vec::new()));
                 }
             };
-            let resumable: HashSet<(&str, &str)> = continue_watching
-                .iter()
-                .map(|row| (row.type_.as_str(), row.id.as_str()))
-                .collect();
             let source_health_priorities = service.source_health_priorities_for_ids(
                 app,
                 rows.iter()
                     .filter(|row| {
-                        is_series_like_watch_progress(row)
-                            && !resumable.contains(&(row.type_.as_str(), row.id.as_str()))
-                            && statuses
-                                .get(&row.id)
-                                .is_none_or(|status| status != "dropped")
+                        statuses
+                            .get(&row.id)
+                            .is_none_or(|status| status != "dropped")
                     })
                     .map(|row| row.source_id.as_deref()),
             );

@@ -35,7 +35,7 @@ import {
   SUBTITLE_EDGE_OPTIONS,
   SUBTITLE_FONT_OPTIONS,
 } from '@/lib/player-track-utils';
-import { cn, ICON_CHIP_CLASS, pluralize, scrollBehavior } from '@/lib/utils';
+import { cn, pluralize, scrollBehavior } from '@/lib/utils';
 import { AppearanceSettings, TINT_TARGETS } from './appearance';
 import { settingsControlId, SettingsBody, SettingsCard } from './chrome';
 import { DataSection } from './data';
@@ -527,7 +527,7 @@ export function Settings() {
     <div className='pl-[60px] lg:h-[calc(100dvh-2rem)] lg:overflow-hidden'>
       <div className='mx-auto w-full max-w-[1480px] px-4 pb-12 pt-5 sm:px-6 lg:h-full lg:pt-7 xl:px-8'>
         <div className='space-y-5 lg:grid lg:h-full lg:grid-cols-[204px_minmax(0,1fr)] lg:gap-7 lg:space-y-0 xl:gap-9'>
-          <div className='sticky top-8 z-30 -mx-4 min-w-0 space-y-3 border-b border-white/[0.07] bg-zinc-950/95 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:static lg:mx-0 lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:gap-5 lg:space-y-0 lg:border-0 lg:bg-transparent lg:px-0 lg:py-1 lg:backdrop-blur-none'>
+          <div className='sticky top-8 z-30 -mx-4 min-w-0 space-y-3 border-b border-white/[0.07] bg-zinc-950/95 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:static lg:mx-0 lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:gap-5 lg:space-y-0 lg:border-0 lg:border-r lg:border-white/[0.06] lg:bg-transparent lg:py-1 lg:pl-0 lg:pr-5 lg:backdrop-blur-none'>
             <header className='flex shrink-0 items-baseline justify-between gap-3'>
               <h1 className='text-[22px] font-semibold leading-none tracking-[-0.03em] text-white'>
                 Settings
@@ -562,13 +562,13 @@ export function Settings() {
             <nav
               ref={navRef}
               aria-label='Settings sections'
-              className='relative isolate scrollbar-hide -mx-1 flex gap-2 overflow-x-auto overscroll-x-contain px-1 py-1 lg:mx-0 lg:min-h-0 lg:flex-1 lg:flex-col lg:gap-3 lg:overflow-x-clip lg:overflow-y-auto lg:overscroll-contain lg:px-0'
+              className='relative isolate scrollbar-hide -mx-1 flex gap-2 overflow-x-auto overscroll-x-contain px-1 py-1 lg:mx-0 lg:min-h-0 lg:flex-1 lg:flex-col lg:gap-6 lg:overflow-x-clip lg:overflow-y-auto lg:overscroll-contain lg:px-0'
             >
               {indicator && (
                 <>
                   <span
                     aria-hidden='true'
-                    className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-lg bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]'
+                    className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-md bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
                     style={{
                       width: indicator.width,
                       height: indicator.height,
@@ -589,7 +589,7 @@ export function Settings() {
                   against the nav for the sliding indicator. */}
               {NAV_GROUPS.map((group) => (
                 <div key={group.id} className='flex shrink-0 gap-1 lg:block'>
-                  <p className='hidden px-2.5 pb-1 pt-0.5 text-[13px] font-medium text-zinc-500 lg:block'>
+                  <p className='hidden px-3 pb-2 pt-0.5 text-[12px] font-semibold uppercase tracking-[0.1em] text-zinc-400 lg:block'>
                     {group.caption}
                   </p>
                   <div className='flex gap-1 lg:flex-col lg:gap-0.5'>
@@ -618,31 +618,22 @@ export function Settings() {
                               : undefined
                           }
                           className={cn(
-                            'nav-switch-item group relative flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/35 lg:w-full',
+                            'nav-switch-item group relative flex h-10 shrink-0 items-center gap-3 rounded-md px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/35 lg:w-full',
                             isActive
                               ? 'text-white'
-                              : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100 active:bg-white/[0.07]',
+                              : 'text-zinc-300 hover:bg-white/[0.05] hover:text-white active:bg-white/[0.07]',
                           )}
                         >
-                          <span
+                          <item.icon
                             aria-hidden='true'
                             className={cn(
-                              'flex size-7 shrink-0 items-center justify-center rounded-md border transition-colors duration-150 motion-reduce:transition-none',
+                              'size-4 shrink-0 transition-colors duration-150 motion-reduce:transition-none',
                               isActive
-                                ? 'bg-(--accent-nav)/10 border-(--accent-nav)/30'
-                                : 'border-transparent bg-white/[0.04] group-hover:border-white/[0.28] group-hover:bg-white/[0.07]',
+                                ? 'text-(--accent-nav)'
+                                : 'text-zinc-400 group-hover:text-zinc-100',
                             )}
-                          >
-                            <item.icon
-                              className={cn(
-                                'size-[14px] transition-colors duration-150 motion-reduce:transition-none',
-                                isActive
-                                  ? 'text-(--accent-nav)'
-                                  : 'text-zinc-400 group-hover:text-zinc-100',
-                              )}
-                              strokeWidth={1.75}
-                            />
-                          </span>
+                            strokeWidth={1.75}
+                          />
                           <span className='text-[15px] font-medium leading-none'>{item.label}</span>
                           {item.id === 'updates' && isUpdateAvailable ? (
                             <span
@@ -678,65 +669,45 @@ export function Settings() {
             role='region'
             className='w-full min-w-0 scroll-mt-48 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25 lg:scroll-mt-16 lg:min-h-0 lg:h-full lg:overflow-y-auto lg:overscroll-contain scrollbar-hide'
           >
-            {!searchWords.length && (
-              <header className='mb-6 flex items-center gap-4 px-0.5'>
-                <span
-                  aria-hidden='true'
-                  className='flex size-12 shrink-0 items-center justify-center rounded-xl bg-(--accent-nav)/10 ring-1 ring-inset ring-(--accent-nav)/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
-                >
-                  <shownSection.icon
-                    className='size-[22px] text-(--accent-nav)'
-                    strokeWidth={1.75}
-                  />
-                </span>
-                <div className='min-w-0'>
-                  <h2 className='text-[22px] font-semibold leading-tight tracking-tight text-white'>
-                    {shownSection.label}
-                  </h2>
-                  <p className='mt-1 text-[14px] leading-relaxed text-zinc-400'>
-                    {shownSection.description}
-                  </p>
-                </div>
-              </header>
-            )}
+            {!searchWords.length && <h2 className='sr-only'>{shownSection.label}</h2>}
             {searchWords.length ? (
               <div className='space-y-3'>
                 <output className='block text-[12px] text-zinc-500'>
                   {pluralize(matches.length, 'setting')} found
                   {matches.length > 0 ? ' · Enter opens the first' : ''}
                 </output>
-                {matches.map((item) => (
-                  <SettingsCard
-                    key={`${item.section.id}-${item.target ?? 'section'}`}
-                    className='focus-within:border-white/[0.14]'
-                  >
-                    <button
-                      type='button'
-                      onClick={() => openSearchResult(item)}
-                      className='group flex w-full items-center gap-3.5 rounded-xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
-                    >
-                      <span className={cn(ICON_CHIP_CLASS, 'size-9 shrink-0 rounded-lg')}>
-                        <item.section.icon
+                {matches.length > 0 && (
+                  <div className='overflow-hidden rounded-xl border border-white/[0.08] bg-[#121214] divide-y divide-white/[0.07]'>
+                    {matches.map((item) => (
+                      <button
+                        key={`${item.section.id}-${item.target ?? 'section'}`}
+                        type='button'
+                        onClick={() => openSearchResult(item)}
+                        className='group flex w-full items-center gap-3.5 px-4 py-4 text-left transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
+                      >
+                        <span className='flex size-9 shrink-0 items-center justify-center'>
+                          <item.section.icon
+                            aria-hidden='true'
+                            className='size-[17px] text-(--accent-nav)'
+                            strokeWidth={1.75}
+                          />
+                        </span>
+                        <span className='min-w-0 flex-1'>
+                          <span className='block text-[15px] font-medium text-zinc-100'>
+                            {item.label}
+                          </span>
+                          <span className='mt-1 block text-[14px] leading-relaxed text-zinc-400'>
+                            {item.section.label}
+                          </span>
+                        </span>
+                        <ChevronRight
                           aria-hidden='true'
-                          className='size-[17px] text-(--accent-nav)'
-                          strokeWidth={1.75}
+                          className='h-3.5 w-3.5 shrink-0 text-zinc-500 group-hover:text-zinc-300'
                         />
-                      </span>
-                      <span className='min-w-0 flex-1'>
-                        <span className='block text-[15px] font-medium text-zinc-100'>
-                          {item.label}
-                        </span>
-                        <span className='mt-1 block text-[14px] leading-relaxed text-zinc-400'>
-                          {item.section.label} · {item.section.description}
-                        </span>
-                      </span>
-                      <ChevronRight
-                        aria-hidden='true'
-                        className='h-3.5 w-3.5 shrink-0 text-zinc-500 group-hover:text-zinc-300'
-                      />
-                    </button>
-                  </SettingsCard>
-                ))}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {matches.length === 0 && (
                   <SettingsCard>
                     <SettingsBody className='py-8 text-center'>
@@ -746,7 +717,7 @@ export function Settings() {
                       </p>
                       <button
                         type='button'
-                        className='mt-4 rounded-md px-3 py-1.5 text-[12px] text-zinc-300 hover:bg-white/[0.05] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
+                        className='mt-4 rounded-md px-3 py-1.5 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
                         onClick={() => {
                           setQuery('');
                           searchInputRef.current?.focus({ preventScroll: true });

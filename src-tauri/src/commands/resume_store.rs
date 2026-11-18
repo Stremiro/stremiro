@@ -652,8 +652,7 @@ impl ResumeStore {
         )
     }
 
-    /// Returns the rows the recency guard admitted, plus whether cap pruning
-    /// then deleted any rows (possibly some of those just admitted).
+    /// Returns the rows the recency guard admitted with an unset pruning flag.
     /// Imports and restores reject growth rather than evicting durable history.
     pub(crate) fn merge_entries(
         &mut self,
@@ -752,10 +751,18 @@ impl ResumeStore {
             .iter()
             .map(|(_, progress)| (progress.type_.as_str(), progress.id.as_str()))
             .collect();
-        // One prune per distinct title, not per row — a 10k import over few titles pays a few scans.
-        let mut pruned = false;
+        // An overflow rolls back the whole merge, including the tentative prune.
         for (media_type, media_id) in &pruned_titles {
-            pruned |= prune_title_history_tx(&transaction, media_type, media_id)?;
+            if prune_title_history_tx(&transaction, media_type, media_id)? {
+                let action = if is_backup_import {
+                    "This backup"
+                } else {
+                    "Restoring this history"
+                };
+                return Err(HistoryMergeError::CapacityExceeded(format!(
+                    "{action} would exceed the {MAX_RESUME_ROWS_PER_TITLE}-entry in-progress history limit for a title."
+                )));
+            }
         }
 
         for dismissal in new_title_dismissals {
@@ -785,7 +792,7 @@ impl ResumeStore {
             .commit()
             .map_err(|error| format!("Failed to commit playback resume merge: {}", error))?;
 
-        Ok((imported, pruned))
+        Ok((imported, false))
     }
 
     pub(crate) fn get_entry(&mut self, key: &str) -> Result<Option<WatchProgress>, String> {

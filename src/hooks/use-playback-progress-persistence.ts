@@ -8,6 +8,8 @@ import {
   invalidateQuery,
   RESUME_RAIL_QUERY_KEY,
   titleWatchProgressQueryKey,
+  TOTAL_WATCH_TIME_QUERY_KEY,
+  WATCH_HISTORY_QUERY_KEY,
 } from '@/lib/query-invalidation';
 import { isLocalMediaId } from '@/lib/utils';
 
@@ -24,6 +26,7 @@ interface UsePlaybackProgressPersistenceArgs {
   isPlaying: boolean;
   observedPositionRef: RefObject<number | null>;
   durationRef: RefObject<number>;
+  activeStreamLoadKey: string;
   stream: PlayerStreamSession;
 }
 
@@ -40,6 +43,7 @@ export function usePlaybackProgressPersistence({
   isPlaying,
   observedPositionRef,
   durationRef,
+  activeStreamLoadKey,
   stream,
 }: UsePlaybackProgressPersistenceArgs) {
   const queryClient = useQueryClient();
@@ -59,70 +63,71 @@ export function usePlaybackProgressPersistence({
   } | null>(null);
   const lastSavedFingerprintRef = useRef<string | null>(null);
   const completedRef = useRef(false);
+  const lastPlaybackSnapshotRef = useRef<{
+    position: number | null;
+    completed: boolean;
+    lastWatched: number;
+  } | null>(null);
+  const streamIdentityRef = useRef<
+    Pick<WatchProgressSave, 'last_stream_key' | 'source_name' | 'source_id' | 'stream_family'>
+  >({});
 
   useEffect(() => {
     completedRef.current = false;
-  }, [stream.activeStreamUrl, stream.activeStreamKey, stream.activeStreamMpvHttpHeaderFields]);
-
-  useEffect(() => {
-    if (isPlaying) completedRef.current = false;
-  }, [isPlaying]);
-
-  const buildWatchProgressPayload = useCallback((): WatchProgressSave | null => {
-    const position = observedPositionRef.current;
-    const completed = completedRef.current;
-    if ((position === null && !completed) || !mediaType || !mediaId || isLocalMediaId(mediaId))
-      return null;
-
-    return {
-      id: mediaId,
-      type_: mediaType,
-      season: absoluteSeason,
-      episode: absoluteEpisode,
-      absolute_season: absoluteSeason,
-      absolute_episode: absoluteEpisode,
-      stream_season: streamSeason,
-      stream_episode: streamEpisode,
-      position: position ?? 0,
-      duration: durationRef.current,
-      completed: completed || undefined,
-      last_watched: Date.now(),
-      title,
-      poster,
-      backdrop,
-      // URLs never persist; resume uses lookup/key/source identities.
-      last_stream_lookup_id: streamLookupIdRef.current,
+    lastPlaybackSnapshotRef.current = null;
+    // Outgoing lifecycle cleanup saves before the replacement load binds its identity.
+    streamIdentityRef.current = {
       last_stream_key: selectedStreamKeyRef.current,
       source_name: activeStreamSourceNameRef.current,
       source_id: activeStreamSourceIdRef.current,
       stream_family: activeStreamFamilyRef.current,
     };
   }, [
-    mediaType,
-    mediaId,
-    absoluteSeason,
-    absoluteEpisode,
-    streamSeason,
-    streamEpisode,
-    observedPositionRef,
-    durationRef,
-    title,
-    poster,
-    backdrop,
-    activeStreamSourceIdRef,
-    activeStreamSourceNameRef,
-    activeStreamFamilyRef,
-    streamLookupIdRef,
+    activeStreamLoadKey,
     selectedStreamKeyRef,
+    activeStreamSourceNameRef,
+    activeStreamSourceIdRef,
+    activeStreamFamilyRef,
   ]);
+
+  useEffect(() => {
+    if (isPlaying) completedRef.current = false;
+  }, [isPlaying]);
 
   // Returns the raw op so lifecycle callers (native close, updater, backup) observe a failed
   // final save; the queue swallows so saves serialize. Rust owns the stub gate/coalescing (should_skip_watch_progress_save).
   const persistProgress = useCallback(
     (skipUnchanged = false): Promise<void> => {
-      const payload = buildWatchProgressPayload();
-      // Nothing to write — return the tail so a close still waits on queued saves.
-      if (!payload) return saveQueueRef.current;
+      const position = observedPositionRef.current;
+      const completed = completedRef.current;
+      if ((position === null && !completed) || !mediaType || !mediaId || isLocalMediaId(mediaId))
+        return saveQueueRef.current;
+
+      let playback = lastPlaybackSnapshotRef.current;
+      if (!playback || playback.position !== position || playback.completed !== completed) {
+        playback = { position, completed, lastWatched: Date.now() };
+        lastPlaybackSnapshotRef.current = playback;
+      }
+      const payload: WatchProgressSave = {
+        id: mediaId,
+        type_: mediaType,
+        season: absoluteSeason,
+        episode: absoluteEpisode,
+        absolute_season: absoluteSeason,
+        absolute_episode: absoluteEpisode,
+        stream_season: streamSeason,
+        stream_episode: streamEpisode,
+        position: position ?? 0,
+        duration: durationRef.current,
+        completed: completed || undefined,
+        last_watched: playback.lastWatched,
+        title,
+        poster,
+        backdrop,
+        // URLs never persist; resume uses lookup/key/source identities.
+        last_stream_lookup_id: streamLookupIdRef.current,
+        ...streamIdentityRef.current,
+      };
 
       // Epoch snapshot fences deletes: a remove/clear queued after this write must not
       // resurrect the row (the backend generation guard only covers in-flight saves).
@@ -158,7 +163,12 @@ export function usePlaybackProgressPersistence({
         });
         lastSavedFingerprintRef.current = fingerprint;
         clearPendingSave();
-        if (pendingSave.refreshRail) void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]);
+        if (pendingSave.refreshRail) {
+          void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]);
+          // A docked player outlives Profile's History view; exact skips the recommendation seed.
+          void queryClient.invalidateQueries({ queryKey: WATCH_HISTORY_QUERY_KEY, exact: true });
+          void queryClient.invalidateQueries({ queryKey: TOTAL_WATCH_TIME_QUERY_KEY });
+        }
       });
       const pendingSave = { fingerprint, operation, refreshRail: !skipUnchanged };
       pendingSaveRef.current = pendingSave;
@@ -172,7 +182,22 @@ export function usePlaybackProgressPersistence({
       // Global tracking covers the op after player unmount — the hook flusher only runs while registered.
       return trackPendingAppWrite(operation);
     },
-    [buildWatchProgressPayload, queryClient, stream.activeStreamUrl],
+    [
+      mediaType,
+      mediaId,
+      absoluteSeason,
+      absoluteEpisode,
+      streamSeason,
+      streamEpisode,
+      observedPositionRef,
+      durationRef,
+      title,
+      poster,
+      backdrop,
+      streamLookupIdRef,
+      queryClient,
+      stream.activeStreamUrl,
+    ],
   );
 
   // Never rejects, so every fire-and-forget trigger keeps its old contract.
@@ -192,7 +217,7 @@ export function usePlaybackProgressPersistence({
 
   useEffect(() => {
     if (!isPlaying) return;
-    // Stalled ticks must not bump recency; lifecycle saves still refresh last_watched.
+    // Stalled ticks do not need another IPC save.
     const interval = window.setInterval(() => {
       void persistProgress(true).catch(() => undefined);
     }, 15_000);
