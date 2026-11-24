@@ -379,17 +379,22 @@ fn watchlist_items(
             statuses.get(&item.id).map(String::as_str) == Some("plan_to_watch")
                 && !started.contains(&item.id)
         })
+        .map(|item| (item.title.to_lowercase(), item))
         .collect();
-    items.sort_by_cached_key(|item| {
-        (
-            item.primary_year.is_none(),
-            Reverse(item.primary_year),
-            item.title.to_lowercase(),
-            item.id.clone(),
-        )
-    });
-    items.truncate(WATCHLIST_LIMIT);
-    items
+    let compare = |(left_title, left): &(String, MediaItem),
+                   (right_title, right): &(String, MediaItem)| {
+        (Reverse(left.primary_year), left_title, &left.id).cmp(&(
+            Reverse(right.primary_year),
+            right_title,
+            &right.id,
+        ))
+    };
+    if items.len() > WATCHLIST_LIMIT {
+        items.select_nth_unstable_by(WATCHLIST_LIMIT, compare);
+        items.truncate(WATCHLIST_LIMIT);
+    }
+    items.sort_unstable_by(compare);
+    items.into_iter().map(|(_, item)| item).collect()
 }
 
 #[command]

@@ -1,10 +1,13 @@
 import { QueryClientProvider } from '@tanstack/react-query';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
+import { StartupAsciiReveal } from '@/components/startup-ascii-reveal';
 import { api } from '@/lib/api';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
+import { registerMemoryTrimListener } from '@/lib/memory-trim';
 import { enqueuePlayerLifecycle } from '@/lib/player-lifecycle';
 import { mpvDestroy } from '@/lib/player-mpv';
 import { queryClient } from '@/lib/query-client';
@@ -14,12 +17,17 @@ import {
   PROFILE_PREFERENCES_QUERY_KEY,
   STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { sleep } from '@/lib/utils';
+import { applyProfileAccentTheme, withTimeout } from '@/lib/utils';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
 import { readSearchFacets } from '@/lib/search-page-state';
 import { homeTrendingQueryOptions } from '@/pages/home';
 import App from './App';
 import './index.css';
+
+let resolveFirstFrameReveal: () => void = () => undefined;
+const firstFrameRevealPromise = new Promise<void>((resolve) => {
+  resolveFirstFrameReveal = resolve;
+});
 
 // Packaged builds have no devtools: an uncaught render error would unmount the
 // whole tree and leave a permanent black window. Boundary + reload is the
@@ -36,6 +44,18 @@ class RootErrorBoundary extends React.Component<
 
   componentDidCatch(error: unknown) {
     if (import.meta.env.DEV) console.error('Unhandled render error', error);
+  }
+
+  componentDidMount() {
+    if (isTauriDesktopRuntime()) {
+      void withTimeout(
+        invoke('frontend_first_frame_ready').catch(() => undefined),
+        2_000,
+        () => undefined,
+      ).finally(resolveFirstFrameReveal);
+    } else {
+      resolveFirstFrameReveal();
+    }
   }
 
   render() {
@@ -64,13 +84,17 @@ class RootErrorBoundary extends React.Component<
 }
 
 if (isTauriDesktopRuntime()) {
-  const listener = listen<boolean>('app://addon-capabilities-changed', (event) => {
+  const capabilityListener = listen<boolean>('app://addon-capabilities-changed', (event) => {
     void invalidateAddonCapabilityQueries(queryClient, event.payload);
   }).catch(() => {
     if (import.meta.env.DEV) console.warn('[app] addon-capabilities listener failed to register');
   });
+  const memoryTrimListener = registerMemoryTrimListener(queryClient).catch(() => {
+    if (import.meta.env.DEV) console.warn('[app] memory-trim listener failed to register');
+  });
   import.meta.hot?.dispose(() => {
-    void listener.then((unlisten) => unlisten?.());
+    void capabilityListener.then((unlisten) => unlisten?.());
+    void memoryTrimListener.then((unlisten) => unlisten?.());
   });
 }
 
@@ -83,13 +107,18 @@ const bootstrapStartedAt = performance.now();
 const applyStartupRoute = isTauriDesktopRuntime() && window.location.pathname === '/';
 let rendered = false;
 
-const seedQuery = (queryKey: readonly unknown[], data: unknown) => {
-  if (queryClient.getQueryData(queryKey) === undefined) queryClient.setQueryData(queryKey, data);
+const seedQuery = (queryKey: readonly unknown[], data: unknown): boolean => {
+  if (queryClient.getQueryData(queryKey) !== undefined) return false;
+  queryClient.setQueryData(queryKey, data);
+  return true;
 };
 
 const bootstrapSnapshot = api.getBootstrapSnapshot().then(
   (snapshot) => {
-    seedQuery(PROFILE_PREFERENCES_QUERY_KEY, snapshot.profilePreferences);
+    if (seedQuery(PROFILE_PREFERENCES_QUERY_KEY, snapshot.profilePreferences)) {
+      const { accentColor, accentTargets, accentIntensity } = snapshot.profilePreferences.profile;
+      applyProfileAccentTheme(accentColor, accentTargets, accentIntensity);
+    }
     seedQuery(APP_UI_PREFERENCES_QUERY_KEY, snapshot.appUiPreferences);
     seedQuery(STREAM_SELECTOR_PREFERENCES_QUERY_KEY, snapshot.streamSelectorPreferences);
     if (
@@ -122,18 +151,15 @@ void bootstrapSnapshot.then(() => {
   }
 });
 
-// A document reload loses the React session, but the window's native player survives.
-// Finish teardown before a new player can initialize on the restored route.
-const playerCleanup = isTauriDesktopRuntime()
-  ? enqueuePlayerLifecycle(mpvDestroy).catch(() => {
-      console.warn('[app] leftover player teardown failed');
-    })
-  : Promise.resolve();
+// A reload loses the React session but keeps native mpv. A later player init
+// waits on the same queue while the browsing UI can mount independently.
+if (isTauriDesktopRuntime()) {
+  void enqueuePlayerLifecycle(mpvDestroy).catch(() => {
+    console.warn('[app] leftover player teardown failed');
+  });
+}
 
-void Promise.all([
-  playerCleanup,
-  Promise.race([bootstrapSnapshot, sleep(BOOTSTRAP_PAINT_TIMEOUT_MS)]),
-]).then(() => {
+void withTimeout(bootstrapSnapshot, BOOTSTRAP_PAINT_TIMEOUT_MS, () => undefined).then(() => {
   rendered = true;
   ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>
@@ -141,6 +167,7 @@ void Promise.all([
         <BrowserRouter>
           <RootErrorBoundary>
             <App />
+            <StartupAsciiReveal revealReady={firstFrameRevealPromise} />
           </RootErrorBoundary>
         </BrowserRouter>
       </QueryClientProvider>

@@ -66,8 +66,12 @@ export function AddTitlesDialog({
   const discoverSearchText = canonicalizeSearchText(debouncedSearch);
   const discoverQueryText = discoverSearchText ? foldAsciiCase(discoverSearchText) : undefined;
   const discoverQuery = useQuery({
-    queryKey: [...SEARCH_CATALOG_QUERY_KEY, 'add-titles-discover', discoverQueryText],
-    queryFn: () => api.querySearchCatalogPage({ query: discoverQueryText }),
+    queryKey: [
+      ...SEARCH_CATALOG_QUERY_KEY,
+      'add-titles-discover',
+      source === 'discover' ? discoverQueryText : null,
+    ],
+    queryFn: ({ signal }) => api.querySearchCatalogPage({ query: discoverQueryText }, signal),
     enabled: source === 'discover',
     placeholderData: keepPreviousData,
     staleTime: 30_000,

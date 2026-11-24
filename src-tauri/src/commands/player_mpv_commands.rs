@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{command, AppHandle, Manager, Window};
-use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
+use tauri_plugin_libmpv::{Error as MpvError, MpvConfig, MpvExt, VideoMarginRatio};
 
 mod subtitles;
 
@@ -46,6 +46,7 @@ const MPV_CYCLE_PROPERTIES: &[&str] = &["pause"];
 
 const MPV_COMMAND_MAX_ARGS: usize = 8;
 const MPV_ARG_MAX_CHARS: usize = 4096;
+
 static MPV_OP_GATE: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 static MPV_MUTE_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -777,22 +778,40 @@ pub async fn player_mpv_get_playback_position(
     .await
 }
 
+fn classify_playback_active(
+    mut read_flag: impl FnMut(&str) -> Result<Value, MpvError>,
+) -> Result<bool, String> {
+    let paused = match read_flag("pause") {
+        Ok(paused) => paused,
+        Err(MpvError::InstanceNotFound(_)) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    if property_flag(Some(paused)) {
+        return Ok(false);
+    }
+    match read_flag("idle-active") {
+        Ok(idle) => Ok(!property_flag(Some(idle))),
+        Err(MpvError::InstanceNotFound(_)) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn read_playback_active_sync(app: &AppHandle) -> Result<bool, String> {
+    classify_playback_active(|name| app.mpv().get_property(name, "flag", "main"))
+}
+
 pub(crate) async fn is_playback_active(app: AppHandle) -> bool {
-    run_mpv_op("activity probe", move || {
-        let read = |name: &str| mpv_property(&app, "main", name, "flag");
-        let pause = read("pause");
-        Ok(pause.is_some() && !property_flag(pause) && !property_flag(read("idle-active")))
-    })
-    .await
-    .unwrap_or_else(|error| {
-        crate::operational_log::log_warn(
-            "player",
-            "activity-probe",
-            "failed",
-            &[crate::operational_log::field("error", error)],
-        );
-        false
-    })
+    run_mpv_op("activity probe", move || read_playback_active_sync(&app))
+        .await
+        .unwrap_or_else(|error| {
+            crate::operational_log::log_warn(
+                "player",
+                "activity-probe",
+                "failed",
+                &[crate::operational_log::field("error", error)],
+            );
+            true
+        })
 }
 
 #[command]
@@ -854,4 +873,48 @@ fn numeric_property_ranges_apply_to_batches_and_set_commands() {
             assert!(validate_mpv_command("set", &[Value::from(name), value]).is_err());
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn classify_playback_active_distinguishes_missing_instance_idle_paused_and_errors() {
+    assert_eq!(
+        classify_playback_active(|_| Err(MpvError::InstanceNotFound("main".into()))),
+        Ok(false)
+    );
+    assert_eq!(
+        classify_playback_active(|name| match name {
+            "pause" => Ok(Value::Bool(true)),
+            _ => unreachable!("idle-active should not be queried while paused"),
+        }),
+        Ok(false)
+    );
+    assert_eq!(
+        classify_playback_active(|name| match name {
+            "pause" => Ok(Value::Bool(false)),
+            "idle-active" => Ok(Value::Bool(true)),
+            _ => unreachable!(),
+        }),
+        Ok(false)
+    );
+    assert_eq!(
+        classify_playback_active(|name| match name {
+            "pause" => Ok(Value::Bool(false)),
+            "idle-active" => Ok(Value::Bool(false)),
+            _ => unreachable!(),
+        }),
+        Ok(true)
+    );
+    assert_eq!(
+        classify_playback_active(|name| match name {
+            "pause" => Ok(Value::Bool(false)),
+            "idle-active" => Err(MpvError::InstanceNotFound("main".into())),
+            _ => unreachable!(),
+        }),
+        Ok(false)
+    );
+    assert!(
+        classify_playback_active(|_| Err(MpvError::InvalidConfig("transient".into()))).is_err(),
+        "unexpected mpv errors must bubble up so is_playback_active fails safe"
+    );
 }

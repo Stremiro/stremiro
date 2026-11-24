@@ -64,7 +64,7 @@ export function SeasonProgressRail({
       <span
         className={cn(
           'text-[12px] font-medium tabular-nums',
-          complete ? 'text-(--accent-prog)' : 'text-zinc-400',
+          complete ? 'text-[color-mix(in_srgb,var(--accent-prog)_75%,white)]' : 'text-zinc-400',
         )}
       >
         {complete ? 'Season watched' : `${watchedCount} of ${total} watched`}

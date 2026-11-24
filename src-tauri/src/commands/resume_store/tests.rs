@@ -603,6 +603,15 @@ fn recent_and_watched_titles_are_bounded_distinct_stable_and_read_only() {
         .unwrap()
         .is_empty());
     assert!(!path.exists());
+    let initializing = Connection::open(&path).unwrap();
+    initializing
+        .execute_batch("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE")
+        .unwrap();
+    assert!(ResumeStore::load_recent_titles(&path).unwrap().is_empty());
+    assert!(ResumeStore::load_watched_title_ids(&path, "movie")
+        .unwrap()
+        .is_empty());
+    drop(initializing);
     let mut store = ResumeStore::open(&path).unwrap();
     assert!(ResumeStore::load_recent_titles(&path).unwrap().is_empty());
     for (key, type_, id, last_watched) in [

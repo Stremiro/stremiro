@@ -292,6 +292,10 @@ pub async fn get_media_details(
 
     let mut details =
         fetch_media_details_inner(&app, &client, &media_type, &id, include_episodes).await?;
+    if details.episodes.is_none() {
+        return Ok(details);
+    }
+
     let matched = client
         .repair_episode_artwork(&mut details, normalize_media_details)
         .await;

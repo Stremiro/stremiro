@@ -8,6 +8,7 @@ import {
   LayoutList,
   Library,
   Search,
+  X,
 } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, type SetURLSearchParams, useLocation, useSearchParams } from 'react-router';
@@ -20,6 +21,8 @@ import {
 } from '@/components/media-card';
 import { HistoryItem, HistoryListView, LibraryList } from '@/components/profile-collection-rows';
 import {
+  FILTER_ACTIVE_BUTTON_CLASS,
+  FILTER_MENU_BUTTON_CLASS,
   LibraryToolbar,
   LibraryBulkActionBar,
   CollectionBulkActionBar,
@@ -27,7 +30,7 @@ import {
   isLibrarySort,
   TYPE_OPTIONS,
 } from '@/components/profile-library-controls';
-import { SegmentedControl, ViewToggle } from '@/components/ui/segmented-control';
+import { SegmentedControl, SegmentPill, ViewToggle } from '@/components/ui/segmented-control';
 import { PageCard } from '@/components/page-section';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
@@ -41,6 +44,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
 import { WatchStatusIcon } from '@/components/watch-status-icon';
+import { useFindShortcut } from '@/hooks/use-browse-hotkeys';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useTitleSearch } from '@/hooks/use-item-search';
 import {
@@ -198,11 +202,20 @@ export function Profile() {
   });
   const historyQuery = useWatchHistory({ enabled: activeTab === 'history' });
   // A filter switch without placeholder rows keeps the last library totals.
-  const [heldLibrary, setHeldLibrary] = useState<ProfileLibrary>();
-  const tabLibrary =
-    activeTab === 'library' ? (profileLibraryQuery.data ?? heldLibrary) : undefined;
-  if (tabLibrary !== heldLibrary) setHeldLibrary(tabLibrary);
+  const [heldLibrary, setHeldLibrary] = useState<Pick<ProfileLibrary, 'allIds' | 'statusCounts'>>();
+  const currentLibrary = activeTab === 'library' ? profileLibraryQuery.data : undefined;
+  const tabLibrary = activeTab === 'library' ? (currentLibrary ?? heldLibrary) : undefined;
+  if (
+    currentLibrary &&
+    (currentLibrary.allIds !== heldLibrary?.allIds ||
+      currentLibrary.statusCounts !== heldLibrary?.statusCounts)
+  ) {
+    setHeldLibrary({ allIds: currentLibrary.allIds, statusCounts: currentLibrary.statusCounts });
+  } else if (activeTab !== 'library' && heldLibrary) {
+    setHeldLibrary(undefined);
+  }
   const libraryTabRef = useRef<HTMLButtonElement>(null);
+  const activeTabIndex = PROFILE_TABS.findIndex((tab) => tab.id === activeTab);
   const historyCount =
     (activeTab === 'history' ? historyQuery.data?.length : undefined) ??
     dataStats?.history_title_count;
@@ -257,6 +270,7 @@ export function Profile() {
           totalWatchTimeSecs={totalWatchTimeSecs}
           statusCounts={libraryStatusCounts}
           statusCountsLoading={tabLibrary === undefined && dataStatsQuery.isPending}
+          activeTab={activeTab}
           onOpenTab={setActiveTab}
           activeStatus={activeLibraryStatus}
           onToggleStatus={toggleLibraryStatus}
@@ -266,29 +280,52 @@ export function Profile() {
           <div className='flex justify-center'>
             <TabsList
               aria-label='Profile collections'
-              className='grid h-auto w-full max-w-lg grid-cols-3 gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1'
+              className='relative isolate grid h-auto w-full max-w-lg grid-cols-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-1'
             >
-              {PROFILE_TABS.map((tab) => (
-                <TabsTrigger
-                  key={tab.id}
-                  ref={tab.id === 'library' ? libraryTabRef : undefined}
-                  value={tab.id}
-                  onPointerEnter={tab.id === 'lists' ? warmListsManager : undefined}
-                  onFocus={tab.id === 'lists' ? warmListsManager : undefined}
-                  className={cn(
-                    'h-10 min-w-0 gap-1 rounded-md border-0 px-1.5 py-2 text-[13px] font-medium shadow-none transition-colors focus-visible:ring-inset focus-visible:ring-offset-0 motion-reduce:transition-none sm:gap-2 sm:px-4 sm:text-sm',
-                    tab.id === activeTab
-                      ? 'bg-white/[0.1] text-white'
-                      : 'bg-transparent text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100',
-                  )}
-                >
-                  <tab.icon aria-hidden='true' className='size-3.5' />
-                  <span>{tab.label}</span>
-                  <span className='min-w-[2ch] shrink-0 text-left text-[11px] tabular-nums leading-none text-zinc-400'>
-                    {tabCounts[tab.id]}
-                  </span>
-                </TabsTrigger>
-              ))}
+              <SegmentPill
+                index={activeTabIndex}
+                count={PROFILE_TABS.length}
+                inset={4}
+                className='rounded-md border border-white/[0.12] bg-white/[0.09] shadow-[inset_0_1px_0_rgb(255_255_255/0.06)]'
+              />
+              {PROFILE_TABS.map((tab) => {
+                const isActive = tab.id === activeTab;
+                const count = tabCounts[tab.id];
+                return (
+                  <TabsTrigger
+                    key={tab.id}
+                    ref={tab.id === 'library' ? libraryTabRef : undefined}
+                    value={tab.id}
+                    onPointerEnter={tab.id === 'lists' ? warmListsManager : undefined}
+                    onFocus={tab.id === 'lists' ? warmListsManager : undefined}
+                    className={cn(
+                      'nav-switch-item relative z-10 h-10 min-w-0 gap-1.5 rounded-md border-0 bg-transparent px-1.5 py-2 text-[13px] font-medium shadow-none focus-visible:ring-inset focus-visible:ring-offset-0 sm:gap-2 sm:px-4 sm:text-sm',
+                      isActive
+                        ? 'text-white'
+                        : 'text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100',
+                    )}
+                  >
+                    <tab.icon
+                      aria-hidden='true'
+                      className={cn(
+                        'size-3.5 shrink-0 transition-colors duration-150 motion-reduce:transition-none',
+                        isActive && 'text-(--accent-nav)',
+                      )}
+                    />
+                    <span>{tab.label}</span>
+                    {count !== undefined && (
+                      <span
+                        className={cn(
+                          'shrink-0 text-[11px] tabular-nums leading-none',
+                          isActive ? 'text-zinc-300' : 'text-zinc-500',
+                        )}
+                      >
+                        {count}
+                      </span>
+                    )}
+                  </TabsTrigger>
+                );
+              })}
             </TabsList>
           </div>
 
@@ -306,13 +343,16 @@ export function Profile() {
           <TabsContent value='lists'>
             <Suspense
               fallback={
-                <div role='status' aria-busy='true' className='mx-auto max-w-3xl space-y-4'>
+                <div role='status' aria-busy='true' className='space-y-4'>
                   <span className='sr-only'>Loading lists…</span>
-                  <Skeleton className='h-[46px] w-full' />
-                  <div aria-hidden='true' className='space-y-3'>
-                    <Skeleton className='h-14 w-full rounded-xl' />
-                    <Skeleton className='h-14 w-full rounded-xl' />
-                    <Skeleton className='h-14 w-full rounded-xl' />
+                  <div aria-hidden='true' className='flex items-center justify-between gap-3'>
+                    <Skeleton className='h-5 w-36 rounded-md' />
+                    <Skeleton className='h-9 w-28 rounded-lg' />
+                  </div>
+                  <div aria-hidden='true' className='space-y-2.5'>
+                    <Skeleton className='h-[74px] w-full rounded-lg' />
+                    <Skeleton className='h-[74px] w-full rounded-lg' />
+                    <Skeleton className='h-[74px] w-full rounded-lg' />
                   </div>
                 </div>
               }
@@ -408,6 +448,7 @@ function ProfileLibraryTab({
   const isBulkBusy =
     bulkRemoveFromLibrary.isPending || bulkSetWatchStatus.isPending || bulkAddToList.isPending;
   const librarySearchRef = useRef<HTMLInputElement>(null);
+  useFindShortcut(() => librarySearchRef.current);
   const filteredLibrary = profileLibraryQuery.data?.items ?? EMPTY_LIBRARY_ITEMS;
   const librarySearchPending =
     librarySearch !== librarySearchParam || profileLibraryQuery.isFetching;
@@ -506,14 +547,17 @@ function ProfileLibraryTab({
 
   return (
     <div
-      className={cn('space-y-4', viewMode === 'list' && 'mx-auto max-w-3xl')}
+      className='space-y-4'
       data-collection-selection=''
       data-escape-capture={selectionMode ? '' : undefined}
     >
       {libraryCount === undefined && profileLibraryQuery.isLoading && (
         <div aria-hidden='true' className='space-y-3'>
           <Skeleton className='h-10 w-full rounded-lg' />
-          <Skeleton className='h-[38px] w-64 rounded-md' />
+          <div className='flex items-center justify-between gap-2'>
+            <Skeleton className='h-9 w-64 rounded-md' />
+            <Skeleton className='h-9 w-56 rounded-md' />
+          </div>
         </div>
       )}
       {libraryCount !== undefined && libraryCount > 0 && (
@@ -572,6 +616,7 @@ function ProfileLibraryTab({
             selectAllDisabled={selectAllDisabled}
             allFilteredSelected={allFilteredSelected}
             onSelectAllFiltered={() => librarySelection.selectAll(filteredLibraryIds)}
+            onInvertSelection={() => librarySelection.invert(filteredLibraryIds)}
             onClearSelection={librarySelection.clear}
             onExitSelectionMode={exitSelectionMode}
             onBulkSetStatus={(status) => void handleBulkSetStatus(status)}
@@ -694,6 +739,7 @@ function ProfileHistoryTab({
     historyTypeParam === 'movie' || historyTypeParam === 'series' ? historyTypeParam : 'all';
   const historyOrder = searchParams.get('historyOrder') === 'oldest' ? 'oldest' : 'recent';
   const historySearchRef = useRef<HTMLInputElement>(null);
+  useFindShortcut(() => historySearchRef.current);
   const historyContentRef = useRef<HTMLDivElement>(null);
   const historyRemovalFocusRef = useRef<{ button: HTMLButtonElement; index: number } | null>(null);
   const handleHistoryRemove = (button: HTMLButtonElement, index: number) => {
@@ -777,7 +823,7 @@ function ProfileHistoryTab({
       ref={historyContentRef}
       data-collection-selection=''
       data-escape-capture={historySelection.selectionMode ? '' : undefined}
-      className={cn('space-y-4', viewMode === 'list' && 'mx-auto max-w-3xl')}
+      className='space-y-4'
     >
       {historySearchPending && (
         <span role='status' className='sr-only'>
@@ -837,7 +883,10 @@ function ProfileHistoryTab({
               onClick={
                 historySelection.selectionMode ? historySelection.exit : historySelection.begin
               }
-              className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300'
+              className={cn(
+                FILTER_MENU_BUTTON_CLASS,
+                historySelection.selectionMode && FILTER_ACTIVE_BUTTON_CLASS,
+              )}
             >
               <CheckSquare className='h-3.5 w-3.5' />
               Select
@@ -856,6 +905,7 @@ function ProfileHistoryTab({
           selectAllDisabled={selectAllDisabled}
           isBusy={bulkRemoveHistory.isPending}
           onSelectAll={() => historySelection.selectAll(filteredHistoryIds)}
+          onInvert={() => historySelection.invert(filteredHistoryIds)}
           onClear={historySelection.clear}
           onDone={historySelection.exit}
           onRemove={() => setConfirmHistoryRemoveOpen(true)}
@@ -971,6 +1021,7 @@ function ProfileHeader({
   totalWatchTimeSecs,
   statusCounts,
   statusCountsLoading,
+  activeTab,
   onOpenTab,
   activeStatus,
   onToggleStatus,
@@ -994,134 +1045,162 @@ function ProfileHeader({
   totalWatchTimeSecs: number | undefined;
   statusCounts: Record<WatchStatus, number>;
   statusCountsLoading: boolean;
+  activeTab: ProfileTabId;
   onOpenTab: (tab: ProfileTabId) => void;
   activeStatus: WatchStatus | undefined;
   onToggleStatus: (status: WatchStatus) => void;
 }) {
   return (
-    <PageCard aria-label='Profile summary' className='px-5 py-5 sm:px-6 sm:py-6'>
-      <span
-        aria-hidden='true'
-        className='pointer-events-none absolute inset-0'
-        style={{
-          background: `radial-gradient(480px 180px at 10% 0%, ${profile.accentColor}14, transparent 70%)`,
-        }}
-      />
-      <div className='relative flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between lg:gap-6'>
-        <div className='flex min-w-0 items-center gap-4 lg:flex-1' aria-busy={isHydrating}>
-          {isIdentityReady ? (
-            <>
-              <ProfileAvatarEditor profile={profile} />
+    <div className='relative'>
+      <PageCard aria-label='Profile summary' className='px-5 py-5 sm:px-6 sm:py-6'>
+        <span
+          aria-hidden='true'
+          className='pointer-events-none absolute inset-0'
+          style={{
+            background:
+              'linear-gradient(125deg, transparent 62%, rgb(var(--app-accent-rgb) / 0.04) 100%)',
+          }}
+        />
+        <div className='relative flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between lg:gap-6'>
+          <div className='flex min-w-0 items-center gap-4 lg:flex-1' aria-busy={isHydrating}>
+            {isIdentityReady ? (
+              <>
+                <ProfileAvatarEditor profile={profile} />
 
-              <div className='min-w-0 flex-1'>
-                <div className='flex min-w-0 items-center gap-2'>
-                  <h1
-                    dir='auto'
-                    title={profile.username}
-                    className='truncate text-[22px] font-semibold tracking-[-0.03em] text-white'
-                  >
-                    {profile.username}
-                  </h1>
-                  <div className='shrink-0'>
-                    <ProfileSettingsPopover
-                      profile={profile}
-                      onUpdate={onUpdateProfile}
-                      isSaving={isSaving}
-                      isHydrating={isHydrating}
-                      isError={isError}
-                      isRetrying={isRetrying}
-                      onRetry={onRetry}
-                    />
+                <div className='min-w-0 flex-1'>
+                  <div className='flex min-w-0 items-center gap-2'>
+                    <h1
+                      dir='auto'
+                      title={profile.username}
+                      className='truncate text-[22px] font-semibold tracking-[-0.03em] text-white'
+                    >
+                      {profile.username}
+                    </h1>
+                    <div className='shrink-0'>
+                      <ProfileSettingsPopover
+                        profile={profile}
+                        onUpdate={onUpdateProfile}
+                        isSaving={isSaving}
+                        isHydrating={isHydrating}
+                        isError={isError}
+                        isRetrying={isRetrying}
+                        onRetry={onRetry}
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <Skeleton className='h-21 w-21 shrink-0 rounded-full' />
-              <Skeleton className='h-7 w-40 max-w-full' />
-              <span className='sr-only'>
-                {isHydrating ? 'Loading profile…' : 'Profile unavailable'}
-              </span>
-            </>
-          )}
-        </div>
+              </>
+            ) : (
+              <>
+                <Skeleton className='size-[84px] shrink-0 rounded-full' />
+                <Skeleton className='h-8 w-40 max-w-full' />
+                <span className='sr-only'>
+                  {isHydrating ? 'Loading profile…' : 'Profile unavailable'}
+                </span>
+              </>
+            )}
+          </div>
 
-        <div className='grid w-full grid-cols-2 gap-x-4 gap-y-4 rounded-lg border border-white/[0.06] bg-black/15 p-2 sm:grid-cols-4 lg:w-auto lg:shrink-0 lg:gap-4'>
-          <StatChip
-            value={libraryCount}
-            isLoading={statsLoading}
-            label='Library'
-            valueClassName='text-(--accent-nav)'
-            onClick={() => onOpenTab('library')}
-          />
-          <StatChip
-            value={listsCount}
-            isLoading={statsLoading}
-            label='Lists'
-            valueClassName='text-white'
-            onClick={() => onOpenTab('lists')}
-          />
-          <StatChip
-            value={historyCount}
-            isLoading={statsLoading}
-            label='History'
-            valueClassName='text-white'
-            onClick={() => onOpenTab('history')}
-          />
-          <StatChip
-            value={totalWatchTimeSecs == null ? undefined : formatHoursWatched(totalWatchTimeSecs)}
-            label='Hours watched'
-            isLoading={watchTimeLoading}
-            valueClassName='text-white'
-            title='Estimated from saved playback progress, including seeks and episodes marked watched.'
-          />
+          <div className='grid w-full grid-cols-2 gap-1.5 rounded-lg border border-white/[0.07] bg-black/25 p-1.5 shadow-[inset_0_1px_0_rgb(255_255_255/0.03)] sm:grid-cols-4 lg:w-auto lg:shrink-0 lg:gap-2'>
+            <StatChip
+              value={libraryCount}
+              isLoading={statsLoading}
+              label='Library'
+              active={activeTab === 'library'}
+              valueClassName={activeTab === 'library' ? 'text-(--accent-nav)' : 'text-white'}
+              onClick={() => onOpenTab('library')}
+            />
+            <StatChip
+              value={listsCount}
+              isLoading={statsLoading}
+              label='Lists'
+              active={activeTab === 'lists'}
+              valueClassName={activeTab === 'lists' ? 'text-(--accent-nav)' : 'text-white'}
+              onClick={() => onOpenTab('lists')}
+            />
+            <StatChip
+              value={historyCount}
+              isLoading={statsLoading}
+              label='History'
+              active={activeTab === 'history'}
+              valueClassName={activeTab === 'history' ? 'text-(--accent-nav)' : 'text-white'}
+              onClick={() => onOpenTab('history')}
+            />
+            <StatChip
+              value={
+                totalWatchTimeSecs == null ? undefined : formatHoursWatched(totalWatchTimeSecs)
+              }
+              label='Hours watched'
+              isLoading={watchTimeLoading}
+              valueClassName='text-white'
+              title='Estimated from saved playback progress, including seeks and episodes marked watched.'
+            />
+          </div>
         </div>
-      </div>
-      {headerError && (
-        <RetryBanner
-          className='relative mt-4 px-3 py-2'
-          message="Couldn't load some profile information."
-          onRetry={onRetryHeader}
-          isRetrying={headerRetrying}
-        />
-      )}
-      {(statusCountsLoading || WATCH_STATUSES.some((status) => statusCounts[status] > 0)) && (
-        <div className='relative mt-3 flex flex-wrap gap-x-6 gap-y-1 border-t border-white/[0.06] pt-2'>
-          {statusCountsLoading ? (
-            <Skeleton aria-hidden='true' className='h-4.5 w-48' />
-          ) : (
-            WATCH_STATUSES.map((s) => {
-              const count = statusCounts[s] ?? 0;
-              if (count === 0) return null;
-              const colors = WATCH_STATUS_COLORS[s];
-              const active = activeStatus === s;
-              return (
-                <button
-                  key={s}
-                  type='button'
-                  aria-pressed={active}
-                  title={
-                    active ? 'Show all Library titles' : `Show ${WATCH_STATUS_LABELS[s]} in Library`
-                  }
-                  onClick={() => onToggleStatus(s)}
-                  className={cn(
-                    'flex min-h-9 items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-[13px] transition-colors hover:bg-white/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
-                    active && 'bg-white/[0.08] hover:bg-white/[0.1]',
-                  )}
-                >
-                  <WatchStatusIcon status={s} className='size-3.5' strokeWidth={2.1} />
-                  <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
-                  <span className={active ? 'text-zinc-100' : 'text-zinc-400'}>
-                    {WATCH_STATUS_LABELS[s]}
-                  </span>
-                </button>
-              );
-            })
-          )}
-        </div>
-      )}
-    </PageCard>
+        {headerError && (
+          <RetryBanner
+            className='relative mt-4 px-3 py-2'
+            message="Couldn't load some profile information."
+            onRetry={onRetryHeader}
+            isRetrying={headerRetrying}
+          />
+        )}
+        {(statusCountsLoading || WATCH_STATUSES.some((status) => statusCounts[status] > 0)) && (
+          <div className='relative mt-3.5 flex flex-wrap items-center gap-1.5 border-t border-white/[0.06] pt-2.5'>
+            {statusCountsLoading ? (
+              <div aria-hidden='true' className='flex flex-wrap items-center gap-1.5'>
+                <Skeleton className='h-9 w-24 rounded-md' />
+                <Skeleton className='h-9 w-24 rounded-md' />
+                <Skeleton className='h-9 w-28 rounded-md' />
+              </div>
+            ) : (
+              WATCH_STATUSES.map((s) => {
+                const count = statusCounts[s] ?? 0;
+                if (count === 0) return null;
+                const colors = WATCH_STATUS_COLORS[s];
+                const active = activeStatus === s;
+                return (
+                  <button
+                    key={s}
+                    type='button'
+                    aria-pressed={active}
+                    title={
+                      active
+                        ? 'Show all Library titles'
+                        : `Show ${WATCH_STATUS_LABELS[s]} in Library`
+                    }
+                    onClick={() => onToggleStatus(s)}
+                    className={cn(
+                      'flex min-h-9 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none',
+                      active
+                        ? cn(
+                            'text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.07)]',
+                            colors.bg,
+                            colors.border,
+                          )
+                        : 'border-transparent bg-transparent hover:border-white/10 hover:bg-white/[0.05]',
+                    )}
+                  >
+                    <WatchStatusIcon status={s} className='size-3.5' strokeWidth={2.1} />
+                    <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
+                    <span className={active ? 'text-zinc-100' : 'text-zinc-400'}>
+                      {WATCH_STATUS_LABELS[s]}
+                    </span>
+                    {active && <X aria-hidden='true' className='ml-0.5 size-3 text-zinc-300' />}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        )}
+      </PageCard>
+      {/* Top-right accent ridge drawn over PageCard's 1px rounded-xl border, synced to the user's accent color. */}
+      <span aria-hidden='true' className='pointer-events-none absolute inset-0 rounded-xl'>
+        <span className='absolute right-0 top-0 size-[13px] rounded-tr-xl border-r border-t border-[rgb(var(--app-accent-rgb))]' />
+        <span className='absolute right-[12px] top-0 h-px w-28 bg-linear-to-l from-[rgb(var(--app-accent-rgb))] to-transparent' />
+        <span className='absolute right-0 top-[12px] h-16 w-px bg-linear-to-b from-[rgb(var(--app-accent-rgb))] to-transparent' />
+      </span>
+    </div>
   );
 }
 
@@ -1136,6 +1215,7 @@ function StatChip({
   value,
   isLoading,
   label,
+  active = false,
   valueClassName,
   title,
   onClick,
@@ -1143,6 +1223,7 @@ function StatChip({
   value: number | string | undefined;
   isLoading: boolean;
   label: string;
+  active?: boolean;
   valueClassName?: string;
   title?: string;
   onClick?: () => void;
@@ -1152,22 +1233,23 @@ function StatChip({
     <Root
       type={onClick ? 'button' : undefined}
       onClick={onClick}
+      aria-current={onClick && active ? 'page' : undefined}
       title={title ?? (onClick ? `Open ${label}` : undefined)}
       className={cn(
-        'flex min-w-0 flex-col items-start gap-2 rounded-md px-3 py-2 text-left',
+        'group/stat flex min-w-[92px] flex-col items-start gap-1.5 rounded-md px-3.5 py-2 text-left',
         onClick &&
-          'transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
+          'transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none',
       )}
     >
       {isLoading && value === undefined ? (
         <span role='status'>
-          <Skeleton className='h-[21px] w-10' />
+          <Skeleton className='h-6 w-10' />
           <span className='sr-only'>Loading {label.toLowerCase()}…</span>
         </span>
       ) : (
         <span
           className={cn(
-            'text-2xl font-semibold tabular-nums tracking-tight leading-none',
+            'text-2xl font-semibold tabular-nums tracking-tight leading-none transition-colors duration-150 motion-reduce:transition-none',
             valueClassName,
           )}
         >
@@ -1175,8 +1257,13 @@ function StatChip({
         </span>
       )}
       <span className='inline-flex items-center gap-1 text-xs leading-4 text-zinc-400'>
-        {label}
-        {onClick && <ChevronRight aria-hidden='true' className='size-3 shrink-0 text-zinc-500' />}
+        <span className={cn(active && 'text-zinc-200')}>{label}</span>
+        {onClick && (
+          <ChevronRight
+            aria-hidden='true'
+            className='size-3 shrink-0 text-zinc-500 transition-[color,transform] duration-150 group-hover/stat:translate-x-0.5 group-hover/stat:text-zinc-300 motion-reduce:transition-none'
+          />
+        )}
       </span>
     </Root>
   );
@@ -1269,7 +1356,7 @@ function CollectionTabContent<T>({
               viewMode === 'grid' ? (
                 <MediaCardSkeleton key={index} />
               ) : (
-                <Skeleton key={index} className='h-[70px] w-full rounded-md bg-zinc-900/50' />
+                <Skeleton key={index} className='h-[78px] w-full rounded-lg bg-zinc-900/50' />
               ),
             )}
           </div>

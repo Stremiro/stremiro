@@ -18,10 +18,11 @@ interface SubtitleAppearancePatch {
 
 // One geometry for the two pickers and the B/I toggles — the row reads as a single strip.
 const CONTROL_CLASS =
-  'flex shrink-0 cursor-pointer items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/[0.05] text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) disabled:cursor-wait disabled:opacity-35 motion-reduce:transition-none';
+  'flex shrink-0 cursor-pointer items-center justify-center gap-1 rounded-lg border border-white/[0.09] bg-white/[0.03] text-zinc-400 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] transition-colors duration-150 hover:border-white/[0.15] hover:bg-white/[0.07] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) disabled:cursor-wait disabled:opacity-35 motion-reduce:transition-none';
 const FIELD_LABEL_CLASS = 'mb-1.5 text-[12px] font-medium text-zinc-400';
-const CONTROL_OPEN_CLASS = 'bg-white/[0.09] text-white hover:bg-white/[0.09]';
-const CONTROL_PRESSED_CLASS = 'bg-white/[0.14] text-white hover:bg-white/[0.16] hover:text-white';
+const CONTROL_OPEN_CLASS = 'border-white/[0.16] bg-white/[0.08] text-white hover:bg-white/[0.08]';
+const CONTROL_PRESSED_CLASS =
+  'border-white/[0.18] bg-white/[0.12] text-white hover:bg-white/[0.15] hover:text-white';
 const LIST_ITEM_CLASS =
   'flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left transition-colors duration-150 hover:bg-white/[0.07] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--accent-nav) motion-reduce:transition-none';
 
@@ -216,16 +217,31 @@ export function SubtitleAppearanceControls({
       <div
         aria-hidden='true'
         className={cn(
-          // A dim film frame, not a swatch: soft vignette + faint horizon so the
-          // sample text reads the way it will over real video.
-          'relative flex items-center justify-center overflow-hidden rounded-lg bg-[#0b0b0d] px-3',
-          compact ? 'h-11' : 'h-14 border border-white/[0.06]',
+          // Cinematic dark frame with lower-third placement so edge, shadow, and box
+          // styles read the way they appear over real video.
+          'relative flex justify-center overflow-hidden bg-[#050608]',
+          compact
+            ? 'h-12 items-center rounded-lg border border-white/[0.06] px-3'
+            : 'h-28 items-end rounded-xl border border-white/[0.075] px-5 pb-4 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]',
         )}
       >
-        <span className='pointer-events-none absolute inset-0 bg-[radial-gradient(120%_140%_at_50%_-20%,rgba(255,255,255,0.09),transparent_62%)]' />
-        <span className='pointer-events-none absolute inset-x-0 bottom-0 h-1/2 bg-[linear-gradient(to_top,rgba(0,0,0,0.55),transparent)]' />
         <span
-          className={cn('relative', compact ? 'text-[15px]' : 'text-[17px]')}
+          className='pointer-events-none absolute inset-0'
+          style={{
+            background: compact
+              ? 'linear-gradient(180deg, rgba(24,28,36,0.55) 0%, rgba(7,8,11,0.92) 100%)'
+              : 'linear-gradient(168deg, rgba(26,31,42,0.72) 0%, rgba(14,16,22,0.84) 52%, rgba(5,6,8,0.96) 100%)',
+          }}
+        />
+        {!compact && (
+          <span className='pointer-events-none absolute inset-x-0 top-0 h-px bg-linear-to-r from-transparent via-white/[0.09] to-transparent' />
+        )}
+        <span className='pointer-events-none absolute inset-x-0 bottom-0 h-2/3 bg-linear-to-t from-black/75 via-black/25 to-transparent' />
+        <span
+          className={cn(
+            'relative text-center leading-snug',
+            compact ? 'truncate text-[14.5px]' : 'max-w-[34ch] text-[18px]',
+          )}
           style={previewStyle(
             subtitleFont,
             subtitleColor,
@@ -234,7 +250,7 @@ export function SubtitleAppearanceControls({
             subtitleItalic,
           )}
         >
-          Subtitles look like this
+          {compact ? 'We are running out of time.' : 'The signal came from beyond the horizon.'}
         </span>
       </div>
       {compact ? (

@@ -15,6 +15,7 @@ const LOCAL_NETWORK_SUFFIXES: [&str; 6] = ["localhost", "local", "lan", "interna
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum AppLink {
+    Settings,
     Addon {
         url: String,
     },

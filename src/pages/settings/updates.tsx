@@ -5,7 +5,11 @@ import { toast } from 'sonner';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { ReleaseNotes } from '@/components/release-notes';
 import { RetryBanner } from '@/components/retry-banner';
-import { UpdateAccentHairline, UpdateProgressBar } from '@/components/update-chrome';
+import {
+  UpdateAccentHairline,
+  UpdateAsciiMotif,
+  UpdateProgressBar,
+} from '@/components/update-chrome';
 import { Button } from '@/components/ui/button';
 import { useAppReleaseNotes, useAppUpdater, useMarkAppUpdateSeen } from '@/hooks/use-app-updater';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
@@ -80,8 +84,7 @@ function AppChangelog({
               {
                 value: 'new',
                 label: `v${pendingUpdate.version} · New`,
-                unselectedClassName:
-                  'text-emerald-300 hover:bg-white/[0.06] hover:text-emerald-200',
+                unselectedClassName: 'text-zinc-200 hover:bg-white/[0.06] hover:text-white',
               },
               {
                 value: 'installed',
@@ -93,14 +96,14 @@ function AppChangelog({
           />
         </div>
       ) : null}
-      <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-5 py-3'>
+      <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] bg-white/[0.02] px-5 py-3'>
         <p className='text-[14px] font-semibold text-white'>
           What's new{version ? ' in' : ''}
           {version ? (
             <span
               className={cn(
-                'ml-1 font-medium tabular-nums',
-                showNewRelease ? 'text-emerald-200' : 'text-zinc-300',
+                'ml-1 font-mono text-[13px] font-medium tabular-nums',
+                showNewRelease ? 'text-zinc-100' : 'text-zinc-300',
               )}
             >
               v{version}
@@ -202,14 +205,25 @@ export function UpdatesSection() {
       ? 'Stremiro relaunches when the install finishes. Your data carries over.'
       : null;
 
-  const headerStatus = isInstalling ? null : updateState.status === 'up-to-date' ? (
+  const headerStatus = isInstalling ? (
+    <span className='inline-flex items-center gap-2'>
+      <UpdateAsciiMotif active />
+      <span className={cn(SETTINGS_HEADER_STATUS_CLASS, 'text-zinc-100')}>Installing…</span>
+    </span>
+  ) : updateState.status === 'up-to-date' ? (
     <span className={SETTINGS_HEADER_STATUS_CLASS}>Up to date</span>
   ) : isUpdateAvailable ? (
-    <span className={cn(SETTINGS_HEADER_STATUS_CLASS, 'text-emerald-300')}>
-      v{pendingUpdate?.version} ready
+    <span className='inline-flex items-center gap-2'>
+      <UpdateAsciiMotif />
+      <span className={cn(SETTINGS_HEADER_STATUS_CLASS, 'font-mono text-[12px] text-zinc-100')}>
+        v{pendingUpdate?.version} ready
+      </span>
     </span>
   ) : isChecking ? (
-    <span className={SETTINGS_HEADER_STATUS_CLASS}>Checking…</span>
+    <span className='inline-flex items-center gap-2'>
+      <UpdateAsciiMotif active />
+      <span className={SETTINGS_HEADER_STATUS_CLASS}>Checking…</span>
+    </span>
   ) : null;
 
   const handleCheck = () => {
@@ -238,7 +252,7 @@ export function UpdatesSection() {
       <SettingsGroupHeader icon={RefreshCw} title='Updates' action={headerStatus} />
 
       <SettingsCard>
-        {isUpdateAvailable ? <UpdateAccentHairline /> : null}
+        {isUpdateAvailable || isInstalling ? <UpdateAccentHairline /> : null}
         <SettingsBody className='space-y-4'>
           <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
           <SettingsRow
@@ -253,37 +267,33 @@ export function UpdatesSection() {
               onChange={() => updatePreferences({ automaticUpdateChecks: !automaticUpdateChecks })}
             />
           </SettingsRow>
-          <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] text-zinc-400'>
+          <div className='flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-white/[0.07] bg-black/25 px-3.5 py-2.5 text-[13.5px] text-zinc-400 shadow-[inset_0_1px_0_rgb(255_255_255/0.03)]'>
             <span>
               Installed{' '}
-              <span className='font-semibold tabular-nums text-zinc-100'>
+              <span className='font-mono text-[13px] font-semibold tabular-nums text-zinc-100'>
                 {currentVersion ? `v${currentVersion}` : 'Unknown'}
               </span>
             </span>
             {pendingUpdate ? (
               <>
-                <span aria-hidden='true' className='text-zinc-700'>
+                <span aria-hidden='true' className='text-zinc-600'>
                   →
                 </span>
                 <span>
                   Latest{' '}
-                  <span className='font-semibold tabular-nums text-emerald-300'>
+                  <span className='font-mono text-[13px] font-semibold tabular-nums text-zinc-100'>
                     v{pendingUpdate.version}
                   </span>
                 </span>
               </>
             ) : null}
-            <span>· Last checked {lastCheckedLabel}</span>
+            <span className='text-zinc-500'>· Last checked {lastCheckedLabel}</span>
           </div>
 
           {isInstalling ? (
             <div className='space-y-2' role='status' aria-live='polite'>
-              <UpdateProgressBar
-                percent={installPercent}
-                className='h-1.5'
-                barClassName='bg-emerald-300'
-              />
-              <p className='text-[13px] tabular-nums text-zinc-500'>
+              <UpdateProgressBar percent={installPercent} className='h-1' />
+              <p className='text-[13px] tabular-nums text-zinc-400'>
                 {formatAppUpdateProgress(updateState.installProgress)}
               </p>
             </div>

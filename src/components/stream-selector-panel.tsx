@@ -122,7 +122,7 @@ function SegmentGroup<T extends string>({
       ref={groupRef}
       role='radiogroup'
       aria-label={label}
-      className='relative isolate flex shrink-0 items-center gap-px bg-black/50 rounded-lg p-0.5'
+      className='relative isolate flex shrink-0 items-center gap-px rounded-lg border border-white/[0.06] bg-black/45 p-0.5'
     >
       {indicator && (
         <span
@@ -165,7 +165,10 @@ function SegmentGroup<T extends string>({
             SELECTOR_SEGMENT_BASE_CLASS,
             'relative z-10',
             value === option.value
-              ? (option.activeTextClass ?? 'text-(--accent-nav)')
+              ? cn(
+                  option.activeTextClass ?? 'text-(--accent-nav)',
+                  !indicator && (option.activeClass ?? 'bg-[rgb(var(--accent-nav-rgb)/0.16)]'),
+                )
               : SELECTOR_SEGMENT_INACTIVE_CLASS,
           )}
         >
@@ -239,7 +242,8 @@ export function StreamSelectorHeader({
   title,
 }: StreamSelectorHeaderProps) {
   const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
-  const kicker = formatSeasonEpisode(season, episode) || mediaLabel;
+  const episodeLabel = formatSeasonEpisode(season, episode);
+  const srContext = episodeLabel || mediaLabel;
   const playbackLabel =
     startTime !== undefined && Number.isFinite(startTime) && startTime >= 0
       ? startTime < MIN_RESUME_POSITION_SECS
@@ -247,20 +251,35 @@ export function StreamSelectorHeader({
         : `Resume from ${formatTime(startTime)}`
       : 'Choose a stream to play';
   return (
-    <div className='relative h-48 shrink-0 overflow-hidden [@media(max-height:800px)]:h-36'>
+    <div className='relative min-h-56 shrink-0 overflow-hidden [@media(max-height:800px)]:min-h-44'>
       {backdrop ? (
         <div className='absolute inset-0 z-0'>
           <RemoteImage
             src={backdrop}
             loading='lazy'
-            className='w-full h-full object-cover opacity-30'
+            fadeIn
+            className='w-full h-full object-cover opacity-40'
             alt=''
           />
-          <div className='absolute inset-0 bg-linear-to-t from-zinc-950 via-zinc-950/70 to-transparent' />
-          <div className='absolute inset-0 bg-linear-to-r from-zinc-950/80 via-transparent to-transparent' />
+          <div
+            aria-hidden='true'
+            className='absolute inset-0'
+            style={{
+              background:
+                'radial-gradient(65% 95% at 16% 0%, rgb(var(--accent-art-rgb) / 0.12), transparent 72%)',
+            }}
+          />
+          <div className='absolute inset-0 bg-linear-to-t from-zinc-950 via-zinc-950/65 to-zinc-950/15' />
+          <div className='absolute inset-0 bg-linear-to-r from-zinc-950/85 via-zinc-950/35 to-transparent' />
         </div>
       ) : (
-        <div className='absolute inset-0 bg-zinc-900/60 z-0' />
+        <div
+          className='absolute inset-0 z-0 bg-zinc-950'
+          style={{
+            backgroundImage:
+              'radial-gradient(65% 95% at 16% 0%, rgb(var(--accent-art-rgb) / 0.1), transparent 72%)',
+          }}
+        />
       )}
 
       <button
@@ -269,29 +288,31 @@ export function StreamSelectorHeader({
         aria-label='Close stream selector'
         aria-keyshortcuts='Escape'
         title='Close (Esc)'
-        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-black/40 text-white/70 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
+        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.1] bg-black/50 text-white/70 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md transition-colors hover:border-white/[0.18] hover:bg-black/70 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
       >
         <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
       </button>
 
-      <DialogHeader className='relative z-10 p-6 h-full flex flex-col justify-end text-left [@media(max-height:800px)]:p-4'>
-        <div className='flex items-end gap-4'>
+      <DialogHeader className='relative z-10 flex h-full min-h-56 flex-col justify-end px-6 pb-5 pt-9 text-left [@media(max-height:800px)]:min-h-44 [@media(max-height:800px)]:px-5 [@media(max-height:800px)]:pb-4 [@media(max-height:800px)]:pt-6'>
+        <div className='flex items-end gap-5'>
           {poster && (
             <RemoteImage
               src={poster}
               loading='lazy'
-              className='w-20 h-[120px] rounded-md shadow-2xl border border-white/10 object-cover hidden sm:block mb-0.5 shrink-0 [@media(max-height:800px)]:h-24 [@media(max-height:800px)]:w-16'
+              fadeIn
+              className='hidden h-[132px] w-[88px] shrink-0 rounded-md object-cover shadow-[0_18px_36px_-14px_rgb(0_0_0/0.92)] ring-1 ring-white/15 sm:block [@media(max-height:800px)]:h-[108px] [@media(max-height:800px)]:w-[72px]'
               alt=''
             />
           )}
-          <div className='flex min-w-0 flex-1 flex-col gap-1.5 pr-8'>
-            <p className={HEADER_KICKER_CLASS}>{kicker}</p>
-            <div className='flex h-14 min-w-0 items-center [@media(max-height:800px)]:h-10'>
+          <div className='flex min-w-0 flex-1 flex-col gap-1.5 pr-10'>
+            {episodeLabel && <p className={HEADER_KICKER_CLASS}>{episodeLabel}</p>}
+            <div className='flex min-w-0 items-center'>
               {logoSrc ? (
                 <>
                   <RemoteImage
                     src={logoSrc}
-                    className='max-h-12 w-auto max-w-full object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)] sm:max-w-72 [@media(max-height:800px)]:max-h-10'
+                    fadeIn
+                    className='max-h-13 w-auto max-w-full object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)] sm:max-w-80 [@media(max-height:800px)]:max-h-10'
                     alt=''
                     onError={onLogoError}
                   />
@@ -300,7 +321,7 @@ export function StreamSelectorHeader({
               ) : (
                 <DialogTitle
                   title={title}
-                  className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white [@media(max-height:800px)]:line-clamp-1 [@media(max-height:800px)]:text-[22px]'
+                  className='line-clamp-2 text-[28px] font-bold leading-[1.08] tracking-[-0.025em] text-white [@media(max-height:800px)]:line-clamp-1 [@media(max-height:800px)]:text-[23px]'
                 >
                   {title}
                 </DialogTitle>
@@ -309,17 +330,17 @@ export function StreamSelectorHeader({
             {episodeTitle && (
               <p
                 title={episodeTitle}
-                className='truncate text-[15px] font-medium leading-snug text-white/75'
+                className='truncate text-[15px] font-medium leading-snug text-white/80'
               >
                 {episodeTitle}
               </p>
             )}
-            <DialogDescription className='text-xs font-medium leading-snug text-zinc-300'>
-              <span className='sr-only'>Choose a stream source. {kicker}. </span>
+            <DialogDescription className='text-[13px] font-medium leading-snug text-zinc-300'>
+              <span className='sr-only'>Choose a stream source. {srContext}. </span>
               {playbackLabel}
             </DialogDescription>
             {compactOverview && (
-              <p className='line-clamp-2 max-w-2xl text-xs leading-relaxed text-zinc-400 hidden sm:block [@media(max-height:800px)]:hidden'>
+              <p className='hidden max-w-2xl line-clamp-2 text-[12.5px] leading-relaxed text-zinc-400 sm:block [@media(max-height:800px)]:line-clamp-1'>
                 {compactOverview}
               </p>
             )}
@@ -652,7 +673,7 @@ export function StreamAddonHealthStrip({
       <div
         role='group'
         aria-label={`Sources: ${summary}`}
-        className='flex min-w-0 flex-1 overflow-x-auto overscroll-contain rounded-md border border-white/[0.07] bg-white/[0.02] scrollbar-hide'
+        className='flex min-w-0 flex-1 overflow-x-auto overscroll-contain rounded-lg border border-white/[0.07] bg-black/35 scrollbar-hide'
       >
         {metrics.map((metric) => {
           // Filters key on the addon config id stamped on each stream as `sourceId`, not the display name.
@@ -827,7 +848,7 @@ export function StreamFilterToolbar({
           onSubmit={onSearchSubmit}
           aria-label='Search streams by release, codec or keyword'
           placeholder='Find a release, codec or keyword…'
-          className='h-8 text-[14px] bg-black/20 border-white/[0.07]'
+          className='h-8 rounded-lg bg-black/40 border-white/[0.08] text-[13px] text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav) focus-visible:ring-(--accent-nav)/25'
           wrapperClassName='min-w-0 flex-1 basis-48'
         />
         <span className='shrink-0 text-[13px] font-semibold leading-5 text-zinc-400 tabular-nums whitespace-nowrap'>
@@ -846,7 +867,7 @@ export function StreamFilterToolbar({
             onResetFilters();
           }}
           className={cn(
-            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[14px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:pointer-events-none aria-disabled:opacity-50',
+            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:pointer-events-none aria-disabled:opacity-45',
             hasActiveFilter && !isResolving
               ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
               : 'border-white/[0.07] text-zinc-500',
@@ -970,19 +991,19 @@ export function StreamResolveFeedbackToast({
     <div className='pointer-events-none absolute inset-x-3 bottom-3 z-30 flex justify-center'>
       <div
         role='status'
-        className='animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none relative w-full max-w-xs overflow-hidden rounded-lg border border-white/[0.08] bg-zinc-950/90 shadow-lg shadow-black/40 backdrop-blur-xl'
+        className='animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none relative w-full max-w-xs overflow-hidden rounded-lg border border-white/[0.09] bg-zinc-950/94 shadow-[0_14px_36px_-12px_rgb(0_0_0/0.8)] backdrop-blur-xl'
       >
         <div className='flex items-center gap-2.5 py-2 pl-2 pr-1.5'>
           {poster ? (
             <RemoteImage
               src={poster}
-              className='h-9 w-6 shrink-0 rounded-[5px] object-cover'
+              className='h-9 w-6 shrink-0 rounded-[5px] object-cover ring-1 ring-white/10'
               alt=''
             />
           ) : (
             <Loader2
               aria-hidden='true'
-              className='ml-1 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none text-white/45'
+              className='ml-1 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none text-[rgb(var(--accent-prog-rgb)/0.8)]'
             />
           )}
 
@@ -1004,8 +1025,8 @@ export function StreamResolveFeedbackToast({
           </button>
         </div>
 
-        <div className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'>
-          <IndeterminateBar className='bg-white/50' />
+        <div className='absolute inset-x-0 bottom-0 h-[2px] overflow-hidden bg-white/[0.06]'>
+          <IndeterminateBar className='bg-[rgb(var(--accent-prog-rgb)/0.85)]' />
         </div>
       </div>
     </div>

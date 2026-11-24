@@ -58,6 +58,9 @@ export function usePlayerAddonSubtitles({
   const subtitleLoadingRef = useRef(false);
   const subtitleSessionEpochRef = useRef(0);
   const autoLoadedLanguageRef = useRef<string | null>(null);
+  const exhaustedAutoLoadRef = useRef<{ language: string; subtitles: AddonSubtitle[] } | null>(
+    null,
+  );
 
   // External tracks die with each native load, including same-URL credential swaps.
   useEffect(() => {
@@ -66,6 +69,7 @@ export function usePlayerAddonSubtitles({
     setAddonSubtitleLoadingId(null);
     subtitleLoadingRef.current = false;
     autoLoadedLanguageRef.current = null;
+    exhaustedAutoLoadRef.current = null;
     return () => {
       subtitleSessionEpochRef.current += 1;
     };
@@ -169,14 +173,21 @@ export function usePlayerAddonSubtitles({
   useEffect(() => {
     if (!autoLoadLanguage) {
       autoLoadedLanguageRef.current = null;
+      exhaustedAutoLoadRef.current = null;
       return;
     }
     if (!loadedAddonSubtitles?.length || autoLoadedLanguageRef.current === autoLoadLanguage) return;
+    const exhausted = exhaustedAutoLoadRef.current;
+    if (exhausted?.language === autoLoadLanguage && exhausted.subtitles === loadedAddonSubtitles)
+      return;
     const epoch = subtitleSessionEpochRef.current;
     let cancelled = false;
     const language = autoLoadLanguage;
     const subtitles = loadedAddonSubtitles;
     const stillCurrent = () => !cancelled && epoch === subtitleSessionEpochRef.current;
+    const markExhausted = () => {
+      if (stillCurrent()) exhaustedAutoLoadRef.current = { language, subtitles };
+    };
     let candidates = subtitles.map((subtitle, index) => ({
       id: index,
       lang: subtitle.lang,
@@ -188,13 +199,20 @@ export function usePlayerAddonSubtitles({
       }
       const { matchedTrackId } = await api.resolvePreferredTrackSelection(candidates, language);
       const subtitle = matchedTrackId === undefined ? undefined : subtitles[matchedTrackId];
-      if (!subtitle || !stillCurrent()) return;
+      if (!stillCurrent()) return;
+      if (!subtitle) {
+        markExhausted();
+        return;
+      }
       const selected = await selectAutoLoadedSubtitle(subtitle, activeStreamLoadKey, language);
       if (selected === false && attemptsLeft > 1) {
         candidates = candidates.filter(
           (candidate) => subtitles[candidate.id]?.url !== subtitle.url,
         );
-        await tryPreferredSubtitle(attemptsLeft - 1);
+        if (candidates.length) await tryPreferredSubtitle(attemptsLeft - 1);
+        else markExhausted();
+      } else if (selected === false) {
+        markExhausted();
       }
     };
     void tryPreferredSubtitle(MAX_AUTO_SUBTITLE_ATTEMPTS).catch(() => undefined);
@@ -219,15 +237,18 @@ export function usePlayerAddonSubtitles({
   const selectedExternal = subTracks.find(
     (track) => track.type === 'sub' && track.selected && track.external,
   );
-  const activeAddonMatches = selectedExternal
-    ? addonSubtitles.filter((subtitle) => isExternalSubtitleTrack(selectedExternal, subtitle))
-    : [];
-  const activeAddonSubtitleId =
-    activeAddonMatches.length === 0
-      ? null
-      : activeAddonMatches.some((subtitle) => subtitle.selectionKey === pickedAddonSubtitleId)
-        ? pickedAddonSubtitleId
-        : activeAddonMatches[0]!.selectionKey;
+  let activeAddonSubtitleId: string | null = null;
+  if (selectedExternal) {
+    for (const subtitle of addonSubtitles) {
+      if (!isExternalSubtitleTrack(selectedExternal, subtitle)) continue;
+      activeAddonSubtitleId ??= subtitle.selectionKey;
+      if (subtitle.selectionKey === pickedAddonSubtitleId) {
+        activeAddonSubtitleId = pickedAddonSubtitleId;
+        break;
+      }
+      if (pickedAddonSubtitleId === null) break;
+    }
+  }
 
   return {
     activeAddonSubtitleId,

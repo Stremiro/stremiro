@@ -8,7 +8,7 @@ import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
 import type { SubscribableStore } from '@/lib/subscribable-store';
-import { clamp, cn, formatEpisodeHeading, isHttpUrl } from '@/lib/utils';
+import { clamp, cn, formatEpisodeHeading, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
 
 const ERROR_SECONDARY_BUTTON_CLASS =
   'rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
@@ -360,6 +360,7 @@ interface PlayerUpNextCardProps {
   episode: Episode;
   thumbnail?: string;
   fallbackThumbnail?: string;
+  hideSpoiler?: boolean;
   /** Null snapshots keep the card manual-only. */
   autoPlayCountdown: SubscribableStore<number | null>;
   autoPlayDurationSeconds: number;
@@ -376,12 +377,18 @@ export function PlayerUpNextCard({
   episode,
   thumbnail,
   fallbackThumbnail,
+  hideSpoiler = false,
   autoPlayCountdown,
   autoPlayDurationSeconds,
   onCancelAutoPlay,
   onPlayNext,
 }: PlayerUpNextCardProps) {
-  const imageSrc = thumbnail || fallbackThumbnail;
+  const imageSrc = (hideSpoiler ? undefined : thumbnail) || fallbackThumbnail;
+  const heading = formatEpisodeHeading(
+    episode.season,
+    episode.episode,
+    hideSpoiler ? getEpisodeTitle(undefined, episode.episode) : episode.title,
+  );
   const playNextButtonRef = useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = (button: HTMLButtonElement | null) => {
     if (!button) return;
@@ -417,9 +424,7 @@ export function PlayerUpNextCard({
         {imageSrc && <EofCardThumbnail src={imageSrc} fallbackSrc={fallbackThumbnail} />}
         <div className='min-w-0'>
           <p className={EOF_EYEBROW_CLASS}>Up Next</p>
-          <p className='mt-1 truncate text-sm font-semibold leading-snug text-white'>
-            {formatEpisodeHeading(episode.season, episode.episode, episode.title)}
-          </p>
+          <p className='mt-1 truncate text-sm font-semibold leading-snug text-white'>{heading}</p>
           <p className='mt-1 text-xs leading-snug text-white/65'>
             {countingDown ? (
               <>

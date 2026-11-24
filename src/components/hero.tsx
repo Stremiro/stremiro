@@ -22,7 +22,6 @@ import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clearTimer,
   cn,
-  formatRuntime,
   GENRE_LINK_CLASS,
   isHttpUrl,
   mediaTypeLabel,
@@ -44,7 +43,7 @@ const HERO_META_DOT = (
 );
 
 const ARROW_BUTTON_CLASS_NAME =
-  'group/step flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/45 transition-colors duration-150 hover:text-white focus-visible:outline-none focus-visible:text-white focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none';
+  'group/step flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/45 transition-[color,background-color] duration-150 hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:text-white focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none';
 
 function HeroCarouselIndicators({
   activeIndex,
@@ -295,7 +294,7 @@ export function Hero({ items }: HeroProps) {
   }, [activeIndex, isHeroDetailsFetched, isOffscreen, isOnline, items, queryClient]);
 
   const heroRating = heroDetails?.rating ?? null;
-  const heroRuntime = formatRuntime(heroDetails?.runtime);
+  const heroRuntime = heroDetails?.runtime;
   const heroLogo = item?.logo || heroDetails?.logo;
   const { isInLibrary, libraryActionLabel, libraryError, libraryReady } = useLibraryMembership(
     item?.id,
@@ -338,10 +337,9 @@ export function Hero({ items }: HeroProps) {
                 <Skeleton className='h-3.5 w-full bg-white/[0.05]' />
                 <Skeleton className='h-3.5 w-4/5 bg-white/[0.05]' />
               </div>
-              <div className='mt-4 flex gap-2'>
-                <Skeleton className='h-11 w-[108px] rounded-md bg-white/[0.08]' />
-                <Skeleton className='h-11 w-11 rounded-md bg-white/[0.06]' />
-                <Skeleton className='hidden h-11 w-20 rounded-md bg-white/[0.05] sm:block' />
+              <div className='mt-4 flex gap-2.5'>
+                <Skeleton className='h-11 w-[128px] rounded-lg bg-white/[0.08]' />
+                <Skeleton className='h-11 w-11 rounded-lg bg-white/[0.06]' />
               </div>
             </div>
             <div className='hidden w-[36%] max-w-md shrink-0 space-y-3 lg:block'>
@@ -489,7 +487,7 @@ export function Hero({ items }: HeroProps) {
                   {heroRating && (
                     <>
                       {HERO_META_DOT}
-                      <span className='flex items-center gap-1.5 font-semibold text-white'>
+                      <span className='flex items-center gap-1.5 font-semibold text-white animate-in fade-in duration-300 motion-reduce:animate-none'>
                         <Star className='h-3 w-3 fill-amber-400 text-amber-400' />
                         {heroRating}
                       </span>
@@ -526,7 +524,7 @@ export function Hero({ items }: HeroProps) {
                   </p>
                 )}
 
-                <div className='mt-4 flex flex-wrap items-center gap-2'>
+                <div className='mt-4 flex flex-wrap items-center gap-2.5'>
                   <Button
                     size='sm'
                     variant={null}
@@ -539,7 +537,7 @@ export function Hero({ items }: HeroProps) {
                     }
                     aria-busy={primaryPlayback.isResolvingPrimaryAction || undefined}
                     title={isOnline ? undefined : 'Reconnect to find streams'}
-                    className='h-11 min-w-[108px] gap-2 rounded-md bg-white px-4 text-sm font-semibold text-black shadow-none transition-colors duration-150 not-aria-disabled:hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80 motion-reduce:transition-none'
+                    className='h-11 min-w-[128px] gap-2 rounded-lg bg-white px-5 text-sm font-semibold tracking-tight text-black shadow-[0_1px_2px_rgb(0_0_0/0.35),0_6px_18px_-10px_rgb(255_255_255/0.16),inset_0_1px_0_rgb(255_255_255/0.9),inset_0_-1px_0_rgb(0_0_0/0.08)] transition-[background-color,box-shadow,opacity] duration-200 ease-out not-aria-disabled:hover:bg-zinc-100 not-aria-disabled:hover:shadow-[0_1px_2px_rgb(0_0_0/0.35),0_10px_26px_-10px_rgb(var(--accent-act-rgb)/0.28),inset_0_1px_0_rgb(255_255_255/0.95),inset_0_-1px_0_rgb(0_0_0/0.08)] not-aria-disabled:active:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80 motion-reduce:transition-none'
                   >
                     {primaryPlayback.showResolvingFeedback ? (
                       <Loader2
@@ -560,10 +558,10 @@ export function Hero({ items }: HeroProps) {
                       (!libraryReady && !libraryError) || toggleLibrary.isPending || undefined
                     }
                     className={cn(
-                      'h-11 w-11 shrink-0 rounded-md border transition-colors duration-150 focus-visible:ring-white/60 aria-disabled:cursor-default motion-reduce:transition-none',
+                      'h-11 w-11 shrink-0 rounded-lg border shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-xs transition-[background-color,border-color,color] duration-150 focus-visible:ring-white/60 aria-disabled:cursor-default motion-reduce:transition-none',
                       isInLibrary
-                        ? 'border-white/30 bg-white/15 text-white not-aria-disabled:hover:bg-white/20'
-                        : 'border-white/20 bg-black/25 text-white/80 not-aria-disabled:hover:border-white/35 not-aria-disabled:hover:bg-white/10 not-aria-disabled:hover:text-white',
+                        ? 'border-white/30 bg-white/15 text-white not-aria-disabled:hover:border-white/40 not-aria-disabled:hover:bg-white/20'
+                        : 'border-white/15 bg-black/30 text-white/80 not-aria-disabled:hover:border-white/30 not-aria-disabled:hover:bg-white/10 not-aria-disabled:hover:text-white',
                     )}
                     // Guard, not `disabled` — disabling the focused button would blur it mid-click.
                     aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}

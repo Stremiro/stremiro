@@ -16,6 +16,7 @@ import {
   Puzzle,
   SlidersHorizontal,
   Trash2,
+  X,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
@@ -54,6 +55,7 @@ const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremiro:// addon UR
 
 interface AddonRowProps {
   addon: AddonConfig;
+  isReplacing?: boolean;
   isWorking: boolean;
   /** Left-edge grip: sortable rows get a drag handle, pinned rows a muted grip. */
   handle: ReactNode;
@@ -125,7 +127,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove, onReplaceUrl }
         ) : (
           <span
             aria-hidden='true'
-            className='flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/[0.06] text-[13px] font-semibold text-zinc-300'
+            className='flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/[0.07] bg-white/[0.05] text-[13px] font-semibold text-zinc-300 shadow-[inset_0_1px_0_rgb(255_255_255/0.05)]'
           >
             {addonMonogram(addon.name)}
           </span>
@@ -160,7 +162,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove, onReplaceUrl }
                 {addon.resources.map((resource) => (
                   <li
                     key={resource}
-                    className='inline-flex h-[18px] items-center rounded-[5px] border border-white/[0.08] bg-transparent px-1.5 text-[11px] font-semibold leading-none text-zinc-400'
+                    className='inline-flex h-[18px] items-center rounded-[5px] border border-white/[0.07] bg-white/[0.03] px-1.5 text-[11px] font-medium leading-none text-zinc-400'
                   >
                     {ADDON_RESOURCE_LABELS[resource]}
                   </li>
@@ -285,7 +287,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove, onReplaceUrl }
 }
 
 const ADDON_ROW_CLASS =
-  'group/row grid grid-cols-[24px_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 px-4 py-3 transition-colors hover:bg-white/[0.02] sm:flex sm:gap-3 sm:px-6';
+  'group/row grid grid-cols-[24px_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 px-4 py-3.5 transition-colors hover:bg-white/[0.025] sm:flex sm:gap-3 sm:px-6';
 
 function SortableAddonRow(props: Omit<AddonRowProps, 'handle'>) {
   const {
@@ -309,6 +311,8 @@ function SortableAddonRow(props: Omit<AddonRowProps, 'handle'>) {
       className={cn(
         ADDON_ROW_CLASS,
         'motion-reduce:transition-none!',
+        props.isReplacing &&
+          'bg-[rgb(var(--accent-nav-rgb)/0.06)] shadow-[inset_2px_0_0_rgb(var(--accent-nav-rgb)/0.75)]',
         isDragging && 'relative z-10 bg-zinc-950 ring-1 ring-white/15 shadow-xl',
       )}
     >
@@ -351,6 +355,16 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle'>) {
   );
 }
 
+function applyAddonOrder(addons: AddonConfig[], ids: string[]) {
+  return [
+    ...addons.filter((addon) => addon.pinned),
+    ...orderByIds(
+      addons.filter((addon) => !addon.pinned),
+      ids,
+    ),
+  ];
+}
+
 export function AddonSettings() {
   const queryClient = useQueryClient();
   const [newUrl, setNewUrl] = useState('');
@@ -389,15 +403,7 @@ export function AddonSettings() {
     isFetching,
     refetch,
   } = addonsQuery;
-  const addons = pendingAddonOrder
-    ? [
-        ...savedAddons.filter((addon) => addon.pinned),
-        ...orderByIds(
-          savedAddons.filter((addon) => !addon.pinned),
-          pendingAddonOrder,
-        ),
-      ]
-    : savedAddons;
+  const addons = pendingAddonOrder ? applyAddonOrder(savedAddons, pendingAddonOrder) : savedAddons;
 
   const saveMutation = useMutation({
     mutationFn: api.updateAddonConfigs,
@@ -412,13 +418,7 @@ export function AddonSettings() {
           ),
         );
       } else if (action.kind === 'reorder' && previous) {
-        queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, [
-          ...previous.filter((addon) => addon.pinned),
-          ...orderByIds(
-            previous.filter((addon) => !addon.pinned),
-            action.ids,
-          ),
-        ]);
+        queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, applyAddonOrder(previous, action.ids));
       }
       return previous;
     },
@@ -643,9 +643,10 @@ export function AddonSettings() {
       />
 
       <SettingsCard>
-        <SettingsBody className='border-b border-white/[0.06]'>
+        <SettingsBody className='border-b border-white/[0.06] bg-black/25'>
           <form
             ref={addonFormRef}
+            autoComplete='off'
             aria-label={replacement ? `Update ${replacement.name} addon link` : 'Add addon'}
             className='flex flex-col gap-2 sm:flex-row'
             onSubmit={(event) => {
@@ -656,11 +657,20 @@ export function AddonSettings() {
             <div className='relative flex-1'>
               <Link2
                 aria-hidden='true'
-                className='pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500'
+                className={cn(
+                  'pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 transition-colors',
+                  replacement ? 'text-(--accent-nav)' : 'text-zinc-500',
+                )}
               />
               <Input
                 id='setting-addon-manifest-url'
                 ref={newUrlInputRef}
+                type='text'
+                autoComplete='off'
+                autoCorrect='off'
+                autoCapitalize='none'
+                spellCheck={false}
+                aria-autocomplete='none'
                 aria-label={
                   replacement ? `New manifest URL for ${replacement.name}` : 'Addon manifest URL'
                 }
@@ -672,16 +682,48 @@ export function AddonSettings() {
                   setNewUrl(e.target.value);
                   setInstallFeedback('');
                 }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+                  if (newUrl) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setNewUrl('');
+                    setInstallFeedback('');
+                  } else if (replacement) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setReplacementId(undefined);
+                  }
+                }}
                 readOnly={isWorking}
-                className='h-10 rounded-lg border-white/[0.08] bg-white/[0.04] pl-10 pr-3.5 font-mono text-[14px] transition-colors placeholder:text-zinc-600 focus-visible:border-(--accent-nav)/35 focus-visible:ring-1 focus-visible:ring-(--accent-nav)/25 focus-visible:ring-offset-0'
+                className={cn(
+                  'h-10 rounded-lg border-white/[0.085] bg-[#070709] pl-10 font-mono text-[13.5px] text-zinc-100 shadow-[inset_0_1px_2px_rgb(0_0_0/0.4)] transition-[border-color,background-color,box-shadow] placeholder:text-zinc-600 hover:border-white/[0.14] focus-visible:border-(--accent-nav)/60 focus-visible:ring-1 focus-visible:ring-(--accent-nav)/20 focus-visible:ring-offset-0',
+                  newUrl && !isWorking ? 'pr-9' : 'pr-3.5',
+                  replacement && 'border-(--accent-nav)/35',
+                )}
               />
+              {newUrl && !isWorking ? (
+                <button
+                  type='button'
+                  aria-label='Clear addon URL'
+                  title='Clear (Esc)'
+                  onClick={() => {
+                    setNewUrl('');
+                    setInstallFeedback('');
+                    newUrlInputRef.current?.focus({ preventScroll: true });
+                  }}
+                  className='absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.07] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
+                >
+                  <X aria-hidden='true' className='h-3.5 w-3.5' />
+                </button>
+              ) : null}
             </div>
             <Button
               size='sm'
               type='submit'
               aria-disabled={!canSubmitNewAddon || undefined}
               aria-busy={isCheckingManifest || undefined}
-              className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[14px] font-medium text-black hover:bg-zinc-200 aria-disabled:opacity-50'
+              className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[13.5px] font-semibold text-black shadow-[0_1px_2px_rgb(0_0_0/0.4)] transition-[background-color,transform,opacity] hover:bg-zinc-200 active:scale-[0.98] aria-disabled:opacity-45'
             >
               {isCheckingManifest ? (
                 <Loader2
@@ -701,7 +743,7 @@ export function AddonSettings() {
                 type='button'
                 variant='ghost'
                 disabled={isWorking}
-                className='h-10'
+                className='h-10 rounded-lg text-zinc-400 hover:bg-white/[0.06] hover:text-white'
                 onClick={() => {
                   setReplacementId(undefined);
                   setNewUrl('');
@@ -717,17 +759,25 @@ export function AddonSettings() {
             <p
               id='addon-url-hint'
               role='alert'
-              className='mt-2.5 text-[12px] leading-relaxed text-red-400 [overflow-wrap:anywhere]'
+              className='mt-2.5 flex items-center gap-2 text-[12px] leading-relaxed text-red-400 [overflow-wrap:anywhere]'
             >
-              {manifestError}
+              <span aria-hidden='true' className='h-1.5 w-1.5 shrink-0 rounded-full bg-red-400' />
+              <span>{manifestError}</span>
             </p>
           ) : isCheckingManifest || (!trimmedNewUrl && installFeedback) ? (
             <p
               id='addon-url-hint'
               role='status'
-              className='mt-2.5 text-[12px] leading-relaxed text-zinc-300'
+              className='mt-2.5 flex items-center gap-2 text-[12px] leading-relaxed text-zinc-300'
             >
-              {isCheckingManifest ? 'Checking addon manifest…' : installFeedback}
+              <span
+                aria-hidden='true'
+                className={cn(
+                  'h-1.5 w-1.5 shrink-0 rounded-full',
+                  isCheckingManifest ? 'bg-zinc-400' : 'bg-emerald-400',
+                )}
+              />
+              <span>{isCheckingManifest ? 'Checking addon manifest…' : installFeedback}</span>
             </p>
           ) : inspectionCurrent && !inspection && queryNeedsRetry(inspectionQuery) ? (
             <div id='addon-url-hint' className='mt-2.5'>
@@ -740,28 +790,29 @@ export function AddonSettings() {
             <p
               id='addon-url-hint'
               className={cn(
-                'mt-2.5 text-[12px] leading-relaxed [overflow-wrap:anywhere]',
+                'mt-2.5 flex items-center gap-2 text-[12px] leading-relaxed [overflow-wrap:anywhere]',
                 addonHintTone,
               )}
             >
-              {addonHintText}
+              <span aria-hidden='true' className='h-1.5 w-1.5 shrink-0 rounded-full bg-current' />
+              <span>{addonHintText}</span>
             </p>
           ) : replacement ? (
             <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
               Paste the new install link for{' '}
-              <span className='text-zinc-200'>{replacement.name}</span>.
+              <span className='font-medium text-zinc-200'>{replacement.name}</span>.
             </p>
           ) : (
-            <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
+            <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-500'>
               Paste an addon{' '}
-              <code className='rounded bg-white/[0.05] px-1 py-0.5 font-mono text-[11px] text-zinc-500'>
+              <code className='rounded bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px] text-zinc-400'>
                 manifest.json
               </code>{' '}
               or{' '}
-              <code className='rounded bg-white/[0.05] px-1 py-0.5 font-mono text-[11px] text-zinc-500'>
+              <code className='rounded bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px] text-zinc-400'>
                 stremiro://
               </code>{' '}
-              URL to add an addon.
+              link.
             </p>
           )}
         </SettingsBody>
@@ -828,6 +879,7 @@ export function AddonSettings() {
                         <SortableAddonRow
                           key={addon.id}
                           addon={addon}
+                          isReplacing={replacementId === addon.id}
                           isWorking={isWorking}
                           onToggle={handleToggle}
                           onRemove={handleRemove}

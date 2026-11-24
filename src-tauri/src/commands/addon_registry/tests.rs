@@ -5,8 +5,8 @@ use super::{
     fetch_catalog_pages_for_target_groups, fetch_subtitles_for_addon, merge_catalog_pages,
     merge_search_catalog_pages, run_catalog_work_pool, searchable_catalogs,
     select_search_catalog_work, AddonResourceError, AddonResourceErrorKind, CatalogFetchPage,
-    CatalogGroupSelection, CatalogTarget, CatalogWorkItem, SearchCatalogSource, SearchSourceCursor,
-    SourcedAddonSubtitle, CATALOG_STRAGGLER_GRACE,
+    CatalogGraceStart, CatalogGroupSelection, CatalogTarget, CatalogWorkItem, SearchCatalogSource,
+    SearchSourceCursor, SourcedAddonSubtitle, CATALOG_STRAGGLER_GRACE,
 };
 use crate::commands::config_store::{resolve_addon_configs, AddonConfig};
 use crate::providers::addon_manifest::parse_addon_manifest;
@@ -295,7 +295,13 @@ async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
     let (stalled, stalled_url) = stalled_listener();
     stalled.set_nonblocking(true).unwrap();
     {
-        let pending = run_catalog_work_pool(&client, work(&vec![stalled_url; 4]), 3, None);
+        let pending = run_catalog_work_pool(
+            &client,
+            work(&vec![stalled_url; 4]),
+            3,
+            None,
+            CatalogGraceStart::AllGroupsReady,
+        );
         tokio::pin!(pending);
         let observe = async {
             let mut connections = Vec::new();
@@ -330,7 +336,14 @@ async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
     .map(|body| TestHttpServer::new(vec![(200, body, None); 3]))
     .collect();
     let urls: Vec<_> = servers.iter().map(|server| server.url.clone()).collect();
-    let groups = run_catalog_work_pool(&client, work(&urls), 3, None).await;
+    let groups = run_catalog_work_pool(
+        &client,
+        work(&urls),
+        3,
+        None,
+        CatalogGraceStart::AllGroupsReady,
+    )
+    .await;
     for (group, bucket) in groups.into_iter().enumerate() {
         assert_eq!(bucket.len(), 4 - group);
         for (expected_order, (order, page)) in bucket.into_iter().enumerate() {
@@ -362,7 +375,12 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
     futures_util::pin_mut!(outcomes);
     let collected = tokio::time::timeout(
         Duration::from_secs(2),
-        collect_catalog_outcomes(outcomes, vec![3, 1, 1], Duration::from_millis(10)),
+        collect_catalog_outcomes(
+            outcomes,
+            vec![3, 1, 1],
+            Duration::from_millis(10),
+            CatalogGraceStart::AllGroupsReady,
+        ),
     )
     .await
     .expect("answered groups must still bound a pending secondary source");
@@ -376,25 +394,30 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
                 if order == 1 {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                (0, order, Ok(page()))
+                (order, 0, Ok(page()))
             })
             .buffer_unordered(2);
         let started = tokio::time::Instant::now();
-        let collected = collect_catalog_outcomes(outcomes, vec![2], grace).await;
+        let collected =
+            collect_catalog_outcomes(outcomes, vec![1, 1], grace, CatalogGraceStart::FirstResults)
+                .await;
         let elapsed = started.elapsed();
         assert_eq!(collected.len(), expected_count);
         assert!(elapsed >= grace.min(Duration::from_secs(5)));
         if expected_count == 1 {
             assert!(elapsed < Duration::from_secs(5));
             let page = merge_search_catalog_pages(
-                vec![vec![
-                    search_source("primary", 50),
-                    search_source("straggler", 50),
-                ]],
-                vec![collected
-                    .into_iter()
-                    .map(|(_, order, result)| (order, result))
-                    .collect()],
+                vec![
+                    vec![search_source("primary", 50)],
+                    vec![search_source("straggler", 50)],
+                ],
+                vec![
+                    collected
+                        .into_iter()
+                        .map(|(_, order, result)| (order, result))
+                        .collect(),
+                    Vec::new(),
+                ],
                 false,
             )
             .unwrap();
@@ -595,7 +618,14 @@ async fn search_uses_manifest_spelling_and_retries_a_single_page_source_once() {
     assert!(failed.partial && failed.cursors.is_empty());
 
     let (work, sources) = select(Some(&first.cursors));
-    let outcomes = run_catalog_work_pool(&AddonResourceClient::new(), work, 1, None).await;
+    let outcomes = run_catalog_work_pool(
+        &AddonResourceClient::new(),
+        work,
+        1,
+        None,
+        CatalogGraceStart::FirstResults,
+    )
+    .await;
     let page = merge_search_catalog_pages(sources, outcomes, false).unwrap();
     assert_eq!(page.items.len(), 1);
     assert!(page.cursors.is_empty());

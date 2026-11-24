@@ -43,21 +43,26 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
       // `new` pins a year; key it so a rollover can't serve a stale catalog.
       newFeedYear ?? null,
     ],
-    queryFn: ({ pageParam }) =>
-      api.querySearchCatalogPage({
-        query: normalizedQuery,
-        mediaType: facets.type === 'all' ? undefined : facets.type,
-        feed: browseFeed === 'featured' ? 'featured' : undefined,
-        genres: normalizedGenre ? [normalizedGenre] : undefined,
-        yearFrom: newFeedYear,
-        yearTo: newFeedYear,
-        continuation: pageParam,
-      }),
+    queryFn: ({ pageParam, signal }) =>
+      api.querySearchCatalogPage(
+        {
+          query: normalizedQuery,
+          mediaType: facets.type === 'all' ? undefined : facets.type,
+          feed: browseFeed === 'featured' ? 'featured' : undefined,
+          genres: normalizedGenre ? [normalizedGenre] : undefined,
+          yearFrom: newFeedYear,
+          yearTo: newFeedYear,
+          continuation: pageParam,
+          allowPartialFirstPage: normalizedQuery ? undefined : true,
+        },
+        signal,
+      ),
     initialPageParam: undefined,
     getNextPageParam: (lastPage) => (lastPage.exhausted ? undefined : lastPage.continuation),
     structuralSharing: (previous, next) => {
       const data = next as CachedSearchCatalogData | undefined;
       if (!Array.isArray(data?.pages)) return next;
+      if (data.pages.length < 2) return replaceEqualDeep(previous, data);
       // Only the last continuation's seen keys and source cursors are read.
       const compacted = {
         ...data,
@@ -70,7 +75,13 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
       };
       return replaceEqualDeep(previous, compacted);
     },
-    staleTime: Infinity,
+    staleTime: (cached) => {
+      const pages = cached.state.data?.pages;
+      const firstPage = pages?.[0];
+      // Refresh cached cards in place without replaying an entire scrolled catalog.
+      if (!firstPage || pages?.length !== 1) return Infinity;
+      return firstPage.partial || firstPage.items.length === 0 ? 30_000 : 180_000;
+    },
     gcTime: SEARCH_CATALOG_GC_TIME_MS,
   });
 }

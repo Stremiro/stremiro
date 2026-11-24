@@ -12,7 +12,7 @@ import {
   useRemoveFromWatchHistory,
   watchTitleKey,
 } from '@/hooks/use-media-library';
-import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
+import { usePrefetchDetails } from '@/lib/details-prefetch';
 import {
   type MediaItem,
   WATCH_STATUS_COLORS,
@@ -28,6 +28,14 @@ import {
 import { navigateToDetails } from '@/lib/player-navigation';
 import { cn, formatSeasonEpisode, mediaTypeLabel } from '@/lib/utils';
 import { MediaCard, mediaCardRailKey } from './media-card';
+
+const COLLECTION_ROW_CLASS =
+  'group flex items-center gap-3.5 px-3.5 py-2.5 rounded-lg border transition-[background-color,border-color] duration-150 ease-out motion-reduce:transition-none';
+const SELECTED_ROW_CLASS = 'border-(--accent-nav)/40 bg-(--accent-nav)/[0.08]';
+const UNSELECTED_ROW_CLASS =
+  'border-white/[0.055] bg-white/[0.015] hover:border-white/[0.12] hover:bg-white/[0.04] focus-within:border-white/[0.12] focus-within:bg-white/[0.04]';
+const ROW_TITLE_BUTTON_CLASS =
+  'flex flex-1 min-w-0 items-center gap-3.5 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30';
 
 export function LibraryList({
   items,
@@ -46,7 +54,7 @@ export function LibraryList({
     <WindowVirtualizedStack
       items={items}
       getItemKey={mediaCardRailKey}
-      estimateSize={() => 76}
+      estimatedRowHeight={80}
       renderItem={(item) => (
         <LibraryListRow
           item={item}
@@ -78,10 +86,8 @@ function LibraryListRow({
   return (
     <div
       className={cn(
-        'group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-        selectionMode && isSelected
-          ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
-          : 'bg-white/[0.015] border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] focus-within:bg-white/[0.04] focus-within:border-white/[0.12]',
+        COLLECTION_ROW_CLASS,
+        selectionMode && isSelected ? SELECTED_ROW_CLASS : UNSELECTED_ROW_CLASS,
       )}
     >
       <button
@@ -92,7 +98,7 @@ function LibraryListRow({
             : `Open details for ${item.title}`
         }
         aria-pressed={selectionMode ? isSelected : undefined}
-        className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
+        className={ROW_TITLE_BUTTON_CLASS}
         onPointerDown={selectionMode ? undefined : prefetchDetails}
         onFocus={selectionMode ? undefined : prefetchDetails}
         onClick={(event) => {
@@ -113,28 +119,44 @@ function LibraryListRow({
             )}
           />
         )}
-        <PosterThumb poster={item.poster} title={item.title} mediaType={item.type} />
+        <PosterThumb
+          poster={item.poster}
+          title={item.title}
+          mediaType={item.type}
+          size='lg'
+          className='ring-1 ring-inset ring-white/[0.08] transition-shadow duration-200 group-hover:ring-white/20 motion-reduce:transition-none'
+        />
 
         <div className='flex-1 min-w-0'>
           <p
             dir='auto'
             title={item.title}
-            className='text-[14px] font-medium text-zinc-100 truncate group-hover:text-white transition-colors'
+            className='text-[14.5px] font-semibold tracking-[-0.01em] text-zinc-200 truncate transition-colors duration-150 group-hover:text-white motion-reduce:transition-none'
           >
             {item.title}
           </p>
-          <div className='flex items-center gap-1.5 mt-1 flex-wrap'>
+          <div className='mt-1 flex items-center gap-1.5 text-[12px] leading-4 text-zinc-400 flex-wrap'>
+            <span>{mediaTypeLabel(item.type)}</span>
             {item.displayYear && (
-              <span className='text-[12px] text-zinc-500'>{item.displayYear}</span>
-            )}
-            <span className='text-[12px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
-            {status && (
-              <span className='flex items-center gap-1'>
-                <WatchStatusIcon status={status} className='size-3' />
-                <span className={cn('text-[12px] font-medium', WATCH_STATUS_COLORS[status].text)}>
-                  {WATCH_STATUS_LABELS[status]}
+              <>
+                <span aria-hidden='true' className='text-zinc-600'>
+                  ·
                 </span>
-              </span>
+                <span className='tabular-nums text-zinc-400'>{item.displayYear}</span>
+              </>
+            )}
+            {status && (
+              <>
+                <span aria-hidden='true' className='text-zinc-600'>
+                  ·
+                </span>
+                <span className='inline-flex items-center gap-1'>
+                  <WatchStatusIcon status={status} className='size-3.5' />
+                  <span className={cn('font-medium', WATCH_STATUS_COLORS[status].text)}>
+                    {WATCH_STATUS_LABELS[status]}
+                  </span>
+                </span>
+              </>
             )}
           </div>
         </div>
@@ -176,7 +198,7 @@ export function HistoryListView({
     <WindowVirtualizedStack
       items={items}
       getItemKey={watchProgressItemKey}
-      estimateSize={() => 78}
+      estimatedRowHeight={80}
       renderItem={(item, index) => {
         const label = historyGroupLabel(item.last_watched, startOfToday);
         const previous = index > 0 ? items[index - 1] : undefined;
@@ -248,10 +270,8 @@ function HistoryListRow({
   return (
     <div
       className={cn(
-        'group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-        selectionMode && isSelected
-          ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
-          : 'bg-white/[0.02] border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] focus-within:bg-white/[0.04] focus-within:border-white/[0.12]',
+        COLLECTION_ROW_CLASS,
+        selectionMode && isSelected ? SELECTED_ROW_CLASS : UNSELECTED_ROW_CLASS,
       )}
     >
       <button
@@ -269,7 +289,7 @@ function HistoryListRow({
         }
         onPointerDown={selectionMode ? undefined : prefetchDetails}
         onFocus={selectionMode ? undefined : prefetchDetails}
-        className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
+        className={ROW_TITLE_BUTTON_CLASS}
       >
         {selectionMode && <SelectionCheck selected={isSelected} />}
         <PosterThumb
@@ -277,25 +297,52 @@ function HistoryListRow({
           title={item.title}
           mediaType={item.type_}
           progressPct={progressPct}
+          size='lg'
+          className='ring-1 ring-inset ring-white/[0.08] transition-shadow duration-200 group-hover:ring-white/20 motion-reduce:transition-none'
         />
         <div className='flex-1 min-w-0'>
           <p
             dir='auto'
             title={item.title}
-            className='text-[14px] font-medium text-zinc-100 truncate'
+            className='text-[14.5px] font-semibold tracking-[-0.01em] text-zinc-200 truncate transition-colors duration-150 group-hover:text-white motion-reduce:transition-none'
           >
             {item.title}
           </p>
-          <div className='flex flex-wrap items-center gap-x-2 gap-y-1 mt-1'>
+          <div className='mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] leading-4 text-zinc-400'>
             {seasonEpisodeLabel && (
-              <span className='text-[12px] text-zinc-400 font-medium'>{seasonEpisodeLabel}</span>
+              <span className='font-medium tabular-nums text-zinc-300'>{seasonEpisodeLabel}</span>
             )}
             {progressPct > 0 && (
-              <span className='text-[12px] text-zinc-500 tabular-nums'>
-                {Math.round(progressPct)}%
-              </span>
+              <>
+                {seasonEpisodeLabel && (
+                  <span aria-hidden='true' className='text-zinc-600'>
+                    ·
+                  </span>
+                )}
+                <span className='inline-flex items-center gap-1.5 tabular-nums text-zinc-400'>
+                  <span
+                    aria-hidden='true'
+                    className='hidden h-1 w-12 overflow-hidden rounded-full bg-white/10 sm:inline-block'
+                  >
+                    <span
+                      className='block h-full rounded-full bg-(--accent-prog)'
+                      style={{ width: `${Math.min(progressPct, 100)}%` }}
+                    />
+                  </span>
+                  {Math.round(progressPct)}%
+                </span>
+              </>
             )}
-            {watchedAgo && <span className='text-[12px] text-zinc-500'>{watchedAgo}</span>}
+            {watchedAgo && (
+              <>
+                {(seasonEpisodeLabel || progressPct > 0) && (
+                  <span aria-hidden='true' className='text-zinc-600'>
+                    ·
+                  </span>
+                )}
+                <span className='text-zinc-500'>{watchedAgo}</span>
+              </>
+            )}
           </div>
         </div>
       </button>

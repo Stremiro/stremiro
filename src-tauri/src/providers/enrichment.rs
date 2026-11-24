@@ -97,6 +97,12 @@ impl EnrichmentClient {
     pub(crate) fn purge_expired_caches(&self) {
         self.cache.purge_expired();
         self.failures.purge_expired();
+        let mut cooldowns = lock_or_recover(&self.cooldowns);
+        let now = Instant::now();
+        cooldowns.retain(|_, until| *until > now);
+        if cooldowns.is_empty() {
+            cooldowns.shrink_to_fit();
+        }
     }
 
     pub(crate) fn new(cache_dir: Option<PathBuf>) -> Self {

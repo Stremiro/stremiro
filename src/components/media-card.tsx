@@ -50,9 +50,8 @@ import {
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePointerIdle } from '@/hooks/use-pointer-idle';
-import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import { api, type MediaItem, WATCH_STATUS_LABELS, type WatchStatus } from '@/lib/api';
-import { pendingDetailsPrefetch } from '@/lib/details-prefetch';
+import { pendingDetailsPrefetch, usePrefetchDetails } from '@/lib/details-prefetch';
 import {
   buildDetailsRoute,
   resolvePlayerRouteMediaType,
@@ -64,7 +63,6 @@ import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clearTimer,
   cn,
-  formatRuntime,
   isHttpUrl,
   mediaTypeLabel,
   prefersReducedMotion,
@@ -611,11 +609,12 @@ function MediaCardOverlay({
   const { addItemToNewList, toggleLibrary } = collectionActions;
 
   // The id guard avoids a doomed IPC (Rust rejects empty ids); card payload only — hover never needs episodes.
+  const cardDetailsOptions = api.cardDetailsQueryOptions(detailsRouteType, item.id);
   const { data: details, isLoading: isDetailsLoading } = useQuery({
-    ...api.cardDetailsQueryOptions(detailsRouteType, item.id),
+    ...cardDetailsOptions,
     queryFn: async (context) =>
       (await pendingDetailsPrefetch(detailsRouteType, item.id))?.details ??
-      api.cardDetailsQueryOptions(detailsRouteType, item.id).queryFn!(context),
+      cardDetailsOptions.queryFn!(context),
     enabled: !!item.id.trim(),
   });
   const artworkRef = useRef<HTMLDivElement>(null);
@@ -626,7 +625,7 @@ function MediaCardOverlay({
   const { data: lists } = useListSummaries(item.id);
 
   const ratingScore = details?.ratingPercent;
-  const runtime = formatRuntime(details?.runtime);
+  const runtime = details?.runtime;
   const genrePills = primaryGenrePills(item.genres, details?.genres);
   const synopsis = details?.description || item.description;
   // Catalog genres paint with the card; details-sourced ones arrive late like the rating badge.
@@ -644,7 +643,10 @@ function MediaCardOverlay({
   // A still pointer over a playing trailer fades the remaining artwork chrome.
   const [trailerShowing, setTrailerShowing] = useState(false);
   const { idle: pointerIdle, wake: wakePointer } = usePointerIdle();
-  useEffect(() => wakePointer(), [wakePointer]);
+  const canPreview = trailersEnabled && Boolean(trailerVideoId);
+  useEffect(() => {
+    if (canPreview) wakePointer();
+  }, [canPreview, wakePointer]);
   const hideArtworkChrome = trailersEnabled && trailerShowing && pointerIdle;
   const menu = useDelayedUnmount(panel === 'menu', INLINE_MENU_EXIT_MS);
   const closeMenu = () => onPanelChange('details');
@@ -656,8 +658,22 @@ function MediaCardOverlay({
     setTrailerArmed(false);
     setTrailerShowing(false);
     if (!trailerVideoId || !trailersEnabled) return;
-    const timer = window.setTimeout(() => setTrailerArmed(true), TRAILER_ARM_MS);
-    return () => window.clearTimeout(timer);
+    let timer = 0;
+    const syncVisibility = () => {
+      window.clearTimeout(timer);
+      if (document.hidden) {
+        setTrailerArmed(false);
+        setTrailerShowing(false);
+      } else {
+        timer = window.setTimeout(() => setTrailerArmed(true), TRAILER_ARM_MS);
+      }
+    };
+    syncVisibility();
+    document.addEventListener('visibilitychange', syncVisibility);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', syncVisibility);
+    };
   }, [trailerVideoId, trailersEnabled]);
 
   // Metadata artwork fades in over the catalog artwork instead of swapping under the cursor.
@@ -677,7 +693,7 @@ function MediaCardOverlay({
         aria-label={`Actions for ${item.title}`}
         inert={exiting}
         className={cn(
-          'absolute top-0 z-20 flex max-h-full max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.12] bg-zinc-950 shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
+          'absolute top-0 z-20 flex max-h-full max-w-[86vw] select-none flex-col overflow-hidden rounded-xl border border-white/[0.12] bg-zinc-950 shadow-[0_14px_36px_-12px_rgb(0_0_0/0.8)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
           exiting ? 'pointer-events-none animate-surface-out' : 'animate-surface-in',
           popoverAlign === 'left' && 'left-0',
           popoverAlign === 'right' && 'right-0',
@@ -688,7 +704,7 @@ function MediaCardOverlay({
           marginLeft:
             popoverAlign === 'center' ? `calc(min(${POPOUT_WIDTH_PX}px, 86vw) / -2)` : undefined,
         }}
-        onPointerMove={wakePointer}
+        onPointerMove={canPreview ? wakePointer : undefined}
       >
         <div
           ref={artworkRef}
@@ -753,7 +769,7 @@ function MediaCardOverlay({
           )}
         </div>
 
-        <div className='relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain'>
+        <div className='relative flex min-h-0 flex-1 flex-col overflow-y-auto [scrollbar-gutter:stable_both-edges]'>
           {panel === 'lists' ? (
             <div
               data-media-card-picker
@@ -823,17 +839,20 @@ function MediaCardOverlay({
                         {item.title}
                       </a>
                     </h3>
-                    {ratingScore !== undefined && (
-                      <span
-                        className={cn(
-                          'flex h-5 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold leading-none tabular-nums ring-1 ring-inset animate-in fade-in duration-300',
-                          ratingToneClassName(ratingScore),
-                        )}
-                      >
-                        <Star aria-hidden='true' className='size-2.5 fill-current' />
-                        {ratingScore}%
-                      </span>
-                    )}
+                    {/* Reserve the badge width before metadata arrives so the title never rewraps. */}
+                    <div className='flex w-14 shrink-0 justify-end'>
+                      {ratingScore !== undefined && (
+                        <span
+                          className={cn(
+                            'flex h-5 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold leading-none tabular-nums ring-1 ring-inset animate-in fade-in duration-200 motion-reduce:animate-none',
+                            ratingToneClassName(ratingScore),
+                          )}
+                        >
+                          <Star aria-hidden='true' className='size-2.5 fill-current' />
+                          {ratingScore}%
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   {/* One fixed-height line: runtime/genres arrive async, so a growing row would shift
@@ -1088,37 +1107,22 @@ export function MediaCard({
     const collection = card?.closest<HTMLElement>(
       '[data-media-scroller], [data-collection-selection]',
     );
-    if (card && collection && card.contains(document.activeElement)) {
-      const cards = Array.from(collection.querySelectorAll('article'));
-      const index = cards.indexOf(card);
-      const nextHref = cards[index + 1]
-        ?.querySelector('[data-media-card-poster]')
-        ?.getAttribute('href');
-      const previousHref = cards[index - 1]
-        ?.querySelector('[data-media-card-poster]')
-        ?.getAttribute('href');
-      const section =
-        collection.closest<HTMLElement>('[data-resume-section], [role="tabpanel"]') ?? collection;
-      let headingScope: HTMLElement | null = section;
-      while (headingScope && !headingScope.querySelector('h1, h2')) {
-        headingScope = headingScope.parentElement;
-      }
-      const heading = headingScope?.querySelector<HTMLElement>('h1, h2');
-      const resolveTarget = () => {
-        const posters = Array.from(
-          collection.querySelectorAll<HTMLElement>('[data-media-card-poster]'),
-        );
-        const target =
-          posters.find((poster) => poster.getAttribute('href') === nextHref) ??
-          posters.find((poster) => poster.getAttribute('href') === previousHref) ??
-          collection.querySelector<HTMLElement>('input') ??
-          (heading?.isConnected ? heading : section);
-        if (!target.isConnected) return null;
-        if (target.tabIndex < 0) target.tabIndex = -1;
-        return target;
-      };
-      resolveTarget()?.focus({ preventScroll: true });
+    if (!card || !collection || !card.contains(document.activeElement)) return;
+
+    const cards = Array.from(collection.querySelectorAll('article'));
+    const index = cards.indexOf(card);
+    const section =
+      collection.closest<HTMLElement>('[data-resume-section], [role="tabpanel"]') ?? collection;
+    let target =
+      cards[index + 1]?.querySelector<HTMLElement>('[data-media-card-poster]') ??
+      cards[index - 1]?.querySelector<HTMLElement>('[data-media-card-poster]') ??
+      collection.querySelector<HTMLElement>('input');
+    for (let scope: HTMLElement | null = section; !target && scope; scope = scope.parentElement) {
+      target = scope.querySelector<HTMLElement>('h1, h2');
     }
+    target ??= section;
+    if (target.tabIndex < 0) target.tabIndex = -1;
+    target.focus({ preventScroll: true });
   };
 
   const handleRemoveFromHistory = (event: ReactMouseEvent) => {

@@ -146,13 +146,18 @@ export function GeneralSettings() {
               <SettingsRow
                 icon={Minimize2}
                 label='Start minimized'
+                className={
+                  !canStartMinimized && !preferences.startMinimized
+                    ? 'opacity-60 transition-opacity duration-150'
+                    : 'transition-opacity duration-150'
+                }
                 descriptionId={`${descriptionId}-startup`}
                 description={
                   launchEnabled
-                    ? 'Start in the tray at login. Manual launches stay visible.'
+                    ? 'Start in the tray when you sign in.'
                     : trayEnabled
-                      ? 'Applies to login launches. Turn on Launch at login to use it.'
-                      : 'Enable Launch at login or a tray option first.'
+                      ? 'Turn on Launch at login to start in the tray.'
+                      : 'Requires Launch at login or a tray option.'
                 }
               >
                 <SettingsSwitch
@@ -173,21 +178,7 @@ export function GeneralSettings() {
           <SettingsGroupHeader
             icon={AppWindow}
             title='System tray'
-            description='Click the tray icon to reopen. Use its menu to quit.'
-            action={
-              trayEnabled ? (
-                <Button
-                  variant='ghost'
-                  size='sm'
-                  disabled={isHydrating || launchMutation.isPending || hideMutation.isPending}
-                  aria-busy={hideMutation.isPending || undefined}
-                  className='h-8 px-2.5 text-xs text-zinc-400 hover:bg-white/[0.04] hover:text-white'
-                  onClick={() => hideMutation.mutate()}
-                >
-                  Hide to tray
-                </Button>
-              ) : undefined
-            }
+            description='Keep Stremiro running in the background.'
           />
           <SettingsCard>
             <SettingsBody rows>
@@ -209,7 +200,7 @@ export function GeneralSettings() {
               <SettingsRow
                 icon={PanelBottom}
                 label='Minimize to tray'
-                description='Hide from the taskbar. Playback keeps running.'
+                description='Hide from the taskbar while playback continues.'
                 descriptionId={`${descriptionId}-minimize`}
               >
                 <SettingsSwitch
@@ -224,6 +215,23 @@ export function GeneralSettings() {
                 />
               </SettingsRow>
             </SettingsBody>
+            {trayEnabled ? (
+              <div className='flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.055] bg-black/25 px-4 py-2.5 sm:px-6'>
+                <p className='text-[12.5px] text-zinc-400'>
+                  Click the tray icon to reopen, or right-click it to quit.
+                </p>
+                <Button
+                  variant='ghost'
+                  size='sm'
+                  disabled={isHydrating || launchMutation.isPending || hideMutation.isPending}
+                  aria-busy={hideMutation.isPending || undefined}
+                  className='h-7 rounded-md px-2.5 text-[12px] font-medium text-zinc-300 hover:bg-white/[0.06] hover:text-white'
+                  onClick={() => hideMutation.mutate()}
+                >
+                  Hide now
+                </Button>
+              </div>
+            ) : null}
           </SettingsCard>
         </SettingsGroup>
       </div>

@@ -475,3 +475,35 @@ fn legacy_mapping_digests_remain_readable_but_need_a_refresh_for_canonical_years
             && old.get("season_years").is_none()
     );
 }
+
+#[test]
+fn details_final_season_matches_persisted_season_rule() {
+    let details = MediaDetails {
+        episodes: Some(vec![
+            test_episode("a", 1, 1),
+            test_episode("b", 4, 1),
+            test_episode("c", 2, 1),
+        ]),
+        ..crate::test_helpers::test_details("tt2560140", "series")
+    };
+    assert!(!PlaybackStateService::episode_is_final_season_from_details(
+        &details, None
+    ));
+    assert!(!PlaybackStateService::episode_is_final_season_from_details(
+        &details,
+        Some(1)
+    ));
+    assert!(PlaybackStateService::episode_is_final_season_from_details(
+        &details,
+        Some(4)
+    ));
+    assert!(PlaybackStateService::episode_is_final_season_from_details(
+        &details,
+        Some(5)
+    ));
+    let empty = crate::test_helpers::test_details("tt2560140", "series");
+    assert!(!PlaybackStateService::episode_is_final_season_from_details(
+        &empty,
+        Some(1)
+    ));
+}

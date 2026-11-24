@@ -9,8 +9,6 @@ export interface PlayerStreamSession extends ResolvedStreamSession {
   activeStreamUrl?: string;
   activeStreamMpvHttpHeaderFields?: string;
   activeStreamKey?: string;
-  /** Resolved winner's source name (route pick pre-resolve) — reactive counterpart of `activeStreamSourceNameRef`. */
-  activeStreamSourceName?: string;
   streamLookupIdRef: RefObject<string | undefined>;
   committedStreamUrlRef: RefObject<string | undefined>;
 }
@@ -35,7 +33,6 @@ interface StreamSecrets {
 interface SessionStreamOverride {
   loadRevision?: number;
   streamKey?: string;
-  sourceName?: string;
   routeSeed: string;
 }
 
@@ -78,9 +75,6 @@ export function usePlayerStreamSession({
   const activeStreamMpvHttpHeaderFields = activeSecrets?.mpvHttpHeaderFields;
   // Winner key from the last resolve/recovery; falls back to the route pick on a fresh session.
   const activeStreamKey = activeOverride?.streamKey ?? routeSelectedStreamKey?.trim();
-  // Same lifecycle as `activeStreamSourceNameRef` — the seeding effect re-arms the route name with no active URL.
-  const activeStreamSourceName =
-    activeStreamUrl === undefined ? nonBlank(routeSourceName) : activeOverride?.sourceName;
   const committedStreamUrlRef = useRef(activeStreamUrl);
   const activeStreamSourceIdRef = useRef<string | undefined>(routeSourceId);
   const activeStreamSourceNameRef = useRef<string | undefined>(routeSourceName);
@@ -99,11 +93,9 @@ export function usePlayerStreamSession({
     nextUrl?: string,
     nextMpvHttpHeaderFields?: string,
     nextStreamKey?: string,
-    nextSourceName?: string,
   ) => {
     const override: SessionStreamOverride = {
       streamKey: nextStreamKey,
-      sourceName: nonBlank(nextSourceName),
       routeSeed: routeSeedRef.current,
     };
     streamSecrets.set(override, {
@@ -146,7 +138,6 @@ export function usePlayerStreamSession({
     activeStreamUrl,
     activeStreamMpvHttpHeaderFields,
     activeStreamKey,
-    activeStreamSourceName,
     setActiveStreamUrl,
     activeStreamSourceIdRef,
     activeStreamSourceNameRef,

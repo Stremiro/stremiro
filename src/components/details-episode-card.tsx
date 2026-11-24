@@ -148,14 +148,14 @@ export function EpisodeCard({
         <span className={cn('block px-0.5 pb-1 pt-2.5', menu.presence.mounted && 'opacity-0')}>
           <span
             title={title}
-            className='line-clamp-2 text-[15px] font-semibold leading-5 text-zinc-100'
+            className='line-clamp-2 text-[15px] font-semibold leading-5 text-zinc-100 transition-colors duration-150 group-hover/card:text-white motion-reduce:transition-none'
           >
             {title}
           </span>
           <span className='mt-1 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 tabular-nums text-zinc-400'>
             {emphasis && (
               <>
-                <span className='shrink-0 font-semibold text-(--accent-act)'>
+                <span className='shrink-0 font-semibold text-[color-mix(in_srgb,var(--accent-act)_75%,white)]'>
                   {EMPHASIS_LABELS[emphasis]}
                 </span>
                 <span aria-hidden='true'>·</span>
@@ -187,8 +187,10 @@ export function EpisodeCard({
             if (!watchedLocked) onToggleWatched(episode);
           }}
           className={cn(
-            'group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default',
-            menu.presence.mounted && 'pointer-events-none opacity-0',
+            'group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg transition-opacity duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default motion-reduce:transition-none',
+            !isWatched &&
+              'opacity-0 group-hover/card:opacity-100 group-focus-within/card:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100',
+            menu.presence.mounted && 'pointer-events-none opacity-0!',
           )}
         >
           <span
@@ -196,7 +198,7 @@ export function EpisodeCard({
               'flex h-7 w-7 items-center justify-center rounded-md border transition-colors duration-150',
               isWatched
                 ? 'border-(--accent-act) bg-(--accent-act) text-(--on-accent-act)'
-                : 'border-white/15 bg-black/65 text-white/65 group-not-aria-disabled/watch:group-hover/watch:border-white/30 group-not-aria-disabled/watch:group-hover/watch:text-white group-focus-visible/watch:text-white',
+                : 'border-white/15 bg-black/65 text-white/65 backdrop-blur-xs group-not-aria-disabled/watch:group-hover/watch:border-white/30 group-not-aria-disabled/watch:group-hover/watch:text-white group-focus-visible/watch:text-white',
             )}
           >
             <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />

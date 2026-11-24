@@ -82,15 +82,20 @@ export function useMpvSetScheduler(resetKey?: string): MpvSetScheduler {
           if (pendingRef.current.size === 0) return;
           const requests = [...pendingRef.current];
           pendingRef.current.clear();
-          const settleBatch = (properties: MpvSubtitleProperties) => {
+          const settleBatch = (properties: MpvSubtitleProperties, failed = false) => {
             for (const [name, request] of requests) {
-              settle(name, request, properties.find(([appliedName]) => appliedName === name)?.[1]);
+              settle(
+                name,
+                request,
+                properties.find(([appliedName]) => appliedName === name)?.[1],
+                failed,
+              );
             }
           };
           void setMpvProperties(requests.map(([name, request]) => [name, request.value])).then(
-            settleBatch,
+            (properties) => settleBatch(properties),
             (error: { subtitleProperties?: MpvSubtitleProperties } | null) =>
-              settleBatch(error?.subtitleProperties ?? []),
+              settleBatch(error?.subtitleProperties ?? [], true),
           );
         });
       }),

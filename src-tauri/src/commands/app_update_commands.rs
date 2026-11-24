@@ -84,6 +84,12 @@ static RELEASE_NOTES_CACHE: LazyLock<TtlCache<ReleaseNotesCacheEntry>> = LazyLoc
         RELEASE_NOTES_HIT_TTL,
     )
 });
+
+pub(crate) fn purge_expired_caches() {
+    if let Some(cache) = LazyLock::get(&RELEASE_NOTES_CACHE) {
+        cache.purge_expired();
+    }
+}
 static RELEASE_NOTES_IN_FLIGHT: LazyLock<InFlight> = LazyLock::new(InFlight::default);
 /// reqwest's timeout is total-duration and can't bound a legit long download —
 /// instead a watchdog aborts when no chunk has arrived for this long.

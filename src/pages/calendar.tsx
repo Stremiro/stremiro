@@ -33,7 +33,11 @@ import {
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { buildDetailsRoute } from '@/lib/player-navigation';
-import { CALENDAR_EVENTS_STALE_TIME_MS, calendarEventsQueryKey } from '@/lib/query-invalidation';
+import {
+  CALENDAR_EVENTS_STALE_TIME_MS,
+  CALENDAR_PARTIAL_STALE_TIME_MS,
+  calendarEventsQueryKey,
+} from '@/lib/query-invalidation';
 import { parseScheduleDay, SHORT_DATE_FORMATTER, toLocalDate } from '@/lib/schedule-dates';
 import {
   cn,
@@ -132,13 +136,6 @@ function calendarEventLinkProps(
   };
 }
 
-// Grouping/sorting live in `get_calendar_events`; the frontend only parses `releaseDate`.
-const toCalendarEvents = (events: CalendarScheduleEvent[]) =>
-  events.map((event) => ({
-    ...event,
-    date: parseScheduleDay(event.releaseDate) ?? Temporal.PlainDate.from(event.releaseDate),
-  }));
-
 function focusCalendarToday(container: HTMLDivElement | null) {
   const today = container?.querySelector<HTMLElement>('[data-calendar-today]');
   today?.focus({ preventScroll: true });
@@ -199,7 +196,7 @@ export function Calendar() {
           queryClient.setQueryData(queryKey, cached);
         }
       };
-      return api.getCalendarEvents(range, channel).finally(() => {
+      return api.getCalendarEvents(range, channel, signal).finally(() => {
         settled = true;
       });
     },
@@ -209,17 +206,28 @@ export function Calendar() {
       previous
         ? { ...previous, days: [] }
         : undefined,
-    staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
+    staleTime: (query) =>
+      (query.state.data?.missingCount ?? 0) > 0
+        ? CALENDAR_PARTIAL_STALE_TIME_MS
+        : CALENDAR_EVENTS_STALE_TIME_MS,
     enabled: isOnline,
   });
   const isScheduleError = queryNeedsRetry({ isError, isFetched, isPending });
   const isLoadingSchedules = (isLoading || isPlaceholderData) && !isScheduleError;
   const hasMissingSchedules = (schedule?.missingCount ?? 0) > 0;
-  const upcomingEvents = toCalendarEvents(schedule?.upcoming ?? []);
-
-  const eventsByDay = new Map(
-    (schedule?.days ?? []).map((day) => [day.date, toCalendarEvents(day.events)]),
-  );
+  const upcomingEvents = (schedule?.upcoming ?? []).flatMap((event) => {
+    const date = parseScheduleDay(event.releaseDate);
+    return date ? [Object.assign({ date }, event)] : [];
+  });
+  const eventsByDay = new Map<string, CalendarEvent[]>();
+  for (const day of schedule?.days ?? []) {
+    const date = parseScheduleDay(day.date);
+    if (date)
+      eventsByDay.set(
+        day.date,
+        day.events.map((event) => Object.assign({ date }, event)),
+      );
+  }
 
   const airingTodayCount = eventsByDay.get(range.upcomingStart)?.length ?? 0;
   const monthKey = currentMonth.toPlainYearMonth().toString();

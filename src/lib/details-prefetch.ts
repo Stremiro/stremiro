@@ -1,4 +1,4 @@
-import type { QueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 
 import { api, type DetailsPrefetchBundle } from '@/lib/api';
 import { getWatchProgressEpoch, getWatchProgressSnapshotRevision } from '@/lib/api-cache';
@@ -28,6 +28,11 @@ export function pendingDetailsPrefetch(mediaType: string | undefined, id: string
   return detailsPrefetchInFlight.get(
     `${getDiscoveryEpoch()}:${resolvePlayerRouteMediaType(mediaType)}:${id.trim()}`,
   );
+}
+
+export function usePrefetchDetails(mediaId: string, mediaType?: string | null) {
+  const queryClient = useQueryClient();
+  return () => prefetchDetailsRouteData(queryClient, { mediaId, mediaType });
 }
 
 export function prefetchDetailsRouteData(

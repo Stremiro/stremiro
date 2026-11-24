@@ -1,10 +1,12 @@
 use super::{
     addon_registry::{
-        catalog_dedup_key, catalog_page_hash, interleave_catalog_items, BrowseCursorClaims,
-        CatalogFetchPage, SearchSourceCursor,
+        catalog_dedup_key, catalog_page_hash, collect_with_deadline, interleave_catalog_items,
+        BrowseCursorClaims, CatalogFetchPage, SearchSourceCursor, CATALOG_STRAGGLER_GRACE,
     },
     config_store::AddonConfig,
-    normalize_non_empty, normalize_query, MEDIA_ID_MAX_CHARS,
+    normalize_non_empty, normalize_query,
+    stream_commands::StreamRequestRegistry,
+    MEDIA_ID_MAX_CHARS,
 };
 use crate::providers::{
     addon_resource::{AddonResourceClient, CatalogExtra},
@@ -210,6 +212,8 @@ pub struct SearchCatalogRequest {
     year_from: Option<u32>,
     year_to: Option<u32>,
     continuation: Option<SearchCatalogContinuation>,
+    #[serde(default)]
+    allow_partial_first_page: bool,
 }
 
 fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
@@ -448,24 +452,39 @@ fn search_tier(title: &str, title_without_article: &str, query: &str) -> u8 {
     })
 }
 
+fn split_search_year_query(normalized_query: &str) -> Option<(&str, u32)> {
+    normalized_query.rsplit_once(' ').and_then(|(query, year)| {
+        let parsed = year.parse().ok()?;
+        (year.len() == 4 && (SEARCH_YEAR_MIN..=SEARCH_YEAR_MAX).contains(&parsed))
+            .then_some((query, parsed))
+    })
+}
+
+fn search_relevance_tier(
+    title: &str,
+    primary_year: Option<u32>,
+    normalized_query: &str,
+    year_query: Option<(&str, u32)>,
+) -> u8 {
+    let title_without_article = without_search_article(title);
+    let mut tier = search_tier(title, title_without_article, normalized_query);
+    if let Some((query, _)) = year_query.filter(|(_, year)| primary_year == Some(*year)) {
+        tier = tier.max(search_tier(title, title_without_article, query));
+    }
+    tier
+}
+
 fn rank_search_results(
     query: &str,
     items: Vec<MediaItem>,
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
     let normalized_query = normalize_search_text(query);
-    let year_query = normalized_query.rsplit_once(' ').and_then(|(query, year)| {
-        let parsed = year.parse().ok()?;
-        (year.len() == 4 && (SEARCH_YEAR_MIN..=SEARCH_YEAR_MAX).contains(&parsed))
-            .then_some((query, parsed))
-    });
+    let year_query = split_search_year_query(&normalized_query);
+    let check_markers =
+        LOW_QUALITY_MARKERS.map(|marker| phrase_tier(&normalized_query, marker) < WHOLE_WORD_TIER);
     let relevance_tier = |title: &str, primary_year: Option<u32>| {
-        let title_without_article = without_search_article(title);
-        let mut tier = search_tier(title, title_without_article, &normalized_query);
-        if let Some((query, _)) = year_query.filter(|(_, year)| primary_year == Some(*year)) {
-            tier = tier.max(search_tier(title, title_without_article, query));
-        }
-        tier
+        search_relevance_tier(title, primary_year, &normalized_query, year_query)
     };
     let mut positions = HashMap::new();
     let mut unique: Vec<(MediaItem, u8, bool)> = Vec::with_capacity(items.len());
@@ -483,10 +502,10 @@ fn rank_search_results(
             normalize_search_text(&item.title)
         };
         let tier = relevance_tier(&title, item.primary_year);
-        let title_allowed = !LOW_QUALITY_MARKERS.iter().any(|marker| {
-            phrase_tier(&title, marker) >= WHOLE_WORD_TIER
-                && phrase_tier(&normalized_query, marker) < WHOLE_WORD_TIER
-        });
+        let title_allowed = !LOW_QUALITY_MARKERS
+            .into_iter()
+            .zip(check_markers)
+            .any(|(marker, check)| check && phrase_tier(&title, marker) >= WHOLE_WORD_TIER);
         match positions.entry(catalog_dedup_key(&item.type_, &item.id)) {
             Entry::Occupied(entry) => {
                 // Keep source order, but retain the best-matching row and missing previews.
@@ -660,10 +679,23 @@ async fn fetch_query_results(
         let seen: HashSet<_> = criteria.continuation.seen_keys.iter().collect();
         items.retain(|item| !seen.contains(&catalog_dedup_key(&item.type_, &item.id)));
     }
+    if criteria.year_range.is_active() {
+        items.retain(|item| {
+            item.primary_year
+                .is_some_and(|year| criteria.year_range.contains(year))
+        });
+    }
     let needs_genres =
         !criteria.genres.is_empty() || criteria.media_type == Some(SearchMediaType::Anime);
     let unverified = if needs_genres && items.iter().any(|item| item.genres.is_none()) {
-        resolve_search_genres(&snapshot, client, &mut items, criteria.media_type).await
+        resolve_search_genres_for_query(
+            &snapshot,
+            client,
+            &mut items,
+            criteria.media_type,
+            Some(query),
+        )
+        .await
     } else {
         false
     };
@@ -685,31 +717,65 @@ fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
     items
 }
 
+#[cfg(test)]
 async fn resolve_search_genres(
     snapshot: &[AddonConfig],
     client: &AddonResourceClient,
     items: &mut [MediaItem],
     media_type: Option<SearchMediaType>,
 ) -> bool {
+    resolve_search_genres_for_query(snapshot, client, items, media_type, None).await
+}
+
+async fn resolve_search_genres_for_query(
+    snapshot: &[AddonConfig],
+    client: &AddonResourceClient,
+    items: &mut [MediaItem],
+    media_type: Option<SearchMediaType>,
+    query: Option<&str>,
+) -> bool {
     let needs_genres = |item: &MediaItem| {
         item.genres.is_none() && media_type.is_none_or(|type_| type_.matches_type(&item.type_))
     };
+    let normalized_query = query.map(normalize_search_text).filter(|q| !q.is_empty());
+    let year_query = normalized_query
+        .as_deref()
+        .and_then(split_search_year_query);
     let mut positions = HashMap::new();
     let mut groups = Vec::new();
     for item in items.iter_mut().filter(|item| needs_genres(item)) {
+        let priority = normalized_query.as_deref().map_or((false, 0, false), |q| {
+            let tier = search_relevance_tier(
+                &normalize_search_text(&item.title),
+                item.primary_year,
+                q,
+                year_query,
+            );
+            (item.matches_search_credit, tier, item.poster.is_some())
+        });
         // Same fold as display dedup: one meta fetch serves every casing variant.
         let position = positions
             .entry(catalog_dedup_key(&item.type_, &item.id))
             .or_insert_with(|| {
-                groups.push(((item.type_.as_str(), item.id.as_str()), Vec::new()));
+                groups.push((
+                    priority,
+                    (item.type_.as_str(), item.id.as_str()),
+                    Vec::new(),
+                ));
                 groups.len() - 1
             });
-        groups[*position].1.push(&mut item.genres);
+        if priority > groups[*position].0 {
+            groups[*position].0 = priority;
+        }
+        groups[*position].2.push(&mut item.genres);
+    }
+    if normalized_query.is_some() {
+        groups.sort_by_key(|(priority, ..)| std::cmp::Reverse(*priority));
     }
     let deadline = tokio::time::Instant::now() + SEARCH_GENRE_BUDGET;
     let work = stream::iter(groups).for_each_concurrent(
         SEARCH_GENRE_CONCURRENCY,
-        |((type_, id), genres)| async move {
+        |(_, (type_, id), genres)| async move {
             if let Ok(details) = super::addon_registry::fetch_meta_details_from_addons(
                 client,
                 snapshot,
@@ -1123,16 +1189,14 @@ fn merge_all_browse_pages(
         (1, cursors.series, series),
         (2, cursors.addon, addon),
     ] {
-        let (Some(skip), Some(outcome)) = (skip, outcome) else {
-            continue;
-        };
+        let Some(skip) = skip else { continue };
         let cursor = match index {
             0 => &mut next.movie,
             1 => &mut next.series,
             _ => &mut next.addon,
         };
         match outcome {
-            Ok((page, page_claims)) => {
+            Some(Ok((page, page_claims))) => {
                 succeeded = true;
                 partial |= page.partial;
                 *cursor = page.next_skip.filter(|next_skip| *next_skip > skip);
@@ -1142,11 +1206,12 @@ fn merge_all_browse_pages(
                     *claims.entry(key).or_default() |= claimants;
                 }
             }
-            Err(error) => {
-                // Preserve a failed branch's cursor so the next page retries it.
+            Some(Err(error)) => {
                 *cursor = Some(skip);
                 first_error.get_or_insert(error);
             }
+            // The first page's grace deferred this branch to pagination.
+            None => *cursor = Some(skip),
         }
     }
     if !succeeded {
@@ -1245,16 +1310,28 @@ pub(super) fn finish_catalog_page(
 pub async fn query_search_catalog(
     app: AppHandle,
     client: State<'_, AddonResourceClient>,
+    registry: State<'_, StreamRequestRegistry>,
     request: SearchCatalogRequest,
+    request_id: Option<String>,
 ) -> Result<SearchCatalogPage, super::addon_registry::AddonResourceError> {
-    Ok(query_search_catalog_for_request(&app, &client, request).await?)
+    let work = query_search_catalog_for_request(&app, &client, request);
+    let Some(request_id) = request_id else {
+        return Ok(work.await?);
+    };
+    let (_guard, mut cancellation) = registry.register(request_id)?;
+    tokio::select! {
+        biased;
+        _ = cancellation.wait_for(|cancelled| *cancelled) => Err("Catalog request cancelled.".to_string().into()),
+        result = work => Ok(result?),
+    }
 }
 
-pub(crate) async fn query_search_catalog_for_request(
+async fn query_search_catalog_for_request(
     app: &AppHandle,
     client: &AddonResourceClient,
     request: SearchCatalogRequest,
 ) -> Result<SearchCatalogPage, String> {
+    let allow_partial = request.allow_partial_first_page && request.continuation.is_none();
     let criteria = build_search_criteria(request)?;
 
     if criteria.continuation.is_exhausted() {
@@ -1272,28 +1349,7 @@ pub(crate) async fn query_search_catalog_for_request(
 
     let snapshot = super::addon_registry::load_enabled_addons_snapshot(app).await?;
     if let Some(cursors) = criteria.continuation.all_cursors {
-        let fetch = |media_type, skip: Option<u32>| {
-            let criteria = &criteria;
-            let snapshot = snapshot.as_slice();
-            async move {
-                let skip = skip?;
-                Some(fetch_browse_page(snapshot, client, criteria, media_type, skip).await)
-            }
-        };
-        // The addon branch only exists on the untyped all tab; anime keeps its
-        // movie/series merge.
-        let addon = async {
-            let skip = (criteria.media_type.is_none())
-                .then_some(cursors.addon)
-                .flatten()?;
-            Some(fetch_addon_browse_page(&snapshot, client, &criteria, skip).await)
-        };
-        let (movie, series, addon) = tokio::join!(
-            fetch(SearchMediaType::Movie, cursors.movie),
-            fetch(SearchMediaType::Series, cursors.series),
-            addon,
-        );
-        return merge_all_browse_pages(criteria.continuation, movie, series, addon);
+        return fetch_all_browse_page(&snapshot, client, criteria, cursors, allow_partial).await;
     }
 
     let skip = criteria.continuation.skip.unwrap_or(0);
@@ -1311,6 +1367,54 @@ pub(crate) async fn query_search_catalog_for_request(
     );
     result.partial = page.partial;
     Ok(result)
+}
+
+async fn fetch_all_browse_page(
+    snapshot: &[AddonConfig],
+    client: &AddonResourceClient,
+    mut criteria: SearchCatalogCriteria,
+    cursors: AllBrowseCursors,
+    allow_partial: bool,
+) -> Result<SearchCatalogPage, String> {
+    let addon_skip = cursors.addon.filter(|_| criteria.media_type.is_none());
+    criteria.continuation.all_cursors = Some(AllBrowseCursors {
+        addon: addon_skip,
+        ..cursors
+    });
+    let skips = [cursors.movie, cursors.series, addon_skip];
+    let active = skips
+        .into_iter()
+        .enumerate()
+        .filter_map(|(branch, skip)| Some((branch, skip?)));
+    let work = stream::iter(active)
+        .map(|(branch, skip)| {
+            let criteria = &criteria;
+            async move {
+                let page = match branch {
+                    0 => {
+                        fetch_browse_page(snapshot, client, criteria, SearchMediaType::Movie, skip)
+                            .await
+                    }
+                    1 => {
+                        fetch_browse_page(snapshot, client, criteria, SearchMediaType::Series, skip)
+                            .await
+                    }
+                    _ => fetch_addon_browse_page(snapshot, client, criteria, skip).await,
+                };
+                (branch, page)
+            }
+        })
+        .buffer_unordered(skips.len());
+    let mut pages = [None, None, None];
+    for (branch, page) in collect_with_deadline(work, CATALOG_STRAGGLER_GRACE, |(_, page)| {
+        allow_partial && page.as_ref().is_ok_and(|(page, _)| !page.items.is_empty())
+    })
+    .await
+    {
+        pages[branch] = Some(page);
+    }
+    let [movie, series, addon] = pages;
+    merge_all_browse_pages(criteria.continuation, movie, series, addon)
 }
 
 #[cfg(test)]

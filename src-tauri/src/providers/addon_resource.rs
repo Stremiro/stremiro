@@ -51,10 +51,7 @@ const SUBTITLE_CACHE_MAX_ENTRIES: usize = 64;
 const SUBTITLE_DISK_MAX_BYTES: usize = SUBTITLE_MAX_BYTES + 128;
 // All filesystem work runs on blocking workers; one gate bounds writers across clients.
 static SUBTITLE_DISK_GATE: Mutex<()> = Mutex::new(());
-/// A dropped fetch future never releases its key; inserts sweep orphans past this bound.
-/// Per-addon transport-failure cooldown: a host that failed to answer is
-/// presumed down, so fetches fail fast for this window. Session-local;
-/// mechanics in `FetchFailureCooldown`.
+// Transport failures apply to the addon across resource URLs.
 const RESOURCE_FETCH_FAILURE_TTL: Duration = Duration::from_secs(30);
 /// Negative-cache bound for deterministic per-request failures.
 const RESOURCE_FAILURE_CACHE_MAX_ENTRIES: usize = 64;
@@ -390,6 +387,7 @@ impl AddonResourceClient {
         self.catalog_cache.purge_expired();
         self.subtitle_cache.purge_expired();
         self.failure_cache.purge_expired();
+        self.fetch_failures.purge_expired();
     }
 
     pub(crate) fn cache_generation(&self) -> u64 {

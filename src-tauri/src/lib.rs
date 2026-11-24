@@ -36,9 +36,6 @@ pub fn run() {
             {
                 commands::app_shell_commands::frontend_loading(webview.app_handle());
             }
-            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                commands::app_shell_commands::reveal_on_startup(webview.app_handle());
-            }
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
@@ -77,7 +74,6 @@ pub fn run() {
                 app.path().app_cache_dir().ok(),
             ));
 
-            commands::sweep_startup_store_files(&handle);
             commands::app_shell_commands::accept_app_link(
                 &handle,
                 std::env::args_os().filter_map(|arg| arg.into_string().ok()),
@@ -91,20 +87,10 @@ pub fn run() {
                 );
             }
 
-            // Fail-safe: reveal the window even if the page load never finishes.
-            let reveal_handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                commands::app_shell_commands::reveal_on_startup(&reveal_handle);
-            });
-
-            commands::config_commands::schedule_capability_classification(&handle, |err| {
-                operational_log::log_warn(
-                    "startup",
-                    "classify_addon_capabilities",
-                    "skipped",
-                    &[operational_log::field("error", &err)],
-                );
+            commands::app_shell_commands::prepare_startup_window(&handle);
+            // Sweep crash leftovers off the setup critical path; live-PID partials are skipped.
+            tauri::async_runtime::spawn_blocking(move || {
+                commands::sweep_startup_store_files(&handle);
             });
 
             Ok(())
@@ -118,6 +104,8 @@ pub fn run() {
             commands::app_shell_commands::close_main_window_to_tray,
             commands::app_shell_commands::mark_frontend_quit_ready,
             commands::app_shell_commands::take_pending_app_link,
+            commands::app_shell_commands::is_start_hidden,
+            commands::app_shell_commands::frontend_first_frame_ready,
             commands::app_links::resolve_app_link,
             commands::app_update_commands::get_current_app_version,
             commands::app_update_commands::get_app_release_notes,

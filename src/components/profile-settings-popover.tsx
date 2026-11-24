@@ -1,5 +1,5 @@
 import { Check, ChevronRight, Settings2, SlidersHorizontal } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
@@ -14,7 +14,14 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { type LocalProfile, type LocalProfileUpdate } from '@/hooks/use-local-profile';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { cn, getAccentTextColor, getErrorMessage, HEX_COLOR_PATTERN, nonBlank } from '@/lib/utils';
+import {
+  applyAccentVars,
+  cn,
+  getAccentTextColor,
+  getErrorMessage,
+  HEX_COLOR_PATTERN,
+  nonBlank,
+} from '@/lib/utils';
 
 export function ProfileSettingsPopover({
   profile,
@@ -40,6 +47,10 @@ export function ProfileSettingsPopover({
   const [draftIntensity, setDraftIntensity] = useState(profile.accentIntensity);
   const openingGenerationRef = useRef(0);
   const mountedRef = useMountedRef();
+  const profileRef = useRef(profile);
+  useLayoutEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
 
   if (isHydrating && open) setOpen(false);
 
@@ -58,6 +69,17 @@ export function ProfileSettingsPopover({
   const isAccentHexInvalid = !HEX_COLOR_PATTERN.test(draftAccentColor);
   const previewIntensity = normalizeAccentPreviewIntensity(draftIntensity);
   const previewName = nonBlank(draftName) || profile.username;
+  const hasChanges =
+    draftName.trim() !== profile.username ||
+    previewAccentColor.toLowerCase() !== profile.accentColor.toLowerCase() ||
+    previewIntensity !== profile.accentIntensity;
+
+  // Live-preview the accent color across the profile card and app while editing; revert if dismissed.
+  useEffect(() => {
+    if (!open) return;
+    applyAccentVars(previewAccentColor, profile.accentTargets);
+    return () => applyAccentVars(profileRef.current.accentColor, profileRef.current.accentTargets);
+  }, [open, previewAccentColor, profile.accentTargets]);
 
   const handleSave = async () => {
     const trimmedName = draftName.trim();
@@ -92,8 +114,7 @@ export function ProfileSettingsPopover({
         >
           <span
             aria-hidden='true'
-            className='h-1.5 w-1.5 rounded-full'
-            style={{ backgroundColor: profile.accentColor }}
+            className='h-1.5 w-1.5 rounded-full bg-[rgb(var(--app-accent-rgb))]'
           />
           <Settings2 className='w-3 h-3' />
         </button>
@@ -142,7 +163,9 @@ export function ProfileSettingsPopover({
                   >
                     {previewName}
                   </p>
-                  <p className='text-[11px] text-zinc-600'>Preview — save to apply</p>
+                  <p className='text-[11px] text-zinc-400'>
+                    {hasChanges ? 'Preview — save to apply' : 'Current profile'}
+                  </p>
                 </div>
                 <div
                   className='h-5 w-5 shrink-0 rounded-md border border-white/10 transition-colors duration-200'
@@ -174,7 +197,7 @@ export function ProfileSettingsPopover({
                     void handleSave();
                   }}
                   placeholder='Enter your name…'
-                  className='h-8 bg-zinc-900/80 border-white/8 text-[13px] text-white placeholder:text-zinc-700 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
+                  className='h-8 bg-zinc-900/80 border-white/8 text-[13px] text-white placeholder:text-zinc-500 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
                 />
               </div>
 

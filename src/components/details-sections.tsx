@@ -120,9 +120,9 @@ function People({ people, characters }: Pick<TitleCredits, 'people'> & { charact
         {people.map((person) => (
           <li
             key={`${person.name}:${person.character ?? ''}:${person.voiceActor ?? ''}:${person.role}`}
-            className='w-32 shrink-0 space-y-2.5 sm:w-36'
+            className='group/person w-32 shrink-0 space-y-2.5 sm:w-36'
           >
-            <div className='relative aspect-[3/4] overflow-hidden rounded-lg bg-white/[0.045] ring-1 ring-inset ring-white/[0.07]'>
+            <div className='relative aspect-[3/4] overflow-hidden rounded-lg bg-white/[0.045]'>
               <span
                 aria-hidden='true'
                 className='absolute inset-0 flex items-center justify-center text-2xl font-medium text-white/25'
@@ -143,9 +143,20 @@ function People({ people, characters }: Pick<TitleCredits, 'people'> & { charact
                   className='absolute inset-0 size-full object-cover object-top'
                 />
               )}
+              <span
+                aria-hidden='true'
+                className='pointer-events-none absolute inset-0 z-10 rounded-lg bg-black/0 ring-1 ring-inset ring-white/[0.08] transition-[background-color,box-shadow] duration-200 ease-out group-hover/person:bg-black/15 group-hover/person:ring-white/20 motion-reduce:transition-none'
+              />
+              <span
+                aria-hidden='true'
+                className='pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-linear-to-t from-black/35 to-transparent'
+              />
             </div>
             <div className='min-w-0 space-y-0.5 px-0.5 text-[13px] leading-5'>
-              <p title={person.name} className='line-clamp-2 break-words font-medium text-white/85'>
+              <p
+                title={person.name}
+                className='line-clamp-2 break-words font-medium text-white/85 transition-colors duration-150 group-hover/person:text-white motion-reduce:transition-none'
+              >
                 {characters ? person.name : <CreditLink name={person.name} />}
               </p>
               {person.character && (

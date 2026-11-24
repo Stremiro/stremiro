@@ -57,7 +57,10 @@ export function useSubtitleAdjustments({
       setSettings((current) => (current[key] === value ? current : { ...current, [key]: value }));
       // Preserve write-barrier/unmount flushes while native replies are pending; preference saves normalize in Rust too.
       if (persist) schedulePrefsPersist({ [preference]: value });
-      return scheduleMpvSet(property, value).then((normalized) => {
+      let applied = true;
+      return scheduleMpvSet(property, value, () => {
+        applied = false;
+      }).then((normalized) => {
         if (sequenceRef.current[key] !== sequence) return undefined;
         pendingRef.current.delete(key);
         if (normalized === undefined) return undefined;
@@ -66,7 +69,7 @@ export function useSubtitleAdjustments({
           current[key] === normalized ? current : { ...current, [key]: normalized },
         );
         if (persist) schedulePrefsPersist({ [preference]: normalized });
-        return normalized;
+        return applied ? normalized : undefined;
       });
     },
     [scheduleMpvSet, schedulePrefsPersist],

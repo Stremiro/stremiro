@@ -373,6 +373,18 @@ impl FetchFailureCooldown {
         }
     }
 
+    /// Drop expired marks without disturbing active probes.
+    pub(crate) fn purge_expired(&self) {
+        let mut table = lock_or_recover(&self.table);
+        let now = Instant::now();
+        table
+            .marks
+            .retain(|_, mark| mark.probing || mark.until > now);
+        if table.marks.is_empty() {
+            table.marks.shrink_to_fit();
+        }
+    }
+
     /// `clear_cache` wipe — a config change may fix the dead host.
     pub(crate) fn clear(&self) {
         lock_or_recover(&self.table).marks.clear();
@@ -1021,5 +1033,48 @@ mod tests {
             assert!(!h.cooldown.cooling_down("addon"));
             assert!(lock_or_recover(&h.in_flight.locks).is_empty());
         }
+    }
+
+    #[test]
+    fn fetch_failure_cooldown_purge_expired_preserves_active_probes_and_unexpired_marks() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
+        let now = Instant::now();
+        {
+            let mut table = lock_or_recover(&cooldown.table);
+            table.marks.insert(
+                "expired".to_string(),
+                CooldownMark {
+                    until: now - Duration::from_secs(1),
+                    next_probe_at: now - Duration::from_secs(1),
+                    probing: false,
+                    probe_id: 0,
+                },
+            );
+            table.marks.insert(
+                "probing".to_string(),
+                CooldownMark {
+                    until: now - Duration::from_secs(1),
+                    next_probe_at: now - Duration::from_secs(1),
+                    probing: true,
+                    probe_id: 1,
+                },
+            );
+            table.marks.insert(
+                "fresh".to_string(),
+                CooldownMark {
+                    until: now + Duration::from_secs(60),
+                    next_probe_at: now + Duration::from_secs(60),
+                    probing: false,
+                    probe_id: 0,
+                },
+            );
+        }
+
+        cooldown.purge_expired();
+
+        let table = lock_or_recover(&cooldown.table);
+        assert!(!table.marks.contains_key("expired"));
+        assert!(table.marks.contains_key("probing"));
+        assert!(table.marks.contains_key("fresh"));
     }
 }

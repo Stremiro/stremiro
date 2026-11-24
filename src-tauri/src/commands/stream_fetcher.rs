@@ -19,7 +19,7 @@ use super::{
     MEDIA_TITLE_MAX_CHARS,
 };
 use crate::operational_log::{field, log_warn};
-use crate::providers::addon_manifest::snapshot_supports_request;
+use crate::providers::addon_manifest::snapshot_request_type;
 use crate::providers::addons::{
     stream_conflicts_with_episode_targets, stream_conflicts_with_work_years, AddonStream,
     AddonTransport, StreamDeliveryKind, StreamResolution,
@@ -324,12 +324,26 @@ fn summarize_cooldown_skipped_addon(addon: &AddonConfig) -> StreamSourceSummary 
     )
 }
 
-fn addon_declares_stream(addon: &AddonConfig, media_type: &str, query_ids: &[String]) -> bool {
-    query_ids.iter().any(|query_id| {
-        addon.capabilities.as_ref().is_none_or(|snapshot| {
-            snapshot_supports_request(snapshot, "stream", media_type, query_id)
-        })
+fn stream_request_type<'a>(
+    addon: &'a AddonConfig,
+    media_type: &'a str,
+    query_id: &str,
+) -> Option<&'a str> {
+    let fallback = super::media_type::addon_episode_lookup_type(media_type);
+    let Some(snapshot) = addon.capabilities.as_ref() else {
+        return Some(fallback);
+    };
+    snapshot_request_type(snapshot, "stream", media_type, query_id).or_else(|| {
+        (fallback != media_type)
+            .then(|| snapshot_request_type(snapshot, "stream", fallback, query_id))
+            .flatten()
     })
+}
+
+fn addon_declares_stream(addon: &AddonConfig, media_type: &str, query_ids: &[String]) -> bool {
+    query_ids
+        .iter()
+        .any(|query_id| stream_request_type(addon, media_type, query_id).is_some())
 }
 
 fn log_fetcher_error(action: &str, outcome: &str, error: &str) {
@@ -526,7 +540,7 @@ struct EpisodeEligibility<'a> {
 
 async fn fetch_prepared_streams_for_addon(
     provider: &AddonTransport,
-    effective_type: &str,
+    media_type: &str,
     query_ids: &[String],
     addon: &AddonConfig,
     episode_eligibility: Option<EpisodeEligibility<'_>>,
@@ -541,9 +555,9 @@ async fn fetch_prepared_streams_for_addon(
     let mut first_attempt = true;
 
     for (index, query_id) in query_ids.iter().enumerate() {
-        if !addon_declares_stream(addon, effective_type, std::slice::from_ref(query_id)) {
+        let Some(request_type) = stream_request_type(addon, media_type, query_id) else {
             continue;
-        }
+        };
         let primary_attempt = first_attempt;
         first_attempt = false;
         let timeout_secs = if primary_attempt {
@@ -557,7 +571,7 @@ async fn fetch_prepared_streams_for_addon(
         let attempt = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             provider.get_streams_fresh(
-                effective_type,
+                request_type,
                 query_id,
                 &addon.url,
                 (source_name, &addon.id),
@@ -574,7 +588,7 @@ async fn fetch_prepared_streams_for_addon(
                 outcome,
                 &[
                     field("source", source_name),
-                    field("media_type", effective_type),
+                    field("media_type", request_type),
                     field("query_index", index + 1),
                     field("query_id", query_id),
                     detail,
@@ -656,7 +670,6 @@ pub(crate) async fn fetch_stream_for_link(
     stream_key: &str,
     source_id: Option<&str>,
 ) -> Result<Option<AddonStream>, String> {
-    let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
     let playback_state = app.state::<PlaybackStateService>();
     let (video_id, addons) = tokio::join!(
         cached_episode_video_id(app, &playback_state, ranking),
@@ -666,11 +679,11 @@ pub(crate) async fn fetch_stream_for_link(
     let query_ids = query.query_ids(video_id.as_deref());
     let stream_addons = addons
         .iter()
-        .filter(|addon| addon_declares_stream(addon, effective_type, &query_ids))
+        .filter(|addon| addon_declares_stream(addon, query.media_type, &query_ids))
         .collect();
     fetch_stream_for_link_from_addons(
         provider,
-        effective_type,
+        query.media_type,
         &query_ids,
         stream_addons,
         stream_key,
@@ -1126,7 +1139,6 @@ pub(crate) async fn fetch_stream_selector_data(
     resolve: Option<ResolveFetch<'_>>,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<StreamSelectorData, String> {
-    let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
     let fetch_deadline =
         resolve.map(|_| resolve_fetch_deadline(tokio::time::Instant::now(), deadline));
 
@@ -1151,7 +1163,7 @@ pub(crate) async fn fetch_stream_selector_data(
         mut source_health_priorities,
         mut preferred_title_source_id,
         language_preferences,
-        is_final_season,
+        mut is_final_season,
         mut accepted_years,
     } = snapshot_selector_inputs(app, playback_state, ranking, &enabled_addons, deadline).await?;
     let mut query_ids = query.query_ids(video_id.as_deref());
@@ -1202,6 +1214,12 @@ pub(crate) async fn fetch_stream_selector_data(
                     &details,
                     ranking.season,
                 );
+                if !is_final_season {
+                    is_final_season = PlaybackStateService::episode_is_final_season_from_details(
+                        &details,
+                        ranking.season,
+                    );
+                }
                 if reference_title.is_none() && !details.title.is_empty() {
                     reference_title = Some(details.title.clone());
                 }
@@ -1236,7 +1254,7 @@ pub(crate) async fn fetch_stream_selector_data(
     let stream_addons: Vec<(usize, &AddonConfig, u8)> = enabled_addons
         .iter()
         .enumerate()
-        .filter(|(_, addon)| addon_declares_stream(addon, effective_type, &query_ids))
+        .filter(|(_, addon)| addon_declares_stream(addon, query.media_type, &query_ids))
         .map(|(index, addon)| {
             let priority = source_health_priority_for_addon(addon, &source_health_priorities);
             if priority == ACTIVE_SOURCE_COOLDOWN_PRIORITY {
@@ -1313,7 +1331,7 @@ pub(crate) async fn fetch_stream_selector_data(
         &stream_addons,
         &active_stream_addons,
         &query_ids,
-        effective_type,
+        query.media_type,
         progress,
         resolve,
     )

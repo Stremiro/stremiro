@@ -253,6 +253,8 @@ fn mpv_config_applies_initial_playback_settings_and_passes_native_validation() {
         ("load-scripts", json!("no")),
         ("resume-playback", json!("no")),
         ("save-position-on-quit", json!("no")),
+        ("demuxer-max-bytes", json!("96MiB")),
+        ("demuxer-max-back-bytes", json!("24MiB")),
         ("sid", json!("no")),
     ] {
         assert_eq!(config.initial_options.get(name), Some(&value), "{name}");

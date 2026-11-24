@@ -25,6 +25,34 @@ function hasOpenLayer(): boolean {
   return false;
 }
 
+/** Ctrl/Cmd+F focuses an in-page filter/search input instead of opening the WebView find bar. */
+export function useFindShortcut(getInput: () => HTMLInputElement | null) {
+  const handleKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (
+      event.key.toLowerCase() !== 'f' ||
+      !(event.ctrlKey || event.metaKey) ||
+      event.altKey ||
+      event.shiftKey ||
+      event.defaultPrevented ||
+      event.isComposing ||
+      isKeyCaptureTarget(event.target, event.key) ||
+      document.querySelector(OPEN_DIALOG_SELECTOR)
+    ) {
+      return;
+    }
+    const input = getInput();
+    if (!input) return;
+    event.preventDefault();
+    input.focus();
+    input.select();
+  });
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+}
+
 /** Browse shortcuts yield to editable targets and open layers; player routes own their controls. */
 export function useBrowseHotkeys() {
   const handleKeyDown = useEffectEvent((event: KeyboardEvent) => {

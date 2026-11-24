@@ -4,11 +4,10 @@ import {
   type ReactNode,
   type RefObject,
   useCallback,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
-
-import { useWindowScrollMargin } from '@/hooks/use-window-scroll-margin';
 
 const DEFAULT_STACK_GAP_PX = 6;
 const DEFAULT_VIRTUALIZATION_THRESHOLD = 40;
@@ -33,31 +32,61 @@ interface WindowVirtualizedStackProps<T> {
   items: readonly T[];
   getItemKey: (item: T, index: number) => string;
   renderItem: (item: T, index: number) => ReactNode;
-  estimateSize: (index: number) => number;
+  estimatedRowHeight: number;
   containerRef?: RefObject<HTMLDivElement | null>;
   virtualize?: boolean;
   overscan?: number;
   gap?: number;
-  getRowStyle?: (index: number, offset?: number) => CSSProperties;
+  rowStyle?: CSSProperties;
 }
 
 export function WindowVirtualizedStack<T>({
   items,
   getItemKey,
   renderItem,
-  estimateSize,
+  estimatedRowHeight,
   containerRef: suppliedRef,
   virtualize = items.length >= DEFAULT_VIRTUALIZATION_THRESHOLD,
   overscan = OVERSCAN_ROWS,
   gap = DEFAULT_STACK_GAP_PX,
-  getRowStyle,
+  rowStyle,
 }: WindowVirtualizedStackProps<T>) {
   // The compiler caches getVirtualItems() on the stable virtualizer instance, freezing rows on scroll.
   'use no memo';
   const ownRef = useRef<HTMLDivElement | null>(null);
   const containerRef = suppliedRef ?? ownRef;
   const [focusedIndex, setFocusedIndex] = useState(-1);
-  const scrollMargin = useWindowScrollMargin(containerRef, virtualize);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!virtualize || !container) return;
+
+    const measure = () => {
+      const top = container.getBoundingClientRect().top + window.scrollY;
+      // Ignore subpixel observer feedback.
+      setScrollMargin((current) => (Math.abs(current - top) < 1 ? current : top));
+    };
+    measure();
+
+    let frame: number | null = null;
+    const scheduleMeasure = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        measure();
+      });
+    };
+    const observer = new ResizeObserver(scheduleMeasure);
+    observer.observe(container);
+    // Content above the stack can move it without resizing the stack itself.
+    observer.observe(document.body);
+    window.addEventListener('resize', scheduleMeasure, { passive: true });
+    return () => {
+      window.removeEventListener('resize', scheduleMeasure);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [containerRef, virtualize]);
   const rangeExtractor = useCallback(
     (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
@@ -70,13 +99,18 @@ export function WindowVirtualizedStack<T>({
   const rowVirtualizer = useWindowVirtualizer({
     count: items.length,
     enabled: virtualize,
-    estimateSize,
+    estimateSize: () => estimatedRowHeight,
     gap,
     overscan,
     scrollMargin,
     getItemKey: getRowKey,
     rangeExtractor,
   });
+
+  useLayoutEffect(() => {
+    // Offscreen rows keep their old measurements after a responsive grid changes height.
+    if (virtualize) rowVirtualizer.measure();
+  }, [estimatedRowHeight, rowVirtualizer, virtualize]);
 
   const rows = virtualize
     ? rowVirtualizer.getVirtualItems()
@@ -113,18 +147,9 @@ export function WindowVirtualizedStack<T>({
             }}
             style={{
               ...(virtualize
-                ? {
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${virtualRow.start - scrollMargin}px)`,
-                  }
+                ? { position: 'absolute', top: virtualRow.start - scrollMargin, insetInline: 0 }
                 : undefined),
-              ...getRowStyle?.(
-                virtualRow.index,
-                virtualize ? virtualRow.start - scrollMargin : undefined,
-              ),
+              ...rowStyle,
             }}
           >
             {renderItem(item, virtualRow.index)}

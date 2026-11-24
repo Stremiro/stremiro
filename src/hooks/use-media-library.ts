@@ -415,10 +415,12 @@ export function useTitleWatchProgress(
 }
 
 export function useIsItemInLibrary(itemId?: string, options?: SharedCollectionQueryOptions) {
+  const enabled = (options?.enabled ?? true) && Boolean(itemId);
   return useQuery({
     queryKey: LIBRARY_QUERY_KEY,
     queryFn: api.getLibrary,
-    enabled: (options?.enabled ?? true) && Boolean(itemId),
+    enabled,
+    subscribed: enabled,
     staleTime: options?.staleTime ?? LIBRARY_STALE_TIME,
     select: (library: MediaItem[]) => Boolean(itemId && getLibraryIdSet(library).has(itemId)),
   });
@@ -440,10 +442,12 @@ export function useLibraryMembership(itemId?: string, override?: boolean) {
 }
 
 export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQueryOptions) {
+  const enabled = (options?.enabled ?? true) && Boolean(itemId);
   return useQuery({
     queryKey: WATCH_STATUSES_QUERY_KEY,
     queryFn: api.getAllWatchStatuses,
-    enabled: (options?.enabled ?? true) && Boolean(itemId),
+    enabled,
+    subscribed: enabled,
     staleTime: options?.staleTime ?? WATCH_STATUSES_STALE_TIME,
     select: (statuses: Record<string, WatchStatus>) =>
       itemId ? (getOwnWatchStatus(statuses, itemId) ?? null) : null,

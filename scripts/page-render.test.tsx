@@ -15,6 +15,7 @@ import type {
   EpisodesWatchedResult,
   MediaDetails,
   MediaItem,
+  SearchCatalogPage,
   StreamSelectorData,
   TitleCredits,
   UserList,
@@ -64,7 +65,8 @@ mock.module('@radix-ui/react-dialog', () => ({
     renderDialogPortal ? children : <DialogPortal {...props}>{children}</DialogPortal>,
 }));
 
-const { QueryObserver, QueryClientProvider, onlineManager } = await import('@tanstack/react-query');
+const { InfiniteQueryObserver, QueryObserver, QueryClientProvider, onlineManager } =
+  await import('@tanstack/react-query');
 const { renderToStaticMarkup } = await import('react-dom/server');
 const router = await import('react-router');
 const { MemoryRouter, Route, Routes } = router;
@@ -76,13 +78,18 @@ const { api, DEFAULT_APP_UI_PREFERENCES } = await import('../src/lib/api');
 const { queryClient } = await import('../src/lib/query-client');
 const {
   APP_UI_PREFERENCES_QUERY_KEY,
+  CALENDAR_EVENTS_STALE_TIME_MS,
+  CALENDAR_PARTIAL_STALE_TIME_MS,
   DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY,
   DETAILS_QUERY_KEY,
   RECENT_WATCH_SEED_QUERY_KEY,
+  addonSubtitlesQueryKey,
+  calendarEventsQueryKey,
   detailsCardQueryKey,
   invalidateDiscoveryQueries,
   listSummariesQueryKey,
   profileLibraryQueryKey,
+  resumeRailQueryKey,
   invalidateAddonCapabilityQueries,
   SEARCH_CATALOG_QUERY_KEY,
   streamSelectorQueryKey,
@@ -125,6 +132,8 @@ const { getPlayerStreamLoadKey, usePlayerMpvLifecycle } =
   await import('../src/hooks/use-player-mpv-lifecycle');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
+const { useSubtitleAdjustments } = await import('../src/hooks/use-subtitle-adjustments');
+const { PlayerUpNextCard } = await import('../src/components/player-state-overlays');
 const { useTitleSearch } = await import('../src/hooks/use-item-search');
 const { useSearchPageState } = await import('../src/hooks/use-search-page-state');
 const { searchCatalogQueryOptions } = await import('../src/lib/search-catalog');
@@ -645,18 +654,56 @@ test('Browse hotkeys map Alt sections/history and yield to owned contexts', asyn
 const caseInsensitiveCatalogOptions = (query: string, genre: string) =>
   searchCatalogQueryOptions({ query, genre, type: 'all', feed: 'popular' }, 2026);
 
-test('Case-only title and genre edits share the catalog cache', async () => {
+test('Case-only text shares the catalog cache and stale first pages refresh in place', async () => {
   const client = createClient();
+  const options = caseInsensitiveCatalogOptions('Dune', 'Drama');
   const fetch = spyOn(api, 'querySearchCatalogPage').mockResolvedValue({
     items: [],
     exhausted: true,
     partial: false,
     continuation: { seenKeys: [] },
   });
-  await client.prefetchInfiniteQuery(caseInsensitiveCatalogOptions('Dune', 'Drama'));
+  await client.prefetchInfiniteQuery(options);
   await client.prefetchInfiniteQuery(caseInsensitiveCatalogOptions('DUNE', 'DRAMA'));
   await client.prefetchInfiniteQuery(caseInsensitiveCatalogOptions('dune', 'drama'));
   expect(fetch).toHaveBeenCalledTimes(1);
+
+  const cached = client.getQueryData(options.queryKey);
+  client.setQueryData(options.queryKey, cached, { updatedAt: Date.now() - 31_000 });
+  const refresh = client.prefetchInfiniteQuery(options);
+  expect(client.getQueryData(options.queryKey)).toBe(cached);
+  await refresh;
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+test('Catalog IPC stays live until the last observer leaves', async () => {
+  const page = Promise.withResolvers<SearchCatalogPage>();
+  const started = Promise.withResolvers<string>();
+  const invoke = mock((command: string, args: { requestId: string }) => {
+    if (command === 'query_search_catalog') {
+      started.resolve(args.requestId);
+      return page.promise;
+    }
+    return Promise.resolve();
+  });
+  const restore = stubGlobal('window', { __TAURI_INTERNALS__: { invoke } });
+  const client = createClient();
+  const options = caseInsensitiveCatalogOptions('Interstellar', 'Drama');
+  const first = new InfiniteQueryObserver(client, options).subscribe(() => {});
+  const second = new InfiniteQueryObserver(client, options).subscribe(() => {});
+  try {
+    const requestId = await started.promise;
+    first();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    second();
+    expect(invoke).toHaveBeenLastCalledWith('cancel_stream_request', { requestId }, undefined);
+    expect(client.getQueryData(options.queryKey)).toBeUndefined();
+  } finally {
+    first();
+    second();
+    page.resolve({ items: [], exhausted: true, partial: false, continuation: { seenKeys: [] } });
+    restore();
+  }
 });
 
 test.each([
@@ -835,6 +882,51 @@ test('Automatic subtitles try the next ranked file when the first download fails
     await selected.promise;
     expect(attempts).toEqual([first.url, backup.url]);
     expect(rank).toHaveBeenCalledTimes(2);
+  } finally {
+    cleanupEffects(cleanups);
+    rank.mockRestore();
+  }
+});
+
+test('Exhausted automatic subtitles do not re-trigger when reopening the subtitles menu', async () => {
+  const client = createClient({ defaultOptions: { queries: { refetchOnMount: false } } });
+  const key = ['addonSubtitles', 'movie', 'tt1', null, null];
+  const broken = addonSubtitleFixture('eng', 'https://subs.test/broken.srt');
+  client.setQueryData(key, [broken]);
+  const rank = spyOn(api, 'resolvePreferredTrackSelection').mockResolvedValue({
+    selectedMatches: false,
+    matchedTrackId: 0,
+  });
+  const done = Promise.withResolvers<void>();
+  const select = mock(async () => {
+    done.resolve();
+    return false;
+  });
+  const cleanups: (() => void)[] = [];
+  try {
+    const [, effects] = captureRenderEffects(() =>
+      captureWithClient(client, () =>
+        usePlayerAddonSubtitles(
+          addonSubtitleArgs({
+            autoLoadLanguage: 'eng',
+            selectAddonSubtitle: select,
+          }),
+        ),
+      ),
+    );
+    runEffects(effects, cleanups);
+    await done.promise;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(rank).toHaveBeenCalledTimes(1);
+
+    // Re-running the auto-load effect models a menu-open refetch bumping dataUpdatedAt.
+    const autoLoadEffect = effects.at(-1)!;
+    const cleanup = autoLoadEffect();
+    if (typeof cleanup === 'function') cleanups.push(cleanup);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(rank).toHaveBeenCalledTimes(1);
   } finally {
     cleanupEffects(cleanups);
     rank.mockRestore();
@@ -1285,6 +1377,7 @@ test('manual stream retry bypasses the cached URL and rejects a late resolve win
 
 const mpvLifecycleModes = [
   'seek',
+  'unknown-duration-eof',
   'startup-idle',
   'failed-load',
   'late-listener',
@@ -1367,19 +1460,21 @@ test.each(mpvLifecycleModes)('mpv lifecycle (%s)', async (mode) => {
       triggerOsd: () => {},
     });
     controller.resolve(seeking);
+    const stream = {
+      reloadStream: () => {},
+      activeStreamUrl: 'https://example.com/seek',
+      activeStreamKey: 'seek',
+      committedStreamUrlRef: { current: 'https://example.com/seek' },
+      selectedStreamKeyRef: { current: 'seek' },
+      streamLookupIdRef: { current: 'tt1' },
+      activeStreamSourceIdRef: { current: undefined },
+      activeStreamSourceNameRef: { current: undefined },
+      activeStreamFamilyRef: { current: undefined },
+      setActiveStreamUrl: () => {},
+    };
     usePlayerMpvLifecycle({
-      stream: {
-        reloadStream: () => {},
-        activeStreamUrl: 'https://example.com/seek',
-        activeStreamKey: 'seek',
-        committedStreamUrlRef: { current: 'https://example.com/seek' },
-        selectedStreamKeyRef: { current: 'seek' },
-        streamLookupIdRef: { current: 'tt1' },
-        activeStreamSourceIdRef: { current: undefined },
-        activeStreamSourceNameRef: { current: undefined },
-        activeStreamFamilyRef: { current: undefined },
-        setActiveStreamUrl: () => {},
-      },
+      stream,
+      activeStreamLoadKey: getPlayerStreamLoadKey(stream),
       isHistoryResume: false,
       playbackSpeedRef: { current: 1 },
       subtitleSettingsRef: { current: { delay: 0, pos: 100, scale: 1 } },
@@ -1482,6 +1577,23 @@ test.each(mpvLifecycleModes)('mpv lifecycle (%s)', async (mode) => {
       expect(probe).toHaveBeenCalledTimes(2);
       expect(positionTimers).toHaveBeenCalledTimes(2);
       expect(clock.ref.current).toBe(snapshot.timePos);
+      return;
+    }
+    if (mode === 'unknown-duration-eof') {
+      expect(durationRef.current).toBe(0);
+      const stale = Promise.withResolvers<typeof snapshot>();
+      probe.mockReturnValueOnce(stale.promise);
+      property('eof-reached', true);
+      expect(onEndedChange).not.toHaveBeenCalled();
+      stale.resolve({ ...snapshot, eofReached: false });
+      await Bun.sleep(0);
+      expect(onEndedChange).not.toHaveBeenCalledWith(true);
+      const confirmed = Promise.withResolvers<typeof snapshot>();
+      probe.mockReturnValueOnce(confirmed.promise);
+      property('eof-reached', true);
+      confirmed.resolve({ ...snapshot, eofReached: true });
+      await Bun.sleep(0);
+      expect(onEndedChange).toHaveBeenCalledWith(true);
       return;
     }
     if (startup) {
@@ -1806,6 +1918,56 @@ function renderPage(Page: ComponentType, route: string, client = testClient()) {
   }
 }
 
+test.each(['empty', 'resume', 'offline'] as const)(
+  'Home keeps the resume rail independent of stream addon guidance (%s)',
+  (state) => {
+    const client = testClient();
+    const connectivity = Object.getOwnPropertyDescriptor(navigator, 'onLine')!;
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: state !== 'offline' });
+    client.setQueryData(homeTrendingQueryOptions.queryKey, []);
+    client.setQueryData(
+      resumeRailQueryKey(Temporal.Now.plainDateISO().toString()),
+      state === 'resume'
+        ? [
+            {
+              row: {
+                id: 'resume-fixture',
+                type_: 'movie',
+                title: 'Partially Watched',
+                position: 900,
+                duration: 5400,
+                last_watched: 1000,
+              },
+            },
+          ]
+        : [],
+    );
+    client.setQueryData(api.addonConfigsQueryOptions().queryKey, [
+      {
+        id: 'catalog-addon',
+        name: 'Catalog fixture',
+        enabled: true,
+        resources: ['catalog', 'meta'],
+      },
+    ]);
+    try {
+      const markup = markupWithClient(
+        client,
+        <PlayerSessionProvider>
+          <Home />
+        </PlayerSessionProvider>,
+      );
+      expect(markup).not.toMatch(/(?:Add|Enable) a stream addon to watch titles\./);
+      expect(markup.includes('offline. Reconnect')).toBe(state === 'offline');
+      expect(markup.includes('data-resume-section')).toBe(state === 'resume');
+      if (state === 'resume') expect(markup).toContain('Partially Watched');
+    } finally {
+      client.clear();
+      Object.defineProperty(navigator, 'onLine', connectivity);
+    }
+  },
+);
+
 // Details renders through its route so nested player-session context resolves like the app's.
 function renderDetails(client: QueryClient, route: string) {
   return markupWithClient(
@@ -1825,9 +1987,10 @@ const DETAILS_FLOW_ITEM: MediaDetails = {
   title: 'Details flow',
   description: 'Series summary',
   episodes: [
-    { id: 'e1', season: 1, episode: 1, title: 'Secret reveal', overview: 'Secret overview' },
+    { id: 'e1', season: 1, episode: 1, title: 'Pilot', overview: 'Pilot overview' },
+    { id: 'e2', season: 1, episode: 2, title: 'Secret reveal', overview: 'Secret overview' },
   ],
-  seasons: [{ number: 1, episodeCount: 1 }],
+  seasons: [{ number: 1, episodeCount: 2 }],
 };
 
 test.each(['pending', 'error', 'enabled', 'disabled'] as const)(
@@ -1888,19 +2051,29 @@ test.each(['pending', 'error', 'enabled', 'disabled'] as const)(
             original({
               ...args,
               locationState: reopen
-                ? { reopenStreamSelector: true, reopenStreamSeason: 1, reopenStreamEpisode: 1 }
+                ? { reopenStreamSelector: true, reopenStreamSeason: 1, reopenStreamEpisode: 2 }
                 : undefined,
             }),
           ),
         );
         if (reopen) runEffects(effects, []);
-        else controller.openEpisodeStreamSelector(DETAILS_FLOW_ITEM.episodes![0]);
+        else controller.openEpisodeStreamSelector(DETAILS_FLOW_ITEM.episodes![1]);
         expect(target).toMatchObject({
           targetMasked: masked,
-          episodeTitle: masked ? 'Episode 1' : 'Secret reveal',
+          episodeTitle: masked ? 'Episode 2' : 'Secret reveal',
           overview: masked ? 'Series summary' : 'Secret overview',
         });
       }
+      target = undefined;
+      const [pilotController] = captureRenderEffects(() =>
+        captureWithClient(client, () => original({ ...args, locationState: undefined })),
+      );
+      pilotController.openEpisodeStreamSelector(DETAILS_FLOW_ITEM.episodes![0]);
+      expect(target).toMatchObject({
+        targetMasked: false,
+        episodeTitle: 'Pilot',
+        overview: 'Pilot overview',
+      });
     } finally {
       capturedEffects = null;
       state.mockRestore();
@@ -2064,6 +2237,73 @@ test('Calendar keeps upcoming placeholders only for the same watched filter', ()
   expect(placeholder([...query.queryKey.slice(0, 4), false])).toBeUndefined();
   // The same range + filter reuses the previous page, minus stale days.
   expect(placeholder(query.queryKey)).toEqual(previous);
+});
+
+test('Leaving a calendar range cancels its native request', async () => {
+  const client = createClient();
+  markupWithClient(client, <Calendar />, '/calendar?month=2026-07');
+  const query = client
+    .getQueryCache()
+    .find<CalendarSchedule>({ queryKey: ['calendar-events'], exact: false });
+  if (!query) throw new Error('Calendar query missing');
+  const response = Promise.withResolvers<CalendarSchedule>();
+  const invoke = mock((command: string, _args: { requestId: string }) =>
+    command === 'get_calendar_events' ? response.promise : Promise.resolve(),
+  );
+  const restore = stubGlobal('window', {
+    __TAURI_INTERNALS__: { invoke, transformCallback: () => 1 },
+  });
+  const observer = new QueryObserver(
+    client,
+    query.options as QueryObserverOptions<CalendarSchedule>,
+  );
+  const stop = observer.subscribe(() => {});
+  try {
+    const requestId = invoke.mock.calls.find(([command]) => command === 'get_calendar_events')?.[1]
+      .requestId;
+    expect(requestId).toEqual(expect.any(String));
+    stop();
+    expect(invoke).toHaveBeenLastCalledWith('cancel_stream_request', { requestId }, undefined);
+  } finally {
+    stop();
+    response.resolve({ trackedCount: 0, missingCount: 0, days: [], upcoming: [] });
+    restore();
+  }
+});
+
+test('Calendar keeps valid releases visible when a cached date is invalid', () => {
+  const client = createClient();
+  const route = '/calendar?month=2026-07';
+  markupWithClient(client, <Calendar />, route);
+  const query = client.getQueryCache().find({ queryKey: ['calendar-events'], exact: false });
+  if (!query) throw new Error('Calendar query missing');
+  const valid = {
+    id: 'tt-calendar',
+    mediaId: 'tt-calendar',
+    mediaType: 'movie',
+    type: 'movie',
+    title: 'Valid release',
+    seriesTitle: 'Valid release',
+    releaseDate: '2026-07-12',
+  } as const;
+  client.setQueryData<CalendarSchedule>(query.queryKey, {
+    trackedCount: 2,
+    missingCount: 0,
+    days: [{ date: valid.releaseDate, events: [valid] }],
+    upcoming: [
+      valid,
+      {
+        ...valid,
+        id: 'invalid',
+        title: 'Invalid release',
+        seriesTitle: 'Invalid release',
+        releaseDate: '2026-02-31',
+      },
+    ],
+  });
+  const markup = markupWithClient(client, <Calendar />, route);
+  expect(markup).toContain('Valid release');
+  expect(markup).not.toContain('Invalid release');
 });
 
 const ADD_TITLES_PROPS = {
@@ -3306,3 +3546,166 @@ test.each([false, true])(
     }
   },
 );
+
+test('Unknown-duration streams allow explicit rewind to zero without unlocking arbitrary seeks', async () => {
+  const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
+  const onUserSeek = mock(() => {});
+  const clock = createPlaybackClock();
+  clock.publish(42);
+  const durationRef = { current: 0 };
+  const mpvInitializedRef = { current: true };
+  try {
+    const { Fixture: SeekFixture, captured: controller } = captureHook(() =>
+      useOptimisticSeek({
+        clock,
+        durationRef,
+        mpvInitializedRef,
+        onUserSeek,
+        triggerOsd: () => {},
+      }),
+    );
+    renderToStaticMarkup(<SeekFixture />);
+    const seeking = await controller.promise;
+    expect(await seeking.seek(30)).toBe(false);
+    expect(await seeking.seekRelative(10)).toBe(false);
+    expect(nativeSeek).not.toHaveBeenCalled();
+
+    expect(await seeking.seek(0)).toBe(true);
+    expect(nativeSeek.mock.calls).toEqual([[0]]);
+    expect(clock.getSnapshot()).toBe(0);
+
+    durationRef.current = 120;
+    const firstAck = Promise.withResolvers<void>();
+    const secondAck = Promise.withResolvers<void>();
+    nativeSeek.mockReturnValueOnce(firstAck.promise).mockReturnValueOnce(secondAck.promise);
+    const superseded = seeking.seek(0);
+    const latest = seeking.seek(45);
+    secondAck.resolve();
+    firstAck.resolve();
+    expect(await superseded).toBe(false);
+    expect(await latest).toBe(true);
+
+    mpvInitializedRef.current = false;
+    expect(await seeking.seek(0)).toBe(false);
+    expect(nativeSeek).toHaveBeenCalledTimes(3);
+  } finally {
+    nativeSeek.mockRestore();
+  }
+});
+
+test('Failed subtitle-delay writes still persist normalized prefs without announcing native success', async () => {
+  const restoreWindow = stubGlobal('window', {
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: (callback: FrameRequestCallback) =>
+      setTimeout(() => callback(performance.now()), 0),
+    cancelAnimationFrame: clearTimeout,
+  });
+  const setProperties = spyOn(playerMpv, 'setMpvProperties');
+  const updatePreferences = mock(() => {});
+  try {
+    const { Fixture, captured } = captureHook(() => {
+      const scheduleMpvSet = useMpvSetScheduler('sub-delay-test');
+      return useSubtitleAdjustments({
+        preferences: { subtitleDelay: 0, subtitlePos: 100, subtitleScale: 1 },
+        updatePreferences,
+        scheduleMpvSet,
+      });
+    });
+    renderToStaticMarkup(<Fixture />);
+    const adjustments = await captured.promise;
+
+    setProperties.mockRejectedValueOnce({
+      message: 'mpv unavailable',
+      subtitleProperties: [['sub-delay', 0.1]],
+    });
+    const failedResult = await adjustments.stepSubtitleDelay(1);
+    expect(failedResult).toBeUndefined();
+    expect(adjustments.subtitleSettingsRef.current.delay).toBe(0.1);
+
+    setProperties.mockResolvedValueOnce([['sub-delay', 0.2]]);
+    const okResult = await adjustments.stepSubtitleDelay(1);
+    expect(okResult).toBe(0.2);
+    expect(adjustments.subtitleSettingsRef.current.delay).toBe(0.2);
+  } finally {
+    setProperties.mockRestore();
+    restoreWindow();
+  }
+});
+
+test.each([true, false])(
+  'PlayerUpNextCard enforces spoiler protection on episode title and thumbnail (hideSpoiler=%s)',
+  (hideSpoiler) => {
+    const client = createClient();
+    const countdown = createSubscribableStore<number | null>(null);
+    const episode = {
+      id: 'tt1:1:2',
+      title: 'The Secret Villain Reveal',
+      season: 1,
+      episode: 2,
+      thumbnail: 'https://cdn.example/spoiler-still.jpg',
+    };
+    const markup = markupWithClient(
+      client,
+      <PlayerUpNextCard
+        episode={episode}
+        thumbnail={episode.thumbnail}
+        fallbackThumbnail='https://cdn.example/series-backdrop.jpg'
+        hideSpoiler={hideSpoiler}
+        autoPlayCountdown={countdown}
+        autoPlayDurationSeconds={10}
+        onCancelAutoPlay={() => {}}
+        onPlayNext={() => {}}
+      />,
+    );
+    expect(markup.includes('The Secret Villain Reveal')).toBe(!hideSpoiler);
+    expect(markup.includes('spoiler-still.jpg')).toBe(!hideSpoiler);
+    expect(markup.includes('S1:E2 · Episode 2')).toBe(hideSpoiler);
+    expect(markup.includes('series-backdrop.jpg')).toBe(hideSpoiler);
+  },
+);
+
+test('Calendar applies shorter freshness to partial schedules than complete schedules', () => {
+  const client = createClient();
+  markupWithClient(client, <Calendar />);
+  const query = client
+    .getQueryCache()
+    .find<CalendarSchedule>({ queryKey: ['calendar-events'], exact: false });
+  if (!query) throw new Error('Calendar query missing');
+  const { staleTime } = query.options as QueryObserverOptions<CalendarSchedule>;
+  expect(typeof staleTime).toBe('function');
+  const resolveStaleTime = staleTime as (q: typeof query) => number;
+  const partial: CalendarSchedule = { trackedCount: 2, missingCount: 1, days: [], upcoming: [] };
+  const complete: CalendarSchedule = { trackedCount: 2, missingCount: 0, days: [], upcoming: [] };
+  expect(
+    resolveStaleTime({ ...query, state: { ...query.state, data: partial } } as typeof query),
+  ).toBe(CALENDAR_PARTIAL_STALE_TIME_MS);
+  expect(
+    resolveStaleTime({ ...query, state: { ...query.state, data: complete } } as typeof query),
+  ).toBe(CALENDAR_EVENTS_STALE_TIME_MS);
+});
+
+test('Background manifest routing refresh invalidates details, calendar, and addon subtitles', async () => {
+  const client = testClient();
+  const detailsKey = [...DETAILS_QUERY_KEY, 'series', 'tt123'];
+  const calendarKey = calendarEventsQueryKey({
+    visibleStart: '2026-11-01',
+    visibleEnd: '2026-12-01',
+    upcomingStart: '2026-11-20',
+    hideWatched: false,
+  });
+  const subtitlesKey = addonSubtitlesQueryKey('series', 'tt123', 1, 1);
+  for (const key of [detailsKey, calendarKey, subtitlesKey]) {
+    client.setQueryData(key, { ok: true });
+  }
+
+  await invalidateAddonCapabilityQueries(client, false);
+  for (const key of [detailsKey, calendarKey, subtitlesKey]) {
+    expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+  }
+
+  await invalidateAddonCapabilityQueries(client, true);
+  for (const key of [detailsKey, calendarKey, subtitlesKey]) {
+    expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+  }
+});

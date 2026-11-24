@@ -62,10 +62,12 @@ export function isLibrarySort(value: string | null): value is LibrarySort {
 
 const LIBRARY_FOCUS_RING_CLASS =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
-const FILTER_MENU_BUTTON_CLASS = cn(
-  'group/filter h-9 px-3 gap-1.5 text-[12px] bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0',
+export const FILTER_MENU_BUTTON_CLASS = cn(
+  'group/filter h-9 px-3 gap-1.5 text-[12px] bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0 transition-colors',
   LIBRARY_FOCUS_RING_CLASS,
 );
+export const FILTER_ACTIVE_BUTTON_CLASS =
+  'border-(--accent-nav)/35 bg-(--accent-nav)/[0.08] text-white hover:border-(--accent-nav)/50 hover:bg-(--accent-nav)/[0.14]';
 
 export const TYPE_OPTIONS: { value: LibraryTypeFilter; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -179,7 +181,10 @@ export function LibraryToolbar({
             <Button
               variant='outline'
               size='sm'
-              className={FILTER_MENU_BUTTON_CLASS}
+              className={cn(
+                FILTER_MENU_BUTTON_CLASS,
+                statusFilter !== 'all' && FILTER_ACTIVE_BUTTON_CLASS,
+              )}
               aria-label={`Library status: ${statusLabel}`}
             >
               {statusFilter !== 'all' && statusFilter !== 'none' && (
@@ -246,7 +251,10 @@ export function LibraryToolbar({
               <Button
                 variant='outline'
                 size='sm'
-                className={FILTER_MENU_BUTTON_CLASS}
+                className={cn(
+                  FILTER_MENU_BUTTON_CLASS,
+                  sort !== 'default' && FILTER_ACTIVE_BUTTON_CLASS,
+                )}
                 aria-label={`Sort library: ${activeSortOption.label}`}
               >
                 {ActiveSortIcon ? <ActiveSortIcon className='w-3 h-3' /> : null}
@@ -281,10 +289,7 @@ export function LibraryToolbar({
             size='sm'
             aria-pressed={selectionMode}
             onClick={onToggleSelectionMode}
-            className={cn(
-              FILTER_MENU_BUTTON_CLASS,
-              selectionMode && 'border-white/[0.18] bg-white/[0.1] text-white',
-            )}
+            className={cn(FILTER_MENU_BUTTON_CLASS, selectionMode && FILTER_ACTIVE_BUTTON_CLASS)}
           >
             <CheckSquare aria-hidden='true' className='h-3.5 w-3.5' />
             Select
@@ -339,6 +344,19 @@ export function LibraryToolbar({
           </Button>
         )}
         <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+        <Button
+          variant='outline'
+          size='sm'
+          aria-pressed={selectionMode}
+          onClick={onToggleSelectionMode}
+          className={cn(
+            'h-8 shrink-0 gap-1.5 rounded-md border-white/[0.08] bg-white/[0.03] px-2.5 text-[12px] text-zinc-300 hover:bg-white/[0.07] hover:text-white',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          <CheckSquare aria-hidden='true' className='h-3.5 w-3.5' />
+          <span className='hidden sm:inline'>Select</span>
+        </Button>
       </CompactFloatingBar>
     </div>
   );
@@ -386,6 +404,21 @@ export function useCollectionSelection(
     (selected: string[]) => {
       if (!busy && !selectAllDisabled)
         setSelectedIds((current) => new Set([...current, ...selected]));
+    },
+    [busy, selectAllDisabled],
+  );
+  const invert = useCallback(
+    (targets: string[]) => {
+      if (busy || selectAllDisabled) return;
+      anchorRef.current = null;
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        for (const id of new Set(targets)) {
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+        }
+        return next;
+      });
     },
     [busy, selectAllDisabled],
   );
@@ -469,6 +502,7 @@ export function useCollectionSelection(
     begin: () => setSelectionMode(true),
     clear,
     selectAll,
+    invert,
   };
 }
 
@@ -479,6 +513,7 @@ export function CollectionBulkActionBar({
   selectAllDisabled,
   isBusy,
   onSelectAll,
+  onInvert,
   onClear,
   onDone,
   onRemove,
@@ -491,6 +526,7 @@ export function CollectionBulkActionBar({
   selectAllDisabled: boolean;
   isBusy: boolean;
   onSelectAll: () => void;
+  onInvert?: () => void;
   onClear: () => void;
   onDone: () => void;
   onRemove: () => void;
@@ -502,13 +538,18 @@ export function CollectionBulkActionBar({
       role='region'
       aria-label='Selection actions'
       aria-busy={isBusy}
-      className='sticky top-10 z-30 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.12] bg-zinc-950/95 px-3 py-2 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)]'
+      className='sticky top-10 z-30 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.12] bg-zinc-950/92 px-3.5 py-2 shadow-[0_14px_36px_-14px_rgb(0_0_0/0.92),inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-xl'
     >
       <div className='flex flex-wrap items-center gap-1.5'>
         <span
           role='status'
           aria-atomic='true'
-          className='mr-1.5 text-[13px] font-semibold text-white tabular-nums'
+          className={cn(
+            'mr-1 inline-flex h-7 items-center rounded-md px-2 text-[12.5px] font-semibold tabular-nums transition-colors',
+            selectedCount > 0
+              ? 'bg-(--accent-nav)/15 text-(--accent-nav) ring-1 ring-inset ring-(--accent-nav)/30'
+              : 'bg-white/[0.05] text-zinc-300',
+          )}
         >
           {selectedCount} selected
         </span>
@@ -522,12 +563,27 @@ export function CollectionBulkActionBar({
               onSelectAll();
           }}
           className={cn(
-            'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 transition-colors not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
             LIBRARY_FOCUS_RING_CLASS,
           )}
         >
           Select all ({filteredCount})
         </button>
+        {onInvert && (
+          <button
+            type='button'
+            aria-disabled={filteredCount === 0 || isBusy || selectAllDisabled || undefined}
+            onClick={() => {
+              if (filteredCount > 0 && !isBusy && !selectAllDisabled) onInvert();
+            }}
+            className={cn(
+              'h-8 rounded-md px-2 text-xs font-medium text-zinc-400 transition-colors not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+              LIBRARY_FOCUS_RING_CLASS,
+            )}
+          >
+            Invert
+          </button>
+        )}
         <button
           type='button'
           aria-disabled={selectedCount === 0 || isBusy || undefined}
@@ -535,12 +591,17 @@ export function CollectionBulkActionBar({
             if (selectedCount > 0 && !isBusy) onClear();
           }}
           className={cn(
-            'h-8 rounded-md px-2 text-xs font-medium text-zinc-400 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            'h-8 rounded-md px-2 text-xs font-medium text-zinc-400 transition-colors not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
             LIBRARY_FOCUS_RING_CLASS,
           )}
         >
           Clear
         </button>
+        {selectedCount === 0 && filteredCount > 1 && (
+          <span className='ml-1 hidden text-[11px] text-zinc-500 xl:inline'>
+            Shift+click range · Ctrl+A all
+          </span>
+        )}
       </div>
       <div className='flex flex-wrap items-center gap-1.5'>
         {children}
@@ -584,6 +645,7 @@ interface LibraryBulkActionBarProps {
   selectAllDisabled?: boolean;
   allFilteredSelected: boolean;
   onSelectAllFiltered: () => void;
+  onInvertSelection: () => void;
   onClearSelection: () => void;
   onExitSelectionMode: () => void;
   onBulkSetStatus: (status: WatchStatus | null) => void;
@@ -611,6 +673,7 @@ export function LibraryBulkActionBar({
   selectAllDisabled = false,
   allFilteredSelected,
   onSelectAllFiltered,
+  onInvertSelection,
   onClearSelection,
   onExitSelectionMode,
   onBulkSetStatus,
@@ -644,6 +707,7 @@ export function LibraryBulkActionBar({
       selectAllDisabled={selectAllDisabled}
       isBusy={isBusy}
       onSelectAll={onSelectAllFiltered}
+      onInvert={onInvertSelection}
       onClear={onClearSelection}
       onDone={onExitSelectionMode}
       onRemove={onBulkRemove}

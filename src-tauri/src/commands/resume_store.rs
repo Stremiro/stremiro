@@ -488,8 +488,8 @@ impl ResumeStore {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|error| format!("Failed to open playback resume database: {}", error))?;
-        Self::schema_version(&connection)?;
-        Ok(Some(connection))
+        // The writer creates the file before committing the schema and version together.
+        Ok((Self::schema_version(&connection)? != 0).then_some(connection))
     }
 
     pub(crate) fn load_recent_titles(path: &Path) -> Result<Vec<(String, String)>, String> {

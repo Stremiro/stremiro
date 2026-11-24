@@ -46,17 +46,18 @@ export const SETTINGS_HEADER_STATUS_CLASS =
 
 /** Glass chrome for outline `Button`s across sections; callers own size. */
 export const SETTINGS_OUTLINE_BUTTON_CLASS =
-  'rounded-lg border-white/10 bg-white/[0.04] font-medium text-zinc-100 hover:bg-white/[0.08] hover:text-white';
+  'rounded-lg border-white/[0.09] bg-white/[0.03] font-medium text-zinc-100 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] hover:border-white/[0.15] hover:bg-white/[0.07] hover:text-white';
 
 /** Small uppercase caption that groups rows inside one card. */
 export const SETTINGS_CAPTION_CLASS =
   'text-[13px] font-semibold uppercase leading-5 tracking-[0.08em] text-zinc-400';
 
-export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-xl border border-white/[0.06] bg-black/20';
+export const SETTINGS_INSET_SURFACE_CLASS =
+  'rounded-xl border border-white/[0.065] bg-[#070709] shadow-[inset_0_1px_0_rgb(255_255_255/0.025)]';
 
 /** Shared `SettingsRow` shells — used directly by rows with a custom label slot (clear-records). */
 export const SETTINGS_ROW_CLASS =
-  'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-4 first:pt-0 last:pb-0';
+  'group/row flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-4 first:pt-0 last:pb-0';
 export const SETTINGS_ROW_DESCRIPTION_CLASS =
   'mt-1 block max-w-[52ch] text-[14px] leading-6 text-zinc-400';
 
@@ -81,7 +82,11 @@ export function SettingsBody({
 }) {
   return (
     <div
-      className={cn('px-4 py-4 sm:px-6 sm:py-5', rows && 'divide-y divide-white/[0.06]', className)}
+      className={cn(
+        'px-4 py-4 sm:px-6 sm:py-5',
+        rows && 'divide-y divide-white/[0.055]',
+        className,
+      )}
     >
       {children}
     </div>
@@ -114,7 +119,7 @@ export function SettingsRow({
         {Icon ? (
           <Icon
             aria-hidden='true'
-            className='size-[18px] shrink-0 text-zinc-400'
+            className='size-[18px] shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-200 motion-reduce:transition-none'
             strokeWidth={1.75}
           />
         ) : null}

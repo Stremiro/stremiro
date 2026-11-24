@@ -111,8 +111,11 @@ export function useOptimisticSeek({
       osd: (boundedTarget: number) => PlayerOsdAction,
       source: 'user' | 'automatic' = 'user',
       onComplete?: () => void,
-    ) => {
-      if (!mpvInitializedRef.current || !(durationRef.current > 0)) return;
+      allowUnknownDuration = false,
+    ): Promise<boolean> => {
+      if (!mpvInitializedRef.current || (!(durationRef.current > 0) && !allowUnknownDuration)) {
+        return false;
+      }
       if (source !== 'automatic') onUserSeek();
       const previousTime = currentTimeRef.current;
       const boundedTarget = primeOptimisticSeek(targetTime);
@@ -139,10 +142,12 @@ export function useOptimisticSeek({
       }
 
       // Announce only while this seek owns the epoch — an out-of-order ack must not flash a stale target.
-      if (seekAnnounceEpochRef.current === announceEpoch) {
+      const stillActive = seekAnnounceEpochRef.current === announceEpoch;
+      if (stillActive) {
         triggerOsd(osd(boundedTarget));
         onComplete?.();
       }
+      return stillActive;
     },
     [
       clearOptimisticSeek,
@@ -165,6 +170,7 @@ export function useOptimisticSeek({
         (boundedTarget) => ({ kind: 'seek', target: boundedTarget }),
         source,
         onComplete,
+        seconds === 0,
       );
     },
     [runSeek],

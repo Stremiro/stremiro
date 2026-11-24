@@ -84,11 +84,11 @@ function setSurfaceBackground(value: string): void {
 }
 
 export function setPlayerDocumentBackground(transparent: boolean): void {
-  document.getElementById('root')?.classList.remove('player-background-restoring');
+  document.getElementById('root')?.classList.toggle('player-background-fade', transparent);
   setSurfaceBackground(transparent ? 'transparent' : 'black');
 }
 
 export function restorePlayerBackground(): void {
-  document.getElementById('root')?.classList.add('player-background-restoring');
+  document.getElementById('root')?.classList.add('player-background-fade');
   setSurfaceBackground('');
 }

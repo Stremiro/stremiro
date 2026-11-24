@@ -80,7 +80,8 @@ function bumpWriteGeneration(queueId: string): number {
 
 /** Buffered edits take cache ownership before their native write is queued. */
 export function claimOptimisticQueryWrite(queryKey: QueryKey): void {
-  bumpWriteGeneration(JSON.stringify(queryKey));
+  const state = writeStates.get(JSON.stringify(queryKey));
+  if (state) state.generation = ++nextWriteGeneration;
 }
 
 /** Wait for writes already queued before a backup reads or restores settings. */

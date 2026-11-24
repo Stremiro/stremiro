@@ -81,10 +81,8 @@ type StreamSelectorRowPayload = {
   isPlayable: boolean;
   seeders: AddonStream['seeders'];
   sizeBytes: AddonStream['sizeBytes'];
-  searchFields: readonly (string | undefined)[];
+  searchFields?: string[];
 };
-
-const EMPTY_SEARCH_FIELDS: readonly [] = [];
 
 // `streams` is structural-shared and identity-keyed upstream, so debounced search/filter
 // changes resend identical rows — cache both payload shapes on the array itself.
@@ -105,7 +103,6 @@ function buildStreamSelectorRow(
     isPlayable: stream.presentation.isInstantlyPlayable,
     seeders: stream.seeders,
     sizeBytes: stream.sizeBytes,
-    // Filter-only changes skip the per-row search strings — Rust reads them only when searching.
     searchFields: searchable
       ? [
           stream.sourceName,
@@ -118,8 +115,8 @@ function buildStreamSelectorRow(
           stream.presentation.multiAudioLabel,
           stream.presentation.sizeLabel,
           stream.presentation.resolution,
-        ]
-      : EMPTY_SEARCH_FIELDS,
+        ].filter((field) => field !== undefined)
+      : undefined,
   };
 }
 

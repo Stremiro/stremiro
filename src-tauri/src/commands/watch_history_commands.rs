@@ -332,7 +332,7 @@ pub struct TitleWatchProgress {
 
 /// Only canonical coordinates claim episode keys; legacy rows fall back to their
 /// raw coordinates when no mapping is saved. Series rows only, keyed by their own id.
-fn build_title_episode_progress(
+pub(super) fn build_title_episode_progress(
     history: &[WatchProgress],
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> HashMap<String, WatchProgress> {
@@ -362,7 +362,7 @@ fn build_title_episode_progress(
         .collect()
 }
 
-fn build_watched_episode_ceiling(history: &[WatchProgress]) -> HashMap<u32, u32> {
+pub(super) fn build_watched_episode_ceiling(history: &[WatchProgress]) -> HashMap<u32, u32> {
     let mut ceiling = HashMap::new();
     for row in history.iter().filter(|row| row.has_started_watching).chain(
         history

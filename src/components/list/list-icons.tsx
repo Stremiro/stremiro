@@ -73,9 +73,11 @@ const TILE_SIZES = {
 export function ListIconTile({
   iconId,
   size = 'md',
+  className,
 }: {
   iconId: string;
   size?: 'sm' | 'md' | 'lg';
+  className?: string;
 }) {
   const found = ICON_BY_ID.get(iconId);
   const tile = TILE_SIZES[size];
@@ -87,6 +89,7 @@ export function ListIconTile({
       className={cn(
         'inline-flex shrink-0 items-center justify-center text-zinc-400',
         tile.className,
+        className,
       )}
     >
       {Icon ? (

@@ -75,9 +75,10 @@ const COUNTDOWN_SECONDS = [5, 8, 10, 15, 30];
 const CONTROLS_HIDE_SECONDS = [2, 3, 5, 8];
 
 const STEP_BUTTON_CLASS =
-  'flex size-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-white/[0.04] motion-reduce:transition-none';
+  'flex size-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.04] text-zinc-300 shadow-[inset_0_1px_0_rgb(255_255_255/0.05)] transition-colors hover:border-white/[0.16] hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:border-white/[0.1] aria-disabled:hover:bg-white/[0.04] motion-reduce:transition-none';
 
 function SecondsSelect({
+  className,
   icon,
   label,
   description,
@@ -86,6 +87,7 @@ function SecondsSelect({
   disabled,
   onChange,
 }: {
+  className?: string;
   icon?: LucideIcon;
   label: string;
   description?: string;
@@ -95,7 +97,7 @@ function SecondsSelect({
   onChange: (seconds: number) => void;
 }) {
   return (
-    <SettingsRow icon={icon} label={label} description={description}>
+    <SettingsRow icon={icon} label={label} description={description} className={className}>
       <SettingsSelect
         ariaLabel={label}
         valueLabel={`${seconds} seconds`}
@@ -270,7 +272,7 @@ function LanguageSelector({
                     <Check
                       aria-hidden='true'
                       className={cn(
-                        'h-3.5 w-3.5 shrink-0 text-(--accent-nav)',
+                        'h-3.5 w-3.5 shrink-0 text-[color-mix(in_srgb,var(--accent-nav)_72%,white)]',
                         !isSelected && 'invisible',
                       )}
                     />
@@ -543,6 +545,11 @@ export function PlaybackSettings() {
                 <SecondsSelect
                   icon={Timer}
                   label='Next episode countdown'
+                  className={
+                    !preferences.autoPlayNext
+                      ? 'opacity-60 transition-opacity duration-150'
+                      : 'transition-opacity duration-150'
+                  }
                   description={
                     preferences.autoPlayNext
                       ? undefined
@@ -581,7 +588,7 @@ export function PlaybackSettings() {
                   field='spoilerProtection'
                   icon={EyeOff}
                   label='Spoiler protection'
-                  description='Blur unwatched episode thumbnails and descriptions.'
+                  description='Blur unwatched episode thumbnails and descriptions after Episode 1.'
                 />
                 <AppUiPreferenceToggle
                   appUiPreferences={appUiPreferences}

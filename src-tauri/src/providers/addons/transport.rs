@@ -328,6 +328,17 @@ impl AddonTransport {
     pub(crate) fn purge_expired_caches(&self) {
         self.cache.purge_expired();
         self.failure_cache.purge_expired();
+        self.fetch_failures.purge_expired();
+        let mut claims = lock_or_recover(&self.refresh_claims);
+        let now = Instant::now();
+        claims.retain(|_, claim| {
+            claim
+                .completed_at
+                .is_none_or(|completed_at| now.duration_since(completed_at) < STREAM_CACHE_TTL)
+        });
+        if claims.is_empty() {
+            claims.shrink_to_fit();
+        }
     }
 
     pub(crate) fn claim_stream_refresh(&self, key: &str) -> Option<StreamRefreshClaim<'_>> {

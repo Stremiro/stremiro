@@ -2,6 +2,7 @@
 //! ~150 invokes for a 20-track file. The staged wrapper crashes on a populated
 //! `track-list` node, so fields are read individually.
 
+use crate::operational_log::{field, log_warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap};
@@ -132,12 +133,25 @@ fn read_track_list(
     });
 
     // `count` is mpv's own track count — duplicates only merge, never exceed it.
-    // Clamp the reservation so a bogus count can't abort on capacity overflow.
-    let capacity = (count as usize).min(1_024);
+    // Clamp both the reservation and scan loop so a bogus count can't stall `MPV_OP_GATE`.
+    const MAX_TRACK_LIST_COUNT: i64 = 1_024;
+    if count > MAX_TRACK_LIST_COUNT {
+        log_warn(
+            "player-tracks",
+            "read-track-list",
+            "truncated",
+            &[
+                field("reported", count),
+                field("limit", MAX_TRACK_LIST_COUNT),
+            ],
+        );
+    }
+    let bounded_count = count.min(MAX_TRACK_LIST_COUNT);
+    let capacity = bounded_count as usize;
     let mut tracks: Vec<PlayerTrack> = Vec::with_capacity(capacity);
     let mut index_by_key: HashMap<(u8, i64), usize> = HashMap::with_capacity(capacity);
 
-    for index in 0..count {
+    for index in 0..bounded_count {
         let prefix = format!("track-list/{index}");
         let read = |name: &str, format: &str| {
             mpv_property(app, window_label, format!("{prefix}/{name}"), format)

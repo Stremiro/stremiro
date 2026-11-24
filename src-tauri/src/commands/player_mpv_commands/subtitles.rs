@@ -257,23 +257,30 @@ fn is_text_subtitle(bytes: &[u8]) -> bool {
     let text = text.trim_start_matches('\u{feff}').trim_start();
     let first = text.lines().next().unwrap_or_default().trim();
     let header = first.to_ascii_lowercase();
+    let is_ass_header = |line: &str| {
+        matches!(
+            line,
+            "[script info]" | "[v4 styles]" | "[v4+ styles]" | "[events]"
+        )
+    };
+    let comment_prefixed_ass = first.starts_with(';')
+        && text
+            .lines()
+            .take(16)
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with(';'))
+            .is_some_and(|line| is_ass_header(&line.to_ascii_lowercase()));
     header == "webvtt"
         || header.starts_with("webvtt ")
         || header.starts_with("webvtt\t")
-        || matches!(
-            header.as_str(),
-            "[script info]"
-                | "[v4 styles]"
-                | "[v4+ styles]"
-                | "[events]"
-                | "[information]"
-                | "[subtitle]"
-        )
+        || is_ass_header(&header)
+        || comment_prefixed_ass
+        || matches!(header.as_str(), "[information]" | "[subtitle]")
         || header.starts_with("<sami")
-        || (header.starts_with("<tt") || header.starts_with("<?xml"))
-            && text.contains("<tt")
-            && !text.contains("<!DOCTYPE")
-            && !text.contains("<!ENTITY")
+        || (header.starts_with("<tt") || header.starts_with("<?xml")) && {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("<tt") && !lower.contains("<!doctype") && !lower.contains("<!entity")
+        }
         || first.starts_with('{') && first.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
         || first.starts_with('[') && first.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
         || first.as_bytes().first().is_some_and(u8::is_ascii_digit)

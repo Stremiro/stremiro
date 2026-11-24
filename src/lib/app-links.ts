@@ -25,7 +25,9 @@ export function buildEpisodeShareLink(
 
 // Router state, not the query string: lastVisited persists the URL and addon links may carry keys.
 export function openAppLink(link: AppLink): void {
-  if (link.kind === 'title') {
+  if (link.kind === 'settings') {
+    navigateApp('/settings');
+  } else if (link.kind === 'title') {
     navigateToDetails(
       link.mediaType,
       link.mediaId,

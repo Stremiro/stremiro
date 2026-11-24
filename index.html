@@ -11,12 +11,25 @@
       body {
         background: #000;
       }
+
+      #startup-reload {
+        position: fixed;
+        inset: 50% auto auto 50%;
+        transform: translate(-50%, -50%);
+        padding: 8px 16px;
+        border: 1px solid #3f3f46;
+        border-radius: 7px;
+        background: #18181b;
+        color: #f4f4f5;
+        cursor: pointer;
+      }
     </style>
     <title>Stremiro</title>
   </head>
 
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <button id="startup-reload" hidden type="button">Reload Stremiro</button>
+    <script type="module" src="/src/startup.ts"></script>
   </body>
 </html>

@@ -12,6 +12,7 @@ export const BROWSE_SHORTCUTS: ShortcutRow[] = [
   { label: 'Back', keys: ['Esc', 'Alt+←'] },
   { label: 'Forward', keys: ['Alt+→'] },
   { label: 'Previous / next featured title', keys: ['←', '→'] },
+  { label: 'Find in collection or settings', keys: ['Ctrl+F'] },
   { label: 'Select all while selecting', keys: ['Ctrl+A'] },
 ];
 

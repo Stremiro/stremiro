@@ -299,7 +299,10 @@ function PlayerBindingRow({
       <span className='flex min-w-0 flex-1 items-center gap-2 text-[15px] leading-snug text-zinc-200'>
         <span>{label}</span>
         {customized ? (
-          <span title='Customized' className='h-1.5 w-1.5 shrink-0 rounded-full bg-(--accent-nav)'>
+          <span
+            title='Customized'
+            className='h-1.5 w-1.5 shrink-0 rounded-full bg-[color-mix(in_srgb,var(--accent-nav)_72%,white)]'
+          >
             <span className='sr-only'>Customized</span>
           </span>
         ) : null}
@@ -335,10 +338,10 @@ function PlayerBindingRow({
               className={cn(
                 KEY_SLOT_CLASS,
                 listening
-                  ? 'border-(--accent-nav)/60 bg-(--accent-nav)/10 text-white'
+                  ? 'border-(--accent-nav)/60 bg-(--accent-nav)/12 text-white shadow-[0_0_0_1px_rgb(var(--accent-nav-rgb)/0.18)]'
                   : key === null
                     ? 'border-dashed border-white/[0.1] text-zinc-500 hover:border-white/20 hover:text-zinc-300'
-                    : 'border-white/[0.08] bg-white/[0.04] text-zinc-200 hover:border-white/20 hover:bg-white/[0.08]',
+                    : 'border-white/[0.09] bg-white/[0.04] text-zinc-200 shadow-[inset_0_-1px_0_rgba(255,255,255,0.05),inset_0_1px_0_rgba(255,255,255,0.04)] hover:border-white/20 hover:bg-white/[0.08]',
               )}
             >
               {listening ? (

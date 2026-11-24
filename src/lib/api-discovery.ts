@@ -28,9 +28,27 @@ export function similarTitlesQueryKey({ id, title, type, year, genres }: MediaIt
   return trendingRowQueryKey('similar', type, id, title, year ?? '', ...(genres ?? []));
 }
 
-// Rust owns normalization/caching/fetch overlap; React Query owns view payloads and invalidation.
-const querySearchCatalogPage = (request: SearchCatalogQuery) =>
-  safeInvoke<SearchCatalogPage>('query_search_catalog', { request });
+async function invokeDiscoveryRequest<T>(
+  command: string,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+) {
+  if (!signal) return safeInvoke<T>(command, args);
+  signal.throwIfAborted();
+  const requestId = crypto.randomUUID();
+  const cancel = () => {
+    void safeInvoke<void>('cancel_stream_request', { requestId }).catch(() => {});
+  };
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    return await safeInvoke<T>(command, { ...args, requestId });
+  } finally {
+    signal.removeEventListener('abort', cancel);
+  }
+}
+
+const querySearchCatalogPage = (request: SearchCatalogQuery, signal?: AbortSignal) =>
+  invokeDiscoveryRequest<SearchCatalogPage>('query_search_catalog', { request }, signal);
 
 const getMediaDetails = (type: string, id: string, includeEpisodes = true) =>
   safeInvoke<MediaDetails>('get_media_details', {
@@ -113,8 +131,11 @@ const getDetailsPrefetchBundle = (type: string, id: string) =>
     id,
   });
 
-const getCalendarEvents = (range: CalendarRange, onCached: Channel<CalendarSchedule>) =>
-  safeInvoke<CalendarSchedule>('get_calendar_events', { range, onCached });
+const getCalendarEvents = (
+  range: CalendarRange,
+  onCached: Channel<CalendarSchedule>,
+  signal?: AbortSignal,
+) => invokeDiscoveryRequest<CalendarSchedule>('get_calendar_events', { range, onCached }, signal);
 
 const getTitleCredits = (mediaType: string, id: string, imdbId?: string) =>
   safeInvoke<TitleCredits>('get_title_credits', { mediaType, id, imdbId });

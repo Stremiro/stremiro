@@ -19,6 +19,8 @@ import path from 'node:path';
 const rootDir = path.resolve(import.meta.dirname, '..');
 const tauriConfigPath = path.join(rootDir, 'src-tauri', 'tauri.conf.json');
 const bundleDir = path.join(rootDir, 'src-tauri', 'target', 'release', 'bundle', 'nsis');
+const usage =
+  'Usage: bun ./scripts/release-github.mjs <manifest|publish> [--notes <file>] [--draft]';
 
 function fail(message) {
   console.error(message);
@@ -47,10 +49,15 @@ const notesPath = notesFlag >= 0 ? args[notesFlag + 1] : null;
 const draft = args.includes('--draft');
 
 if (!['manifest', 'publish'].includes(mode)) {
-  fail('Usage: bun ./scripts/release-github.mjs <manifest|publish> [--notes <file>] [--draft]');
+  fail(usage);
 }
 if (notesFlag >= 0 && (!notesPath || notesPath.startsWith('--') || !fs.existsSync(notesPath))) {
   fail('Provide an existing notes file after --notes.');
+}
+for (const [index, arg] of args.entries()) {
+  if (index === 0 || index === notesFlag || (notesFlag >= 0 && index === notesFlag + 1)) continue;
+  if (arg === '--draft' && mode === 'publish') continue;
+  fail(`Unexpected release argument: ${arg}\n${usage}`);
 }
 
 function findInstallerAssets() {
@@ -171,6 +178,7 @@ function publishRelease() {
         'create',
         tag,
         ...assets,
+        '--verify-tag',
         '--repo',
         repo,
         '--title',

@@ -64,7 +64,7 @@ export function findEpisodeByCoordinates(
   return episodes?.find((candidate) => episodeMatchesCoordinates(candidate, season, episode));
 }
 
-/** Spoiler predicate: episodes past the watched ceiling hide their metadata, unless in progress or current. */
+/** Spoiler predicate: episodes past the watched ceiling hide their metadata, unless Episode 1, in progress, or current. */
 export function isEpisodeSpoiler(
   episode: Episode,
   spoilerProtection: boolean,
@@ -76,6 +76,7 @@ export function isEpisodeSpoiler(
   return (
     spoilerProtection &&
     !isCurrent &&
+    !(episode.season === 1 && episode.episode === 1) &&
     !progress?.has_started_watching &&
     (ceiling === undefined || episode.episode > ceiling)
   );

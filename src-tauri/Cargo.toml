@@ -1,6 +1,6 @@
 [package]
 name = "stremiro"
-version = "0.9.5-beta"
+version = "0.9.6-beta"
 description = "Lightweight addon-compatible desktop client"
 authors = ["Stremiro contributors"]
 edition = "2021"
@@ -48,7 +48,6 @@ tokio = { version = "1.53.1", features = ["test-util"] }
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.39.1"
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
-windows-core = "=0.62.2"
 
 [patch.crates-io]
 tauri-plugin-libmpv = { path = "vendor/tauri-plugin-libmpv" }

@@ -71,7 +71,7 @@ import {
   MATCH_BADGES,
   type StreamReasonChip,
 } from '@/lib/stream-selector-utils';
-import { cn, mediaTypeLabel, nonBlank } from '@/lib/utils';
+import { cn, createObjectIdentity, mediaTypeLabel, nonBlank } from '@/lib/utils';
 
 const MATCH_BADGE_ICONS: Record<StreamMatchBadgeKind, LucideIcon | null> = {
   episode: Check,
@@ -199,12 +199,12 @@ const StreamItem = memo(function StreamItem({
       }}
       className={cn(
         'group relative px-3 py-2.5 rounded-lg',
-        'bg-white/[0.02] border border-white/[0.05]',
-        'hover:bg-white/[0.045] hover:border-white/[0.1]',
-        'transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer w-full overflow-hidden',
+        'bg-white/[0.02] border border-white/[0.055]',
+        'hover:bg-white/[0.048] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.05)]',
+        'transition-[background-color,border-color,box-shadow,opacity] duration-150 ease-out motion-reduce:transition-none cursor-pointer w-full overflow-hidden',
         !isPlayable && 'opacity-55 saturate-[0.65]',
         isActive &&
-          'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
+          'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.42)]',
         disabled && 'cursor-default',
         disabled && !isResolving && 'opacity-60',
         isResolving &&
@@ -265,7 +265,7 @@ const StreamItem = memo(function StreamItem({
       >
         <div
           aria-hidden='true'
-          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/[0.05]'
+          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.04] shadow-[inset_0_1px_0_rgb(255_255_255/0.05)] transition-colors duration-150 group-hover:border-white/[0.13] group-hover:bg-white/[0.07] motion-reduce:transition-none'
         >
           <DeliveryIcon
             className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
@@ -459,6 +459,7 @@ const STREAM_ROW_ESTIMATE_PX = 92;
 const STREAM_ROW_GAP_PX = 6;
 const EMPTY_PACK_EPISODES: Episode[] = [];
 const EMPTY_PACK_ROWS: PackListRow[] = [];
+const getPackEpisodeListId = createObjectIdentity();
 
 interface StreamVirtualListProps {
   canBrowsePack: boolean;
@@ -797,7 +798,10 @@ export function StreamSelector({
       searchFocusPendingRef.current = false;
       searchInputRef.current?.focus({ preventScroll: true });
     }
-    if (resultsFocusPendingRef.current && !isSearchPending) {
+    if (!resultsFocusPendingRef.current) return;
+    if (!open || document.activeElement !== searchInputRef.current) {
+      resultsFocusPendingRef.current = false;
+    } else if (!isSearchPending) {
       resultsFocusPendingRef.current = false;
       focusResults();
     }
@@ -862,22 +866,28 @@ export function StreamSelector({
   };
 
   const allPackEpisodes = episodes ?? EMPTY_PACK_EPISODES;
-  const packCoordinates = isPackOpen
-    ? allPackEpisodes.map((ep) => ({
-        season: ep.season,
-        episode: ep.episode,
-        streamSeason: ep.streamSeason,
-        streamEpisode: ep.streamEpisode,
-      }))
-    : EMPTY_PACK_EPISODES;
+  const packCoverage = packStream?.matchSummary?.packCoverage;
   const {
     data: packRowModel,
     error: packError,
     isFetching: isLoadingPack,
     refetch: retryPack,
   } = useQuery({
-    queryKey: ['stream-pack-rows', packStream?.matchSummary?.packCoverage ?? null, packCoordinates],
-    queryFn: () => api.getStreamPackRows(packStream?.matchSummary?.packCoverage, packCoordinates),
+    queryKey: [
+      'stream-pack-rows',
+      packCoverage ?? null,
+      isPackOpen ? getPackEpisodeListId(allPackEpisodes) : null,
+    ],
+    queryFn: () =>
+      api.getStreamPackRows(
+        packCoverage,
+        allPackEpisodes.map((packEpisode) => ({
+          season: packEpisode.season,
+          episode: packEpisode.episode,
+          streamSeason: packEpisode.streamSeason,
+          streamEpisode: packEpisode.streamEpisode,
+        })),
+      ),
     enabled: isPackOpen,
     staleTime: Infinity,
     gcTime: 120_000,
@@ -889,10 +899,13 @@ export function StreamSelector({
   } | null>(null);
   const packEpisodeError =
     packError ?? (packRetry?.selection === packSelection ? packRetry?.error : null);
-  const packRows =
-    packRowModel?.map((row): PackListRow =>
-      row.type === 'header' ? row : { type: 'episode', episode: allPackEpisodes[row.index]! },
-    ) ?? EMPTY_PACK_ROWS;
+  const packRows = useMemo(
+    () =>
+      packRowModel?.map((row): PackListRow =>
+        row.type === 'header' ? row : { type: 'episode', episode: allPackEpisodes[row.index]! },
+      ) ?? EMPTY_PACK_ROWS,
+    [allPackEpisodes, packRowModel],
+  );
 
   const handleStreamPress = (stream: AddonStream) => {
     if (isAnyResolving || packOpenRef.current) return;
@@ -966,7 +979,11 @@ export function StreamSelector({
     ) : null;
 
   const streamPanel = (
-    <div className='relative flex h-[82vh] flex-col gap-0 overflow-hidden rounded-xl border border-zinc-800/60 bg-zinc-950 p-0 shadow-2xl sm:max-w-4xl'>
+    <div className='relative flex h-[min(82vh,calc(100vh-4.5rem))] flex-col gap-0 overflow-hidden rounded-xl border border-white/[0.1] bg-zinc-950 p-0 shadow-[0_28px_72px_-16px_rgb(0_0_0/0.88)] group-data-[state=open]/selector:animate-selector-in group-data-[state=closed]/selector:animate-selector-out motion-reduce:animate-none sm:max-w-4xl'>
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute inset-x-8 top-0 z-30 h-px bg-linear-to-r from-transparent via-white/[0.16] to-transparent'
+      />
       <StreamSelectorHeader
         backdrop={backdrop}
         compactOverview={compactOverview}
@@ -981,7 +998,7 @@ export function StreamSelector({
         title={title || 'Unknown Title'}
       />
 
-      <div className='h-px bg-white/5 shrink-0' />
+      <div className='h-px shrink-0 bg-linear-to-r from-transparent via-white/[0.08] to-transparent' />
       <StreamResultsStatus
         resultCount={sortedStreams.length}
         pendingSourceCount={healthSummary.pending}
@@ -1088,7 +1105,7 @@ export function StreamSelector({
           )}
         </div>
         {packStream && (
-          <div className='absolute inset-0 z-10 bg-zinc-950'>
+          <div className='animate-submenu-in motion-reduce:animate-none absolute inset-0 z-10 bg-zinc-950'>
             <StreamPackEpisodeList
               backdrop={backdrop}
               disabled={isAnyResolving}
@@ -1141,14 +1158,21 @@ export function StreamSelector({
           if (!open) onClosed?.();
         }}
         onKeyDown={(event) => {
+          if (event.defaultPrevented || event.nativeEvent.isComposing) return;
           if (
-            event.defaultPrevented ||
-            event.nativeEvent.isComposing ||
-            event.ctrlKey ||
-            event.altKey ||
-            event.metaKey ||
-            isEditableTarget(event.target)
-          )
+            !packStream &&
+            !isAnyResolving &&
+            (event.ctrlKey || event.metaKey) &&
+            !event.altKey &&
+            !event.shiftKey &&
+            event.key.toLowerCase() === 'f'
+          ) {
+            event.preventDefault();
+            searchInputRef.current?.focus({ preventScroll: true });
+            searchInputRef.current?.select();
+            return;
+          }
+          if (event.ctrlKey || event.altKey || event.metaKey || isEditableTarget(event.target))
             return;
           if (packStream) {
             if (event.key === 'Backspace') {
@@ -1180,8 +1204,8 @@ export function StreamSelector({
             event.preventDefault();
           }
         }}
-        overlayClassName='bg-black/55 backdrop-blur-[2px]'
-        className='sm:max-w-4xl h-[82vh] flex flex-col p-0 bg-transparent border-none shadow-none rounded-md outline-hidden'
+        overlayClassName='bg-black/60 backdrop-blur-[3px] duration-200'
+        className='group/selector sm:max-w-4xl h-[min(82vh,calc(100vh-4.5rem))] flex flex-col p-0 bg-transparent border-none shadow-none rounded-md outline-hidden data-[state=open]:animate-none data-[state=closed]:animate-none'
       >
         {streamPanel}
       </DialogContent>

@@ -389,8 +389,9 @@ export interface AddonShareLink {
   includesConfig: boolean;
 }
 
-/** A `stremiro://` link Rust validated: it opens a title or prefills the addon add box. */
+/** A destination queued by the native shell or resolved from a Stremiro link. */
 export type AppLink =
+  | { kind: 'settings' }
   | { kind: 'addon'; url: string }
   | {
       kind: 'title';
@@ -662,6 +663,7 @@ export interface SearchCatalogContinuation {
 }
 
 export interface SearchCatalogQuery {
+  allowPartialFirstPage?: boolean;
   query?: string;
   mediaType?: PlayerRouteMediaType;
   feed?: 'popular' | 'featured';

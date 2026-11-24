@@ -12,7 +12,6 @@ interface RemoteImageProps {
   loading?: ImgHTMLAttributes<HTMLImageElement>['loading'];
   fetchPriority?: ImgHTMLAttributes<HTMLImageElement>['fetchPriority'];
   onLoad?: ImgHTMLAttributes<HTMLImageElement>['onLoad'];
-  /** Broken artwork hides by default; pass a handler for a custom fallback. */
   onError?: ImgHTMLAttributes<HTMLImageElement>['onError'];
 }
 
@@ -20,7 +19,6 @@ function showCachedImage(image: HTMLImageElement | null) {
   if (image?.complete && image.naturalWidth > 0) image.dataset.loaded = 'cached';
 }
 
-// Shared remote-artwork chrome: async decode, no referrer/drag ghost, hidden element over torn-image glyph.
 export function RemoteImage({
   src,
   fallbackSrc,
@@ -57,7 +55,9 @@ export function RemoteImage({
       onLoad={
         fadeIn
           ? (event) => {
+              onLoad?.(event);
               const image = event.currentTarget;
+              if (image.dataset.loaded !== undefined) return;
               const loadedSrc = image.currentSrc;
               void image
                 .decode()
@@ -71,7 +71,6 @@ export function RemoteImage({
                     if (image.dataset.loaded === undefined) image.dataset.loaded = 'true';
                   }
                 });
-              onLoad?.(event);
             }
           : onLoad
       }

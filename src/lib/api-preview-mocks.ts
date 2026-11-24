@@ -2,10 +2,8 @@ import { DEFAULT_PROFILE_PREFERENCES } from '@/hooks/use-local-profile';
 import {
   type AddonConfig,
   type AddonConfigsOp,
-  type AddonSubtitle,
   type AppUiPreferences,
   DEFAULT_APP_UI_PREFERENCES,
-  type HistoryPlaybackPlan,
   type LibraryFilters,
   type MediaItem,
   type PlaybackLanguagePreferences,
@@ -16,7 +14,6 @@ import {
   type StreamSelectorPreferencesState,
   type TitleWatchProgress,
   type UserList,
-  type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
 import { toMediaItem } from '@/lib/api-store';
@@ -26,7 +23,7 @@ import {
   SUBTITLE_FONT_OPTIONS,
 } from '@/lib/player-track-utils';
 import { DEFAULT_FILTERS } from '@/lib/stream-selector-utils';
-import { clamp, isSeriesLikeMediaType, orderByIds } from '@/lib/utils';
+import { clamp, orderByIds } from '@/lib/utils';
 
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
@@ -418,11 +415,6 @@ export async function handlePreviewInvoke<T>(
     case 'set_launch_at_login':
       previewLaunchAtLogin = args?.enabled === true;
       return previewLaunchAtLogin as T;
-    case 'hide_main_window_to_tray':
-      return undefined as T;
-    case 'take_pending_app_link':
-    case 'resolve_app_link':
-      return null as T;
     case 'save_app_ui_preferences': {
       const patch = typeof args?.patch === 'object' && args.patch !== null ? args.patch : {};
       mergePreviewAppUiPreferences(patch as Record<string, unknown>);
@@ -697,8 +689,6 @@ export async function handlePreviewInvoke<T>(
       return { trackedCount: 0, missingCount: 0, days: [], upcoming: [] } as T;
     case 'get_title_watch_progress':
       return EMPTY_TITLE_WATCH_PROGRESS as T;
-    case 'set_episodes_watched':
-      return [EMPTY_TITLE_WATCH_PROGRESS, [], null] as T;
     case 'get_details_prefetch_bundle':
       // No card payload in preview — the mounted details query fetches it.
       return { progress: EMPTY_TITLE_WATCH_PROGRESS } as T;
@@ -707,34 +697,21 @@ export async function handlePreviewInvoke<T>(
         ...EMPTY_STREAM_SELECTOR_DATA,
         hasEnabledAddons: previewAddonConfigs.some((addon) => addon.enabled),
       } as T;
-    case 'get_addon_subtitles':
-      return [
-        {
-          id: 'preview-subtitle',
-          selectionKey:
-            '["preview-addon","preview-subtitle","https://subtitles.invalid/preview.srt","eng"]',
-          url: 'https://subtitles.invalid/preview.srt',
-          lang: 'eng',
-          label: 'Browser.Preview_English.srt',
-          detail: 'Browser.Preview_English',
-          mpvTitle: 'Browser.Preview_English.srt',
-          sourceId: 'preview-addon',
-          sourceName: 'Browser Preview',
-        } satisfies AddonSubtitle,
-      ] as T;
     case 'get_episode_navigation':
       return { previousIndex: null, nextIndex: null } as T;
     case 'get_unaired_episode_indices':
       return [] as T;
-    case 'get_media_details':
+    case 'get_media_details': {
+      const id = readStringArg(args, 'id', '').trim();
+      if (!id) throw new Error('Media ID is required.');
       return {
-        id: readStringArg(args, 'id', 'mock-id'),
+        id,
         title: 'Browser Preview',
         type: readMediaType(args),
         description: 'Desktop-backed metadata is unavailable in browser preview mode.',
-        year: '2026',
         episodes: [],
       } as T;
+    }
     case 'get_playback_language_preferences':
     case 'get_effective_playback_language_preferences':
       return previewPlaybackLanguagePreferences as T;
@@ -747,10 +724,6 @@ export async function handlePreviewInvoke<T>(
       }
       return previewPlaybackLanguagePreferences as T;
     }
-    case 'resolve_preferred_track_selection':
-      return {
-        selectedMatches: false,
-      } as T;
     case 'get_addon_configs':
       return previewAddonConfigs as T;
     case 'get_addon_share_link': {
@@ -775,79 +748,13 @@ export async function handlePreviewInvoke<T>(
       return { ...previewWatchStatuses } as T;
     case 'get_watch_progress':
     case 'get_next_episode_row':
-    case 'recover_playback_stream':
       return null as T;
     case 'cancel_stream_request':
-    case 'set_continue_watching_dismissed':
       return undefined as T;
     case 'bulk_remove_from_watch_history':
     case 'remove_all_from_watch_history':
       // The command returns the rows it deleted — preview holds no history.
       return [] as T;
-    case 'build_history_playback_plan': {
-      const item = args?.item as WatchProgress | undefined;
-      const mediaId = item?.id.trim() ? item.id : 'mock-id';
-      const itemType = item?.type_.trim().toLowerCase() || 'series';
-      const mediaType = mediaId.toLowerCase().startsWith('kitsu:') ? 'anime' : itemType;
-      const absoluteSeason = item?.absolute_season ?? item?.season;
-      const absoluteEpisode = item?.absolute_episode ?? item?.episode;
-      const from = readStringArg(args, 'from', '/');
-
-      if (isSeriesLikeMediaType(mediaType) && (absoluteSeason == null || absoluteEpisode == null)) {
-        return {
-          kind: 'details',
-          reason: 'missing-episode-context',
-          target: `/details/${mediaType}/${encodeURIComponent(mediaId)}`,
-          state: { from, season: absoluteSeason },
-        } as T;
-      }
-
-      // Route state carries opaque identities, never stream URLs; mirrors the backend's media-id lookup fallback.
-      const target =
-        absoluteSeason != null && absoluteEpisode != null
-          ? `/player/${mediaType}/${encodeURIComponent(mediaId)}/${absoluteSeason}/${absoluteEpisode}`
-          : `/player/${mediaType}/${encodeURIComponent(mediaId)}`;
-
-      const state: HistoryPlaybackPlan['state'] = {
-        from,
-        title: item?.title,
-        poster: item?.poster,
-        backdrop: item?.backdrop,
-        streamSourceId: item?.source_id,
-        streamSourceName: item?.source_name,
-        streamFamily: item?.stream_family,
-        selectedStreamKey: item?.last_stream_key,
-        startTime: item?.resume_start_time,
-        absoluteSeason,
-        absoluteEpisode,
-        streamSeason: item?.stream_season ?? absoluteSeason,
-        streamEpisode: item?.stream_episode ?? absoluteEpisode,
-        resumeFromHistory: true,
-        streamLookupId: item?.last_stream_lookup_id?.trim() ? item.last_stream_lookup_id : mediaId,
-      };
-      const plan: HistoryPlaybackPlan = {
-        kind: 'player',
-        target,
-        state,
-        warmResolveRequest: {
-          mediaType,
-          mediaId: mediaId.trim(),
-          streamLookupId: state.streamLookupId,
-          streamSeason: state.streamSeason,
-          streamEpisode: state.streamEpisode,
-          absoluteSeason,
-          absoluteEpisode,
-          title: state.title || undefined,
-          preferred: {
-            streamKey: state.selectedStreamKey,
-            sourceId: state.streamSourceId,
-            sourceName: state.streamSourceName,
-            streamFamily: state.streamFamily,
-          },
-        },
-      };
-      return plan as T;
-    }
     case 'get_data_stats':
       return {
         history_count: 0,
@@ -858,11 +765,6 @@ export async function handlePreviewInvoke<T>(
         lists_count: previewLists.length,
         watch_statuses_count: Object.keys(previewWatchStatuses).length,
       } as T;
-    case 'save_selected_playback_language_preference':
-      // No scoped row in preview — `effective` stays absent, matching the backend's missing-scope contract.
-      return { preferences: {} } as T;
-    case 'save_playback_language_preference_outcome_from_tracks':
-      return undefined as T;
     case 'get_supported_languages':
       return PREVIEW_SUPPORTED_LANGUAGES as T;
     default:

@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CornerDownRight,
   ListVideo,
+  Play,
   X,
 } from 'lucide-react';
 import {
@@ -34,6 +35,7 @@ import {
 import { SearchInput } from '@/components/ui/search-input';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-item-search';
+import { useFindShortcut } from '@/hooks/use-browse-hotkeys';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import { useLocalDay } from '@/hooks/use-local-day';
@@ -96,11 +98,15 @@ interface PlayerEpisodesPanelProps {
 }
 
 // Fixed row heights keep long seasons cheap to scroll; virtual wrappers include the gap.
-const EPISODE_ROW_ESTIMATE_PX = 84;
-const EPISODE_ROW_GAP_PX = 2;
+const EPISODE_ROW_ESTIMATE_PX = 90;
+const EPISODE_ROW_GAP_PX = 4;
 const SEASON_STEP_CLASS =
-  'flex h-full w-7 cursor-pointer items-center justify-center text-zinc-400 outline-hidden transition-colors duration-120 not-aria-disabled:hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:text-zinc-700 motion-reduce:transition-none';
+  'flex h-full w-7 cursor-pointer items-center justify-center text-zinc-400 outline-hidden transition-colors duration-120 not-aria-disabled:hover:bg-white/[0.04] not-aria-disabled:hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:text-zinc-700 motion-reduce:transition-none';
 const EPISODE_LIST_VIRTUALIZE_THRESHOLD = 40;
+
+function formatSeasonLabel(season: number) {
+  return season === 0 ? 'Specials' : `Season ${season}`;
+}
 
 export function PlayerEpisodesPanel({
   panelRef,
@@ -141,6 +147,8 @@ export function PlayerEpisodesPanel({
     retrySearch,
   } = useEpisodeSearch(seasonEpisodes, episodeSearch, searchVisible);
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  useFindShortcut(() => (open && searchVisible ? searchInputRef.current : null));
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const shouldVirtualize = visibleEpisodes.length >= EPISODE_LIST_VIRTUALIZE_THRESHOLD;
   // Keep rows through the exit fade, then stop observing the hidden viewport.
@@ -219,13 +227,36 @@ export function PlayerEpisodesPanel({
   ]);
 
   const seasonIndex = seasons.findIndex((season) => season.number === selectedSeason);
+  const seasonWatchedCount = useMemo(() => {
+    if (!mediaId || !episodeProgress) return 0;
+    let count = 0;
+    for (const ep of seasonEpisodes) {
+      if (episodeProgress[episodeProgressKey(mediaId, ep.season, ep.episode)]?.is_watched) {
+        count += 1;
+      }
+    }
+    return count;
+  }, [episodeProgress, mediaId, seasonEpisodes]);
+  const seasonProgressPercent =
+    seasonEpisodes.length > 0 ? Math.round((seasonWatchedCount / seasonEpisodes.length) * 100) : 0;
+  const currentEpisodeVisible =
+    currentSeason !== undefined &&
+    currentEpisode !== undefined &&
+    visibleEpisodes.some((ep) => episodeMatchesCoordinates(ep, currentSeason, currentEpisode));
   const showJumpToCurrent =
     currentSeason !== undefined &&
-    selectedSeason !== currentSeason &&
-    seasons.some((season) => season.number === currentSeason);
+    seasons.some((season) => season.number === currentSeason) &&
+    (selectedSeason !== currentSeason ||
+      (Boolean(effectiveEpisodeSearch) && !currentEpisodeVisible));
 
   const handleRowKeyDown = useCallback((event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    if (
+      event.key !== 'ArrowDown' &&
+      event.key !== 'ArrowUp' &&
+      event.key !== 'Home' &&
+      event.key !== 'End'
+    )
+      return;
     const rows = Array.from(
       scrollViewportRef.current?.querySelectorAll<HTMLElement>('[data-episode-row]') ?? [],
     );
@@ -233,7 +264,12 @@ export function PlayerEpisodesPanel({
     if (index < 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const next = rows[index + (event.key === 'ArrowDown' ? 1 : -1)];
+    const next =
+      event.key === 'Home'
+        ? rows[0]
+        : event.key === 'End'
+          ? rows[rows.length - 1]
+          : rows[index + (event.key === 'ArrowDown' ? 1 : -1)];
     next?.focus({ preventScroll: true });
     next?.scrollIntoView({ block: 'nearest' });
   }, []);
@@ -270,32 +306,56 @@ export function PlayerEpisodesPanel({
           data-current-episode={isCurrent ? '' : undefined}
           aria-current={isCurrent ? 'true' : undefined}
           className={cn(
-            'relative flex h-[84px] w-full cursor-pointer items-center gap-3 rounded-md px-2 text-left outline-hidden transition-colors duration-120 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-white/40 motion-reduce:transition-none',
-            isCurrent ? 'bg-white/[0.05]' : 'hover:bg-white/[0.03] focus-visible:bg-white/[0.03]',
+            'group/ep relative flex h-[90px] w-full cursor-pointer items-center gap-3.5 rounded-lg border px-2.5 text-left outline-hidden transition-[background-color,border-color,box-shadow] duration-150 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-white/40 motion-reduce:transition-none',
+            isCurrent
+              ? 'border-white/[0.1] bg-white/[0.065] shadow-[inset_0_1px_0_rgb(255_255_255/0.06)]'
+              : 'border-transparent hover:border-white/[0.07] hover:bg-white/[0.04] hover:shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] active:bg-white/[0.06] focus-visible:bg-white/[0.04]',
           )}
           onClick={() => onEpisodeSelect(ep)}
         >
           {isCurrent && (
             <span
               aria-hidden='true'
-              className='absolute left-0 top-3 bottom-3 w-0.5 rounded-r-full bg-(--accent-act)'
+              className='absolute left-0 top-2.5 bottom-2.5 w-[2.5px] rounded-r-full bg-(--accent-act)'
             />
           )}
           <EpisodeThumb
             episode={ep.episode}
             src={ep.thumbnail}
             fallbackSrc={backdrop}
+            fadeIn
             isSpoiler={isSpoiler}
             progressPercent={progressPercent}
-            className='aspect-video w-[120px] rounded-[5px] ring-1 ring-white/[0.06]'
+            className='aspect-video w-[128px] rounded-md ring-1 ring-white/[0.08] transition-[box-shadow] duration-150 group-hover/ep:ring-white/[0.16] motion-reduce:transition-none'
             fallbackClassName='text-[13px] font-semibold tabular-nums text-zinc-700'
-            imageClassName={isWatched && !isCurrent ? 'opacity-60' : undefined}
-            stripClassName='bg-black/50'
-          />
+            imageClassName={cn(
+              'transition-opacity duration-150 motion-reduce:transition-none',
+              isWatched && !isCurrent && 'opacity-55 group-hover/ep:opacity-85',
+            )}
+            stripClassName='bg-black/55'
+          >
+            {!isCurrent && (
+              <span
+                aria-hidden='true'
+                className='pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition-opacity duration-150 group-hover/ep:opacity-100 group-focus-visible/ep:opacity-100 motion-reduce:transition-none'
+              >
+                <span className='flex h-7 w-7 items-center justify-center rounded-full bg-black/65 text-white ring-1 ring-white/20'>
+                  <Play className='ml-0.5 h-3 w-3 fill-current' />
+                </span>
+              </span>
+            )}
+          </EpisodeThumb>
 
           <div className='min-w-0 flex-1'>
             <p className='flex min-w-0 items-center gap-1.5 text-[11.5px] leading-4 tabular-nums text-zinc-500'>
-              <span className='shrink-0 font-medium text-zinc-400'>E{ep.episode}</span>
+              <span
+                className={cn(
+                  'shrink-0 font-semibold',
+                  isCurrent ? 'text-(--accent-act)' : 'text-zinc-400',
+                )}
+              >
+                E{ep.episode}
+              </span>
               {airDate && (
                 <>
                   <span aria-hidden='true'>·</span>
@@ -309,17 +369,26 @@ export function PlayerEpisodesPanel({
                     isCurrent || isResume ? 'text-(--accent-act)' : 'text-zinc-500',
                   )}
                 >
-                  {!isCurrent && !isResume && (
+                  {isCurrent ? (
+                    <span
+                      aria-hidden='true'
+                      className='h-1.5 w-1.5 rounded-full bg-(--accent-act)'
+                    />
+                  ) : !isResume ? (
                     <Check aria-hidden='true' className='h-3 w-3' strokeWidth={2.5} />
-                  )}
+                  ) : null}
                   {isCurrent ? 'Playing' : isResume ? 'Resume' : 'Watched'}
                 </span>
               )}
             </p>
             <h3
               className={cn(
-                'mt-0.5 truncate text-[13.5px] font-medium leading-5 tracking-[-0.005em]',
-                isCurrent ? 'text-white' : 'text-zinc-100',
+                'mt-0.5 truncate text-[13.5px] font-semibold leading-5 tracking-[-0.01em] transition-colors duration-150 motion-reduce:transition-none',
+                isCurrent
+                  ? 'text-white'
+                  : isWatched
+                    ? 'text-zinc-300 group-hover/ep:text-white'
+                    : 'text-zinc-100 group-hover/ep:text-white',
               )}
               title={episodeTitle}
             >
@@ -327,7 +396,10 @@ export function PlayerEpisodesPanel({
             </h3>
             {(isSpoiler || ep.overview) && (
               <p
-                className='mt-0.5 truncate text-[12px] leading-[17px] text-zinc-500'
+                className={cn(
+                  'mt-0.5 line-clamp-2 text-[11.5px] leading-[15.5px]',
+                  isSpoiler ? 'italic text-zinc-500' : 'text-zinc-400/90',
+                )}
                 title={isSpoiler ? undefined : ep.overview}
               >
                 {isSpoiler ? 'Description hidden to prevent spoilers.' : ep.overview}
@@ -352,6 +424,16 @@ export function PlayerEpisodesPanel({
     ],
   );
 
+  const headerMetaLabel = effectiveEpisodeSearch
+    ? `${visibleEpisodes.length} of ${pluralize(seasonEpisodes.length, 'episode')}`
+    : seasonWatchedCount > 0
+      ? `${pluralize(seasonEpisodes.length, 'episode')} · ${
+          seasonWatchedCount === seasonEpisodes.length
+            ? 'All watched'
+            : `${seasonWatchedCount} watched`
+        }`
+      : pluralize(seasonEpisodes.length, 'episode');
+
   return (
     <aside
       id='player-episodes-panel'
@@ -362,32 +444,37 @@ export function PlayerEpisodesPanel({
       aria-hidden={!open}
       aria-label='Episodes'
       className={cn(
-        'absolute right-3 bottom-3 z-60 flex w-[400px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden',
+        'absolute right-3 bottom-3 z-60 flex w-[420px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden',
         // Opaque: any translucency lets the native video bleed through and muddies the rows.
-        'rounded-lg border border-white/[0.07] bg-zinc-950',
-        'shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_16px_48px_-16px_rgba(0,0,0,0.7)]',
-        'transition-[translate,opacity] duration-160 ease-out starting:translate-x-2 starting:opacity-0 motion-reduce:transition-none',
+        'rounded-xl border border-white/[0.09] bg-[#0a0a0c]',
+        'shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_24px_64px_-16px_rgba(0,0,0,0.88)]',
+        'transition-[translate,opacity] duration-180 ease-[cubic-bezier(0.22,1,0.36,1)] starting:translate-x-3 starting:opacity-0 motion-reduce:transition-none',
         // Below the custom titlebar in windowed mode so window controls never overlap the panel header.
         isFullscreen ? 'top-3' : 'top-12',
-        open ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-2 opacity-0',
+        open ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-3 opacity-0',
       )}
     >
-      <div className='shrink-0 border-b border-white/[0.06] px-3 pt-3 pb-2.5'>
-        <div className='flex items-center gap-2 pl-1'>
-          <h2 className='text-[14px] font-semibold leading-5 tracking-tight text-white'>
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute inset-x-8 top-0 z-10 h-px bg-linear-to-r from-transparent via-white/[0.12] to-transparent'
+      />
+      <div className='relative shrink-0 border-b border-white/[0.06] bg-black/25 px-3.5 pt-3.5 pb-3'>
+        <div className='flex items-center gap-2 pl-0.5'>
+          <h2 className='text-[15px] font-semibold leading-5 tracking-tight text-white'>
             Episodes
           </h2>
           <span className='min-w-0 flex-1 truncate text-[12px] tabular-nums text-zinc-500'>
-            {pluralize(seasonEpisodes.length, 'episode')}
+            {headerMetaLabel}
           </span>
           {showJumpToCurrent && (
             <button
               type='button'
               onClick={() => {
                 didScrollToCurrentRef.current = false;
-                onSeasonChange(currentSeason);
+                if (episodeSearch) setEpisodeSearch('');
+                if (selectedSeason !== currentSeason) onSeasonChange(currentSeason);
               }}
-              className='flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-(--accent-act) outline-hidden transition-colors duration-120 hover:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
+              className='flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] px-2 text-[12px] font-medium text-(--accent-act) outline-hidden transition-colors duration-120 hover:border-white/[0.14] hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
             >
               <CornerDownRight aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.25} />
               Now playing
@@ -408,7 +495,7 @@ export function PlayerEpisodesPanel({
         {(seasons.length > 1 || searchVisible) && (
           <div className='mt-2.5 flex items-center gap-2'>
             {seasons.length > 1 && (
-              <div className='flex h-8 shrink-0 items-center rounded-md border border-white/[0.07] bg-white/[0.03]'>
+              <div className='flex h-8 shrink-0 items-center overflow-hidden rounded-lg border border-white/[0.08] bg-[#060608] shadow-[inset_0_1px_0_rgb(255_255_255/0.03)]'>
                 <button
                   type='button'
                   aria-label='Previous season'
@@ -424,12 +511,12 @@ export function PlayerEpisodesPanel({
                   <DropdownMenuTrigger asChild>
                     <button
                       type='button'
-                      aria-label={`Season ${selectedSeason}, change season`}
-                      className='flex h-full cursor-pointer items-center gap-1.5 border-x border-white/[0.07] px-2.5 text-[12px] font-medium text-zinc-200 outline-hidden transition-colors duration-120 hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 data-[state=open]:bg-white/[0.05] motion-reduce:transition-none'
+                      aria-label={`${formatSeasonLabel(selectedSeason)}, change season`}
+                      className='flex h-full cursor-pointer items-center gap-1.5 border-x border-white/[0.07] px-2.5 text-[12.5px] font-medium text-zinc-200 outline-hidden transition-colors duration-120 hover:bg-white/[0.05] hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 data-[state=open]:bg-white/[0.06] motion-reduce:transition-none'
                       onClick={(e) => e.stopPropagation()}
                       onPointerDown={(e) => e.stopPropagation()}
                     >
-                      Season {selectedSeason}
+                      {formatSeasonLabel(selectedSeason)}
                       <ChevronDown
                         aria-hidden='true'
                         className='h-3.5 w-3.5 text-zinc-500'
@@ -458,10 +545,13 @@ export function PlayerEpisodesPanel({
                         >
                           <Check
                             aria-hidden='true'
-                            className={cn('h-4 w-4 shrink-0', !isSelected && 'invisible')}
+                            className={cn(
+                              'h-4 w-4 shrink-0 text-(--accent-nav)',
+                              !isSelected && 'invisible',
+                            )}
                             strokeWidth={CHROME_ICON_STROKE}
                           />
-                          <span className='flex-1'>Season {season}</span>
+                          <span className='flex-1'>{formatSeasonLabel(season)}</span>
                           {season === currentSeason && (
                             <span
                               role='img'
@@ -491,12 +581,13 @@ export function PlayerEpisodesPanel({
             )}
             {searchVisible && (
               <SearchInput
-                placeholder='Search episodes'
+                inputRef={searchInputRef}
+                placeholder='Search episodes…'
                 value={episodeSearch}
                 onValueChange={setEpisodeSearch}
                 clearLabel='Clear episode search'
                 wrapperClassName='min-w-0 flex-1'
-                className='h-8 rounded-md border-white/[0.07] bg-white/[0.03] text-xs text-white placeholder:text-zinc-500 focus-visible:border-white/20 focus-visible:ring-white/20'
+                className='h-8 rounded-lg border-white/[0.08] bg-[#060608] text-xs text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav)/60 focus-visible:ring-(--accent-nav)/20'
               />
             )}
           </div>
@@ -508,6 +599,17 @@ export function PlayerEpisodesPanel({
             isRetrying={isSearchFetching}
             onRetry={retrySearch}
           />
+        )}
+        {seasonProgressPercent > 0 && (
+          <div
+            aria-hidden='true'
+            className='pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-white/[0.04]'
+          >
+            <div
+              className='h-full bg-(--accent-prog) transition-[width] duration-300 ease-out motion-reduce:transition-none'
+              style={{ width: `${seasonProgressPercent}%` }}
+            />
+          </div>
         )}
       </div>
 
@@ -530,7 +632,7 @@ export function PlayerEpisodesPanel({
         ) : shouldVirtualize ? (
           <div
             className='relative w-full'
-            style={{ height: `${episodeVirtualizer.getTotalSize() + 12}px` }}
+            style={{ height: `${episodeVirtualizer.getTotalSize() + 16}px` }}
           >
             {episodeVirtualizer.getVirtualItems().map((virtualRow) => {
               const ep = visibleEpisodes[virtualRow.index];
@@ -544,7 +646,7 @@ export function PlayerEpisodesPanel({
                   onBlurCapture={(event) => {
                     if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
                   }}
-                  className='absolute left-1.5 right-1.5 top-1.5'
+                  className='absolute left-2 right-2 top-2'
                   style={{
                     transform: `translateY(${virtualRow.start}px)`,
                     paddingBottom: `${EPISODE_ROW_GAP_PX}px`,
@@ -556,7 +658,7 @@ export function PlayerEpisodesPanel({
             })}
           </div>
         ) : (
-          <div className='space-y-0.5 p-1.5'>{visibleEpisodes.map(renderEpisode)}</div>
+          <div className='space-y-1 p-2'>{visibleEpisodes.map(renderEpisode)}</div>
         )}
       </div>
     </aside>

@@ -9,6 +9,8 @@
 @theme inline {
   --animate-surface-in: page-enter-fade 150ms ease-out;
   --animate-surface-out: surface-exit-fade 100ms ease-in forwards;
+  --animate-selector-in: selector-sheet-in 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-selector-out: selector-sheet-out 130ms cubic-bezier(0.4, 0, 1, 1) forwards;
   --animate-submenu-in: submenu-enter 160ms cubic-bezier(0.22, 1, 0.36, 1);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -46,8 +48,8 @@
   }
 
   @media (prefers-reduced-motion: no-preference) {
-    #root.player-background-restoring {
-      transition: background-color 400ms cubic-bezier(0.22, 1, 0.36, 1);
+    #root.player-background-fade {
+      transition: background-color 260ms cubic-bezier(0.25, 0.1, 0.25, 1);
     }
   }
 
@@ -275,6 +277,29 @@
     }
     to {
       opacity: 0;
+    }
+  }
+
+  /* Cinema sheet settle for the stream selector — subtle vertical rise + minimal optical scale, no bounce. */
+  @keyframes selector-sheet-in {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 10px, 0) scale(0.988);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+  }
+
+  @keyframes selector-sheet-out {
+    from {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: translate3d(0, 6px, 0) scale(0.992);
     }
   }
 

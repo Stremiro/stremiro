@@ -96,10 +96,6 @@ export function useDetailsEpisodePane({
     locationSeason !== null &&
     selectedSeason === locationSeason &&
     typeof locationEpisode === 'number';
-  const defaultEpisode = shouldUseLocationEpisode
-    ? locationEpisode
-    : resumeEpisodeForSelectedSeason;
-
   // Key on the route id, not `item.id`: stable from mount (no flip when metadata
   // lands) and matches the identity progress reads/writes use.
   const episodeSeasonKey = (season: number | 'none') =>
@@ -124,24 +120,22 @@ export function useDetailsEpisodePane({
     currentEpisodeSeasonKey,
     effectiveEpisodeSearch,
   ]);
-  const defaultEpisodeIndex =
-    defaultEpisode == null
-      ? -1
-      : seasonEpisodes.findIndex((episode) => episode.episode === defaultEpisode);
+  const locationEpisodeIndex = shouldUseLocationEpisode
+    ? seasonEpisodes.findIndex((episode) => episode.episode === locationEpisode)
+    : -1;
   const resumeEpisodeIndex =
     resumeEpisodeForSelectedSeason !== null
       ? seasonEpisodes.findIndex((episode) => episode.episode === resumeEpisodeForSelectedSeason)
       : -1;
   const resumeEpisodePageIndex =
     resumeEpisodeIndex >= 0 ? Math.floor(resumeEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : null;
-  const defaultEpisodePageIndex =
-    defaultEpisodeIndex >= 0 ? Math.floor(defaultEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : 0;
   // Explicit navigation coordinates beat old page memory until the user picks a
   // season or page. Returning to a remembered title must still open the linked episode.
   const initialEpisodePageIndex =
-    shouldUseLocationEpisode && defaultEpisodeIndex >= 0
-      ? defaultEpisodePageIndex
-      : (episodePageMemory.get(currentEpisodeSeasonKey) ?? defaultEpisodePageIndex);
+    locationEpisodeIndex >= 0
+      ? Math.floor(locationEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE)
+      : (episodePageMemory.get(currentEpisodeSeasonKey) ??
+        (shouldUseLocationEpisode ? 0 : (resumeEpisodePageIndex ?? 0)));
   const requestedEpisodePageIndex =
     (episodePageOverride?.key === episodePageKey ? episodePageOverride.page : undefined) ??
     (hasEpisodeSearch ? 0 : initialEpisodePageIndex);

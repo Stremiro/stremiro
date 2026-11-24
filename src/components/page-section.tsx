@@ -8,13 +8,13 @@ export function PageCard({ children, className, ...props }: ComponentProps<'div'
     <div
       {...props}
       className={cn(
-        'relative min-w-0 overflow-hidden rounded-xl border border-white/[0.08] bg-[#121214] transition-colors duration-200 motion-reduce:transition-none',
+        'relative min-w-0 overflow-hidden rounded-xl border border-white/[0.075] bg-linear-to-b from-[#0e0e11] to-[#0a0a0c] shadow-[inset_0_1px_0_rgb(255_255_255/0.045),0_1px_2px_rgb(0_0_0/0.5),0_18px_40px_-28px_rgb(0_0_0/0.9)] transition-colors duration-200 hover:border-white/[0.11] motion-reduce:transition-none',
         className,
       )}
     >
       <span
         aria-hidden='true'
-        className='pointer-events-none absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-white/[0.12] to-transparent'
+        className='pointer-events-none absolute inset-x-6 top-0 h-px bg-linear-to-r from-transparent via-white/[0.11] to-transparent'
       />
       {children}
     </div>

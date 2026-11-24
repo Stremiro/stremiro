@@ -12,7 +12,7 @@ import {
   Star,
   Trophy,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavigationType, useLocation, useNavigationType, useParams } from 'react-router';
 import { EpisodeCard, type EpisodeEmphasis } from '@/components/details-episode-card';
 import { DetailsCredits } from '@/components/details-credits';
@@ -38,6 +38,7 @@ import { SearchInput } from '@/components/ui/search-input';
 import { DetailsSkeleton, Skeleton } from '@/components/ui/skeleton';
 import { WatchStatusIcon } from '@/components/watch-status-icon';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import { useFindShortcut } from '@/hooks/use-browse-hotkeys';
 import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useFailedSrc } from '@/hooks/use-failed-src';
@@ -88,7 +89,6 @@ import { searchGenrePath } from '@/lib/search-page-state';
 import {
   cn,
   createObjectIdentity,
-  formatRuntime,
   formatSeasonEpisode,
   GENRE_LINK_CLASS,
   isSeriesLikeMediaType,
@@ -217,10 +217,13 @@ function DetailsContent() {
   const seriesCanResume = seriesProgress !== null;
   const seriesResumeSeason = seriesProgress?.absolute_season;
   const seriesResumeEpisode = seriesProgress?.absolute_episode;
-  const resumeEpisodeCoords =
-    seriesResumeSeason != null && seriesResumeEpisode != null
-      ? { season: seriesResumeSeason, episode: seriesResumeEpisode }
-      : null;
+  const resumeEpisodeCoords = useMemo(
+    () =>
+      seriesResumeSeason != null && seriesResumeEpisode != null
+        ? { season: seriesResumeSeason, episode: seriesResumeEpisode }
+        : null,
+    [seriesResumeSeason, seriesResumeEpisode],
+  );
 
   const {
     watchStatus: detailsWatchStatus,
@@ -399,15 +402,27 @@ function DetailsContent() {
     seasonWatchedCount,
     seasonHasStarted,
     firstUnwatchedEpisode,
-  } = getDetailsEpisodeState({
-    mediaId: baseRouteId,
-    episodes: item?.episodes,
-    selectedSeason,
-    titleProgress,
-    pendingWatchedMutation,
-    unairedEpisodeKeys,
-    nextUpEpisode,
-  });
+  } = useMemo(
+    () =>
+      getDetailsEpisodeState({
+        mediaId: baseRouteId,
+        episodes: item?.episodes,
+        selectedSeason,
+        titleProgress,
+        pendingWatchedMutation,
+        unairedEpisodeKeys,
+        nextUpEpisode,
+      }),
+    [
+      baseRouteId,
+      item?.episodes,
+      selectedSeason,
+      titleProgress,
+      pendingWatchedMutation,
+      unairedEpisodeKeys,
+      nextUpEpisode,
+    ],
+  );
   const episodeEmphasis = (ep: Episode): EpisodeEmphasis =>
     nextUpEpisode && episodeMatchesCoordinates(ep, nextUpEpisode.season, nextUpEpisode.episode)
       ? seriesCanResume
@@ -482,6 +497,7 @@ function DetailsContent() {
     syncEpisodeScroll,
   ]);
   const episodeSearchInputRef = useRef<HTMLInputElement>(null);
+  useFindShortcut(() => (shouldShowEpisodeSearch ? episodeSearchInputRef.current : null));
   const episodeActionFocusRef = useRef<{
     button: HTMLButtonElement;
     target: 'resume' | 'heading' | 'search';
@@ -765,7 +781,7 @@ function DetailsContent() {
     );
   }
 
-  const formattedRuntime = formatRuntime(item.runtime);
+  const formattedRuntime = item.runtime;
 
   return (
     <div className='relative pb-20 page-enter'>
@@ -808,7 +824,7 @@ function DetailsContent() {
             <RemoteImage
               src={posterSrc}
               alt=''
-              className='hidden aspect-2/3 w-full rounded-lg object-cover ring-1 ring-white/10 shadow-[0_24px_48px_-24px_rgb(0_0_0/0.9)] sm:block'
+              className='hidden aspect-2/3 w-full rounded-lg object-cover ring-1 ring-white/12 shadow-[0_24px_48px_-20px_rgb(0_0_0/0.92),inset_0_1px_0_rgb(255_255_255/0.12)] sm:block'
               loading='eager'
               fadeIn
               onError={onPosterError}
@@ -900,7 +916,7 @@ function DetailsContent() {
                   )}
                 </div>
                 {titleCredits?.nextAiringEpisode && (
-                  <div className='mt-2.5'>
+                  <div className='mt-2.5 animate-in fade-in duration-200 motion-reduce:animate-none'>
                     <NextAiringChip
                       key={titleCredits.nextAiringEpisode.airingAt}
                       episode={titleCredits.nextAiringEpisode}
@@ -1072,7 +1088,7 @@ function DetailsContent() {
                 else void primaryPlayback.handlePrimaryAction();
               }}
             >
-              <span className='flex h-11 min-w-40 items-center justify-center gap-2 rounded-lg bg-white px-5 text-black shadow-[0_1px_2px_rgb(0_0_0/0.35),0_6px_18px_-10px_rgb(255_255_255/0.16),inset_0_1px_0_rgb(255_255_255/0.9),inset_0_-1px_0_rgb(0_0_0/0.08)] transition-[background-color,box-shadow,opacity] duration-200 ease-out group-hover:bg-zinc-100 group-hover:shadow-[0_1px_2px_rgb(0_0_0/0.35),0_8px_22px_-10px_rgb(255_255_255/0.22),inset_0_1px_0_rgb(255_255_255/0.9),inset_0_-1px_0_rgb(0_0_0/0.08)] group-not-aria-disabled:group-active:bg-zinc-200 group-not-aria-disabled:group-active:shadow-[0_1px_1px_rgb(0_0_0/0.3),inset_0_1px_2px_rgb(0_0_0/0.08)] group-aria-disabled:opacity-80 motion-reduce:transition-none'>
+              <span className='flex h-11 min-w-[172px] items-center justify-center gap-2 rounded-lg bg-white px-5 text-black shadow-[0_1px_2px_rgb(0_0_0/0.35),0_6px_18px_-10px_rgb(255_255_255/0.16),inset_0_1px_0_rgb(255_255_255/0.9),inset_0_-1px_0_rgb(0_0_0/0.08)] transition-[background-color,box-shadow,opacity] duration-200 ease-out group-hover:bg-zinc-100 group-hover:shadow-[0_1px_2px_rgb(0_0_0/0.35),0_10px_26px_-10px_rgb(var(--accent-act-rgb)/0.28),inset_0_1px_0_rgb(255_255_255/0.95),inset_0_-1px_0_rgb(0_0_0/0.08)] group-not-aria-disabled:group-active:bg-zinc-200 group-not-aria-disabled:group-active:shadow-[0_1px_1px_rgb(0_0_0/0.3),inset_0_1px_2px_rgb(0_0_0/0.08)] group-aria-disabled:opacity-80 motion-reduce:transition-none'>
                 {primaryPlayback.showResolvingFeedback ? (
                   <Loader2
                     aria-hidden='true'
@@ -1216,6 +1232,7 @@ function DetailsContent() {
           ref={creditsAnchorRef}
           className={cn(
             DETAILS_COLUMN_CLASS,
+            'border-t border-white/[0.06] pt-6',
             (isSeriesLike || titleCredits?.source || item.runtime) && 'pb-4',
           )}
         >
@@ -1331,7 +1348,7 @@ function DetailsContent() {
                                 });
                               }
                             }}
-                            className='flex h-9 items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.04] px-2.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
+                            className='flex h-9 items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.035] px-2.5 text-[13px] font-medium text-zinc-300 shadow-[inset_0_1px_0_rgb(255_255_255/0.05)] transition-colors duration-150 animate-in fade-in not-aria-disabled:hover:border-white/[0.16] not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60 motion-reduce:animate-none'
                           >
                             <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
                             {seasonActionMarksWatched
@@ -1370,7 +1387,7 @@ function DetailsContent() {
                                   .querySelector<HTMLButtonElement>('#details-episodes-grid button')
                                   ?.focus();
                               }}
-                              className='h-9 rounded-md border-white/[0.12] bg-black/20 text-[13px] text-white shadow-none placeholder:text-zinc-400 transition-colors hover:bg-white/[0.06] focus-visible:border-white/25 focus-visible:bg-white/[0.07] focus-visible:ring-white/20'
+                              className='h-9 rounded-md border-white/[0.1] bg-white/[0.03] text-[13px] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] placeholder:text-zinc-500 transition-colors hover:border-white/[0.16] hover:bg-white/[0.05] focus-visible:border-white/25 focus-visible:bg-white/[0.06] focus-visible:ring-white/20'
                             />
                           </div>
                         )}

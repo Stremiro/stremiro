@@ -232,6 +232,11 @@ export function clearProviderDataCaches() {
   clearPendingPlayerLaunch();
 }
 
+/** Drop expired stream cache entries without touching in-flight loads or staged launches. */
+export function pruneExpiredStreamCache() {
+  pruneTimedCache();
+}
+
 export function buildStreamCacheKey(
   type: string,
   id: string,

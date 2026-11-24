@@ -52,6 +52,7 @@ import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
 import { ScrollToTop } from '@/components/scroll-to-top';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useRecentSearches } from '@/hooks/use-app-ui-preferences';
+import { useFindShortcut } from '@/hooks/use-browse-hotkeys';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useOnlineStatus } from '@/hooks/use-online-status';
@@ -134,7 +135,7 @@ const estimateSearchItemHeight = (itemWidth: number) =>
 const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 motion-reduce:transition-none hover:enabled:not-aria-disabled:bg-white/[0.08] hover:enabled:not-aria-disabled:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 const SEARCH_FACET_BUTTON_CLASS =
-  'nav-switch-item group flex h-10 shrink-0 items-center gap-1.5 rounded-md border px-3 text-sm font-medium not-aria-disabled:hover:border-white/[0.18] not-aria-disabled:active:bg-white/[0.1] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+  'nav-switch-item group flex h-10 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium shadow-[inset_0_1px_0_rgb(255_255_255/0.035)] not-aria-disabled:hover:border-white/[0.16] not-aria-disabled:active:bg-white/[0.08] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
 const FACET_ICON_CLASS =
   'size-3.5 shrink-0 opacity-75 transition-opacity duration-150 group-not-aria-disabled:group-hover:opacity-100 group-data-[state=open]:opacity-100 motion-reduce:transition-none';
 const RECENT_SEARCH_ROW_BUTTON_CLASS =
@@ -142,7 +143,7 @@ const RECENT_SEARCH_ROW_BUTTON_CLASS =
 // Mouse picks keep focus in the field so the panel stays put and typing continues.
 const keepSearchInputFocus = (event: ReactMouseEvent) => event.preventDefault();
 const SEARCH_FACET_IDLE_CLASS =
-  'border-white/[0.1] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100';
+  'border-white/[0.085] bg-[#0d0d10] text-zinc-300 hover:bg-white/[0.06] hover:text-zinc-100 data-[state=open]:bg-white/[0.06] data-[state=open]:text-zinc-100';
 
 function SearchPanel({
   action,
@@ -617,6 +618,7 @@ export function Search() {
   };
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+  useFindShortcut(() => searchInputRef.current);
   const [autoFocusSearch] = useState(
     () => navigationType !== NavigationType.Pop || (!trimmedQuery && results.length === 0),
   );
@@ -851,7 +853,7 @@ export function Search() {
               aria-describedby='search-keyboard-hint'
               data-search-input
               ref={searchInputRef}
-              className='peer h-12 w-full rounded-lg border-white/[0.1] bg-white/[0.04] pl-11 pr-20 text-base text-zinc-100 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] transition-[background-color,border-color,box-shadow] duration-150 placeholder:text-zinc-400 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15 motion-reduce:transition-none md:text-base'
+              className='peer h-12 w-full rounded-lg border-white/[0.09] bg-[#0d0d10] pl-11 pr-20 text-base text-zinc-100 shadow-[inset_0_1px_0_rgb(255_255_255/0.035),0_1px_2px_rgb(0_0_0/0.4)] transition-[background-color,border-color,box-shadow] duration-150 placeholder:text-zinc-500 hover:border-white/[0.14] hover:bg-[#111115] focus-visible:border-(--accent-nav)/70 focus-visible:bg-[#111115] focus-visible:shadow-[0_0_0_3px_rgb(var(--accent-nav-rgb)/0.12)] focus-visible:ring-0 motion-reduce:transition-none md:text-base'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onPaste={(event) => {
@@ -953,7 +955,7 @@ export function Search() {
               <section
                 data-key-capture
                 aria-label='Recent searches'
-                className='absolute inset-x-0 top-full z-30 mt-1.5 overflow-hidden rounded-xl border border-white/5 bg-zinc-950/80 shadow-2xl backdrop-blur-xl animate-surface-in motion-reduce:animate-none'
+                className='absolute inset-x-0 top-full z-30 mt-1.5 overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/92 shadow-[0_18px_48px_-14px_rgb(0_0_0/0.85)] backdrop-blur-xl animate-surface-in motion-reduce:animate-none'
               >
                 <h2 className='px-3.5 pb-1 pt-3 text-xs font-semibold text-zinc-400'>
                   Recent searches
@@ -1046,7 +1048,7 @@ export function Search() {
             <div
               role='radiogroup'
               aria-label='Content type'
-              className='relative isolate grid h-10 w-full max-w-full grid-cols-4 rounded-lg bg-white/[0.03] p-1 ring-1 ring-inset ring-white/[0.08] justify-self-center sm:w-auto xl:col-start-2 xl:row-start-1'
+              className='relative isolate grid h-10 w-full max-w-full grid-cols-4 rounded-lg bg-[#0b0b0e] p-1 ring-1 ring-inset ring-white/[0.08] justify-self-center sm:w-auto xl:col-start-2 xl:row-start-1'
             >
               <SegmentPill
                 index={SEARCH_TYPE_OPTIONS.findIndex((option) => option.id === activeType)}
@@ -1246,7 +1248,7 @@ export function Search() {
                       SEARCH_FACET_BUTTON_CLASS,
                       'aria-disabled:cursor-default aria-disabled:opacity-40',
                       !isBrowsing
-                        ? 'border-white/[0.08] bg-white/[0.04] text-zinc-400'
+                        ? 'border-white/[0.07] bg-[#0b0b0e] text-zinc-400'
                         : activeFeed !== 'popular'
                           ? 'accent-lattice-soft'
                           : SEARCH_FACET_IDLE_CLASS,
@@ -1303,9 +1305,9 @@ export function Search() {
                 title='Reset all filters'
                 className={cn(
                   SEARCH_FACET_BUTTON_CLASS,
-                  'border-white/[0.08] bg-white/[0.04] text-zinc-300',
+                  'border-white/[0.08] bg-[#0d0d10] text-zinc-300',
                   hasActiveFilters
-                    ? 'hover:bg-white/[0.07] hover:text-white'
+                    ? 'hover:bg-white/[0.06] hover:text-white'
                     : 'cursor-default opacity-40',
                 )}
               >
@@ -1398,17 +1400,19 @@ export function Search() {
             {isRefining || showUpdating ? 'Updating…' : resultCountLabel}
           </span>
         )}
-        <span aria-hidden='true' className='mx-1 h-4 w-px shrink-0 bg-white/10' />
         {hasActiveFilters && (
-          <button
-            type='button'
-            title='Reset all filters'
-            onClick={handleResetFilters}
-            className='flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
-          >
-            <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
-            Reset
-          </button>
+          <>
+            <span aria-hidden='true' className='mx-1 h-4 w-px shrink-0 bg-white/10' />
+            <button
+              type='button'
+              title='Reset all filters'
+              onClick={handleResetFilters}
+              className='flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
+            >
+              <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
+              Reset
+            </button>
+          </>
         )}
       </CompactFloatingBar>
       <ScrollToTop />

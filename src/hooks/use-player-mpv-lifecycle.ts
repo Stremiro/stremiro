@@ -60,6 +60,7 @@ export function getPlayerStreamLoadKey(stream: PlayerStreamSession): string {
 
 interface UsePlayerMpvLifecycleArgs {
   stream: PlayerStreamSession;
+  activeStreamLoadKey: string;
   isHistoryResume: boolean;
   /** Read at apply time — a mid-init pref change must not bind a stale speed. */
   playbackSpeedRef: RefObject<number>;
@@ -131,6 +132,7 @@ interface UsePlayerMpvLifecycleArgs {
 
 export function usePlayerMpvLifecycle({
   stream,
+  activeStreamLoadKey,
   isHistoryResume,
   playbackSpeedRef,
   subtitleSettingsRef,
@@ -189,7 +191,6 @@ export function usePlayerMpvLifecycle({
     activeStreamKey,
     committedStreamUrlRef,
   } = stream;
-  const activeStreamLoadKey = getPlayerStreamLoadKey(stream);
   const isDev = import.meta.env.DEV;
   // Effect events keep callback changes from restarting the native player.
   const getCallbacks = useEffectEvent(() => callbacks);
@@ -792,12 +793,7 @@ export function usePlayerMpvLifecycle({
                 if (data === true) {
                   pendingEof = true;
                   eofGeneration += 1;
-                  if (durationRef.current <= 0 && !isLoadingNow()) {
-                    pendingEof = false;
-                    getCallbacks().onEndedChange(true);
-                  } else {
-                    refreshPositionRef.current?.();
-                  }
+                  refreshPositionRef.current?.();
                 }
                 break;
               case 'idle-active':

@@ -48,8 +48,8 @@ interface UsePlayerHotkeysOptions {
   openStreamSelector: (() => void) | null;
   playPreviousEpisode: () => void;
   playNextEpisode: () => void;
-  seek: (seconds: number) => Promise<void>;
-  seekRelative: (seconds: number) => Promise<void>;
+  seek: (seconds: number) => Promise<unknown>;
+  seekRelative: (seconds: number) => Promise<unknown>;
   showEpisodes: boolean;
   showShortcuts: boolean;
   showStreamSelector: boolean;

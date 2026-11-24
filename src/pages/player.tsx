@@ -271,7 +271,6 @@ export function Player() {
   const {
     activeStreamUrl,
     activeStreamKey,
-    activeStreamSourceName,
     setActiveStreamUrl,
     activeStreamSourceIdRef,
     activeStreamSourceNameRef,
@@ -563,9 +562,24 @@ export function Player() {
   // SkipDB keys on IMDb id; anime-history `kitsu:` ids carry no anchor and return no segments.
   // Same query as details, so arriving from there is a cache hit.
   const { data: titleWatchProgress } = useTitleWatchProgress(id, {
-    enabled: isSeriesLike && isExpanded && showEpisodes,
+    enabled:
+      isSeriesLike &&
+      ((isExpanded && showEpisodes) ||
+        (appUiPreferences.spoilerProtection && (showStreamSelector || !!nextEpisode))),
   });
   const episodeProgress = titleWatchProgress?.episodeProgress;
+  const hideNextEpisodeSpoiler = Boolean(
+    nextEpisode &&
+    isEpisodeSpoiler(
+      nextEpisode,
+      appUiPreferences.spoilerProtection,
+      titleWatchProgress?.watchedEpisodeCeiling,
+      id
+        ? episodeProgress?.[episodeProgressKey(id, nextEpisode.season, nextEpisode.episode)]
+        : undefined,
+      false,
+    ),
+  );
   // The backend's resumable pick — the latest history row can be a finished episode, which must not badge "Resume".
   const episodeResumeTarget = {
     season: titleWatchProgress?.seriesResumeEntry?.absolute_season ?? undefined,
@@ -1248,6 +1262,7 @@ export function Player() {
 
   const { isBuffering, nextEpisodePrefetchDue } = usePlayerMpvLifecycle({
     stream,
+    activeStreamLoadKey,
     isHistoryResume,
     // Read the live ref — a mid-init pref change still applies the newest speed.
     playbackSpeedRef: appliedSpeedRef,
@@ -1343,8 +1358,9 @@ export function Player() {
   const restartPlayback = async () => {
     trayPause.publish(false);
     const epoch = playbackControlEpochRef.current;
-    await seek(0);
+    const rewound = await seek(0);
     if (
+      !rewound ||
       epoch !== playbackControlEpochRef.current ||
       !mountedRef.current ||
       isDestroyedRef.current ||
@@ -1431,9 +1447,17 @@ export function Player() {
     ? `Previous: ${formatEpisodeHeading(previousEpisode.season, previousEpisode.episode, previousEpisode.title)}`
     : undefined;
 
-  const nextEpisodeLabel = nextEpisode
-    ? `Next: ${formatEpisodeHeading(nextEpisode.season, nextEpisode.episode, nextEpisode.title)}`
+  const nextEpisodeHeading = nextEpisode
+    ? formatEpisodeHeading(
+        nextEpisode.season,
+        nextEpisode.episode,
+        hideNextEpisodeSpoiler
+          ? getEpisodeTitle(undefined, nextEpisode.episode)
+          : nextEpisode.title,
+      )
     : undefined;
+
+  const nextEpisodeLabel = nextEpisodeHeading ? `Next: ${nextEpisodeHeading}` : undefined;
 
   // Prefetch and advance share the same source hints and cache key.
   const resolveEpisodeStream = useCallback(
@@ -1619,7 +1643,9 @@ export function Player() {
     playbackSpeed,
     clock,
     onPlay: () => {
+      if (isLoading || error) return;
       trayPause.publish(false);
+      takeResumePause();
       void (isTerminalEof() ? restartPlayback() : setMpvProperty('pause', false)).catch(
         () => undefined,
       );
@@ -1745,6 +1771,7 @@ export function Player() {
   const autoSkippedSegmentsRef = useRef(new Set<string>());
   useEffect(() => {
     if (
+      !isPlaying ||
       !autoSkipIntro ||
       !activeSkipAction ||
       !activeSkipSegment ||
@@ -1765,6 +1792,7 @@ export function Player() {
     autoSkipIntro,
     hasActiveSkipSegmentStarted,
     id,
+    isPlaying,
     resolvedAbsoluteEpisode,
     resolvedAbsoluteSeason,
     tailSegmentActive,
@@ -2305,9 +2333,9 @@ export function Player() {
     // Docked EOF strips stay inert during resolution or stream selection.
     const miniEofOpen = eofGate && !showStreamSelector;
     const miniPlayerUpNext =
-      miniEofOpen && nextEpisode
+      miniEofOpen && nextEpisodeHeading
         ? {
-            label: formatEpisodeHeading(nextEpisode.season, nextEpisode.episode, nextEpisode.title),
+            label: nextEpisodeHeading,
           }
         : undefined;
     return (
@@ -2543,7 +2571,6 @@ export function Player() {
               episode={resolvedAbsoluteEpisode}
               episodeCountInSeason={episodeCountInSeason}
               episodeTitle={currentEpisode?.title}
-              streamSourceName={activeStreamSourceName}
               onBack={navigateBack}
               onOpenDetails={backToTitle}
               isFullscreen={isFullscreen}
@@ -2579,6 +2606,7 @@ export function Player() {
                   episode={nextEpisode}
                   thumbnail={nextEpisode.thumbnail}
                   fallbackThumbnail={backdrop ?? poster}
+                  hideSpoiler={hideNextEpisodeSpoiler}
                   autoPlayCountdown={autoPlayCountdown}
                   autoPlayDurationSeconds={appUiPreferences.nextEpisodeCountdownSecs}
                   onCancelAutoPlay={cancelAutoPlayNext}

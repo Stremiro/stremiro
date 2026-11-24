@@ -89,16 +89,15 @@ fn normalize_skip_segments(
 /// normalize once so a malformed id never reaches the outbound query.
 pub(crate) fn normalize_imdb_id(input: &str) -> Option<String> {
     let trimmed = input.trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    if lowered.len() < 3
-        || lowered.len() > 32
-        || !lowered.starts_with("tt")
-        || !lowered[2..].bytes().all(|byte| byte.is_ascii_digit())
+    let bytes = trimmed.as_bytes();
+    if !(3..=32).contains(&bytes.len())
+        || !bytes[..2].eq_ignore_ascii_case(b"tt")
+        || !bytes[2..].iter().all(u8::is_ascii_digit)
     {
         return None;
     }
 
-    Some(lowered)
+    Some(trimmed.to_ascii_lowercase())
 }
 
 pub(crate) struct SkipTimesProvider {
@@ -163,6 +162,10 @@ impl SkipTimesProvider {
             #[cfg(test)]
             segments_url: SKIPDB_SEGMENTS_URL.to_string(),
         }
+    }
+
+    pub(crate) fn purge_expired_caches(&self) {
+        self.cache.purge_expired();
     }
 
     #[cfg(test)]

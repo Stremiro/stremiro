@@ -2,10 +2,10 @@ use super::{
     addon_declares_stream, fetch_addon_stream_outcome, fetch_prepared_streams_for_addon,
     fetch_stream_for_link_from_addons, recovery_addons_needing_fallback, resolve_fetch_deadline,
     resolve_ranking_deadline, retain_rankable_streams, selector_metadata_deadline,
-    source_health_priority_for_addon, summarize_addon_outcome, summarize_cooldown_skipped_addon,
-    AddonStreamFetchOutcome, EpisodeEligibility, ResolveFetch, StreamQueryRequest,
-    StreamRankingScope, StreamSelectorData, StreamSelectorSnapshot, StreamSelectorStats,
-    StreamSourceStatus, StreamSourceSummary, ACTIVE_SOURCE_COOLDOWN_PRIORITY,
+    source_health_priority_for_addon, stream_request_type, summarize_addon_outcome,
+    summarize_cooldown_skipped_addon, AddonStreamFetchOutcome, EpisodeEligibility, ResolveFetch,
+    StreamQueryRequest, StreamRankingScope, StreamSelectorData, StreamSelectorSnapshot,
+    StreamSelectorStats, StreamSourceStatus, StreamSourceSummary, ACTIVE_SOURCE_COOLDOWN_PRIORITY,
 };
 use crate::commands::config_store::AddonConfig;
 use crate::commands::probe_pool::{is_probeable_stream, StreamExclusions};
@@ -1371,4 +1371,113 @@ async fn avatar_mixed_pool_filters_work_years_before_settlement_and_merge_on_rot
             .await
             .unwrap();
     assert_eq!(cached.len(), 3);
+}
+
+#[tokio::test]
+async fn anime_stream_addons_use_declared_anime_type_and_fall_back_to_series() {
+    let ids = build_stream_query_ids("anime", "kitsu:123", Some(1), Some(2), Some(2));
+    let provider = AddonTransport::new();
+
+    let unclassified = test_addon("https://unclassified.example", "Unclassified");
+    assert_eq!(
+        stream_request_type(&unclassified, "anime", &ids[0]),
+        Some("series")
+    );
+
+    let mut series_only = test_addon("https://series.example", "Series Only");
+    series_only.capabilities = Some(AddonManifest {
+        name: series_only.name.clone(),
+        resources: vec![AddonResourceCapability {
+            name: "stream".to_string(),
+            types: vec!["series".to_string()],
+            id_prefixes: vec!["kitsu:".to_string()],
+        }],
+        ..Default::default()
+    });
+    assert!(addon_declares_stream(&series_only, "anime", &ids));
+    assert_eq!(
+        stream_request_type(&series_only, "anime", &ids[0]),
+        Some("series")
+    );
+    seed_prepared(
+        &provider,
+        "series",
+        &ids[0],
+        &series_only,
+        vec![AddonStream {
+            url: Some("https://cdn.example/series-ep2.mkv".to_string()),
+            ..test_stream()
+        }],
+    );
+    let series_outcome =
+        fetch_addon_stream_outcome(&provider, "anime", &ids, &series_only, None, None).await;
+    assert!(series_outcome.error_message.is_none());
+    assert_eq!(
+        series_outcome.streams[0].url.as_deref(),
+        Some("https://cdn.example/series-ep2.mkv")
+    );
+
+    let mut anime_only = test_addon("https://anime.example", "Anime Only");
+    anime_only.capabilities = Some(AddonManifest {
+        name: anime_only.name.clone(),
+        resources: vec![AddonResourceCapability {
+            name: "stream".to_string(),
+            types: vec!["anime".to_string()],
+            id_prefixes: vec!["kitsu:".to_string()],
+        }],
+        ..Default::default()
+    });
+    assert!(addon_declares_stream(&anime_only, "anime", &ids));
+    assert_eq!(
+        stream_request_type(&anime_only, "anime", &ids[0]),
+        Some("anime")
+    );
+    seed_prepared(
+        &provider,
+        "anime",
+        &ids[0],
+        &anime_only,
+        vec![AddonStream {
+            url: Some("https://cdn.example/anime-ep2.mkv".to_string()),
+            ..test_stream()
+        }],
+    );
+    let anime_outcome =
+        fetch_addon_stream_outcome(&provider, "anime", &ids, &anime_only, None, None).await;
+    assert!(anime_outcome.error_message.is_none());
+    assert_eq!(anime_outcome.streams.len(), 1);
+    assert_eq!(
+        anime_outcome.streams[0].url.as_deref(),
+        Some("https://cdn.example/anime-ep2.mkv")
+    );
+
+    let mut dual_prefix = test_addon("https://dual.example", "Dual Prefix");
+    dual_prefix.capabilities = Some(AddonManifest {
+        name: dual_prefix.name.clone(),
+        resources: vec![
+            AddonResourceCapability {
+                name: "stream".to_string(),
+                types: vec!["anime".to_string()],
+                id_prefixes: vec!["kitsu:".to_string()],
+            },
+            AddonResourceCapability {
+                name: "stream".to_string(),
+                types: vec!["series".to_string()],
+                id_prefixes: vec!["tt".to_string()],
+            },
+        ],
+        ..Default::default()
+    });
+    assert_eq!(
+        stream_request_type(&dual_prefix, "anime", "kitsu:123:2"),
+        Some("anime")
+    );
+    assert_eq!(
+        stream_request_type(&dual_prefix, "anime", "tt1234567:1:2"),
+        Some("series")
+    );
+    assert_eq!(
+        stream_request_type(&dual_prefix, "anime", "mal:123:2"),
+        None
+    );
 }

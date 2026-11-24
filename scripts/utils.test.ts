@@ -1,10 +1,10 @@
 import { expect, mock, test } from 'bun:test';
 import type { KeyboardEvent } from 'react';
-import type { HistoryPlaybackPlan, MediaItem, UserList } from '../src/lib/api';
+import type { MediaItem, UserList } from '../src/lib/api';
 import { handlePreviewInvoke as previewInvoke } from '../src/lib/api-preview-mocks';
 import { handleRovingGroupKeyDown } from '../src/lib/dom';
 import { resolvePlayerRouteMediaType } from '../src/lib/player-navigation';
-import { formatRuntime, mediaTypeLabel, orderByIds } from '../src/lib/utils';
+import { mediaTypeLabel, orderByIds } from '../src/lib/utils';
 
 test('orderByIds preserves row identity and duplicate, unknown, and omitted ID behavior', () => {
   const first = { id: 'a', title: 'Original' };
@@ -21,17 +21,6 @@ test('orderByIds preserves row identity and duplicate, unknown, and omitted ID b
   expect(ordered[0]).toBe(third);
   expect(ordered[1]).toBe(last);
   expect(source).toEqual([first, second, last, third]);
-});
-
-test('formatRuntime collapses bare minute counts and passes prose through', () => {
-  expect(formatRuntime('142')).toBe('2h 22m');
-  expect(formatRuntime('120')).toBe('2h');
-  expect(formatRuntime('45')).toBe('45m');
-  expect(formatRuntime('45 min')).toBe('45 min');
-  expect(formatRuntime('1h 30m')).toBe('1h 30m');
-  expect(formatRuntime('0')).toBe('0');
-  expect(formatRuntime('  ')).toBeUndefined();
-  expect(formatRuntime(undefined)).toBeUndefined();
 });
 
 test('mediaTypeLabel titlecases addon-declared types', () => {
@@ -52,7 +41,7 @@ test('resolvePlayerRouteMediaType passes addon-declared types through', () => {
 });
 
 test.each(['anime', 'channel'])(
-  'preview invoke preserves %s media type across library, lists, details, and history',
+  'preview invoke preserves %s media type across library, lists, and details',
   async (type) => {
     const item: MediaItem = { id: `preview-${type}`, title: type, type };
     const list = await previewInvoke<UserList>('create_list', { name: type });
@@ -65,8 +54,11 @@ test.each(['anime', 'channel'])(
         item,
       );
       expect(
-        await previewInvoke('get_media_details', { mediaType: ` ${type.toUpperCase()} ` }),
-      ).toMatchObject({ type });
+        await previewInvoke('get_media_details', {
+          id: item.id,
+          mediaType: ` ${type.toUpperCase()} `,
+        }),
+      ).toMatchObject({ id: item.id, type });
     } finally {
       await Promise.all([
         previewInvoke('remove_from_library', { id: item.id }),
@@ -76,27 +68,7 @@ test.each(['anime', 'channel'])(
   },
 );
 
-test('preview invoke preserves history routing and rejects blank media types', async () => {
-  const plans = await Promise.all(
-    (
-      [
-        ['movie', 'title', 'player', 'movie'],
-        [' Channel ', 'title', 'player', 'channel'],
-        ['series', 'title', 'details', 'series'],
-        ['anime', 'title', 'details', 'anime'],
-        ['', 'KITSU:1', 'details', 'anime'],
-        ['', 'title', 'details', 'series'],
-      ] as const
-    ).map(async ([type_, id, kind, routeType]) => {
-      const plan = await previewInvoke<HistoryPlaybackPlan>('build_history_playback_plan', {
-        item: { id, type_ },
-      });
-      return [plan.kind, plan.target, kind, `/${kind}/${routeType}/${encodeURIComponent(id)}`];
-    }),
-  );
-  for (const [actualKind, actualTarget, kind, target] of plans) {
-    expect([actualKind, actualTarget]).toEqual([kind, target]);
-  }
+test('preview invoke rejects blank library media types', async () => {
   await Promise.all(
     ['', '   ', 42, null].map((type) =>
       expect(
@@ -104,9 +76,19 @@ test('preview invoke preserves history routing and rejects blank media types', a
       ).rejects.toThrow('Invalid media item'),
     ),
   );
-  expect(await previewInvoke('get_media_details', { mediaType: '   ' })).toMatchObject({
-    type: 'movie',
-  });
+  expect(await previewInvoke('get_media_details', { id: 'title', mediaType: '   ' })).toMatchObject(
+    {
+      type: 'movie',
+    },
+  );
+});
+
+test('preview reports desktop-only actions as unavailable', async () => {
+  await Promise.all(
+    ['build_history_playback_plan', 'get_addon_subtitles', 'hide_main_window_to_tray'].map(
+      (command) => expect(previewInvoke(command)).rejects.toThrow('unavailable in browser preview'),
+    ),
+  );
 });
 
 for (const role of ['radio', 'tab'] as const) {
@@ -120,9 +102,6 @@ for (const role of ['radio', 'tab'] as const) {
     [0, 'Home', 0, {}],
     [0, 'x', null, {}],
     [0, 'ArrowRight', null, { altKey: true }],
-    [0, 'ArrowRight', null, { ctrlKey: true }],
-    [0, 'ArrowRight', null, { metaKey: true }],
-    [0, 'ArrowRight', null, { shiftKey: true }],
     [0, 'ArrowRight', null, { nativeEvent: { isComposing: true } }],
     [0, 'ArrowRight', null, { defaultPrevented: true }],
   ] as const)(

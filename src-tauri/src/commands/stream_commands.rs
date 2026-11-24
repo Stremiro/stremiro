@@ -48,7 +48,7 @@ const STREAM_LINK_CHANGED_MESSAGE: &str =
 const PACK_EPISODES_MAX: usize = 2_000;
 const PACK_COVERAGE_CLAIMS_MAX: usize = 2_000;
 const STREAM_SELECTOR_SEARCH_MAX_CHARS: usize = 4_096;
-/// Shared by resolves and recoveries; one per open player/selector plus overlap.
+// Shared by cancellable playback and catalog requests.
 const STREAM_REQUESTS_MAX: usize = 32;
 const STREAM_EARLY_CANCELS_MAX: usize = 32;
 
@@ -63,7 +63,7 @@ struct StreamRequests {
     early_cancels: VecDeque<String>,
 }
 
-struct StreamRequestGuard<'a> {
+pub(super) struct StreamRequestGuard<'a> {
     registry: &'a StreamRequestRegistry,
     request_id: String,
 }
@@ -81,7 +81,7 @@ fn validate_stream_request_id(request_id: &str) -> Result<(), String> {
 }
 
 impl StreamRequestRegistry {
-    fn register(
+    pub(super) fn register(
         &self,
         request_id: String,
     ) -> Result<(StreamRequestGuard<'_>, watch::Receiver<bool>), String> {
@@ -418,6 +418,7 @@ pub(crate) struct StreamSelectorRow {
     is_playable: bool,
     seeders: Option<u32>,
     size_bytes: Option<f64>,
+    #[serde(default)]
     search_fields: Vec<Option<String>>,
 }
 
@@ -456,13 +457,11 @@ pub async fn get_stream_selector_indices(
             }
             if !terms.is_empty() {
                 search_text.clear();
-                for field in &row.search_fields {
-                    if let Some(field) = field {
-                        search_text.push_str(match field.as_str() {
-                            "Dolby Vision" => "Dolby Vision DV DoVi HDR",
-                            _ => field,
-                        });
-                    }
+                for field in row.search_fields.iter().flatten() {
+                    search_text.push_str(match field.as_str() {
+                        "Dolby Vision" => "Dolby Vision DV DoVi HDR",
+                        _ => field,
+                    });
                     search_text.push(' ');
                 }
                 if search_text.is_ascii() {

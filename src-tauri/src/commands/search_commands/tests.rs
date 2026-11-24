@@ -233,6 +233,57 @@ fn all_browse_preserves_failures_inside_a_media_type() {
     assert!(merged.partial);
 }
 
+#[tokio::test]
+async fn all_browse_returns_ready_cards_and_keeps_the_stalled_branch_cursor() {
+    let ready = TestHttpServer::new(vec![(
+        200,
+        r#"{"metas":[{"id":"tt1","name":"Fast","type":"movie"}]}"#,
+        None,
+    )]);
+    let (_stalled, stalled_url) = stalled_listener();
+    let addon = |url: &str, kind: &str| {
+        let mut addon = addon_at(url, kind, kind);
+        addon.capabilities = Some(
+            parse_addon_manifest(
+                &serde_json::to_vec(&serde_json::json!({
+                    "id": kind,
+                    "name": kind,
+                    "resources": ["catalog"],
+                    "types": [kind],
+                    "catalogs": [{"type": kind, "id": "top"}]
+                }))
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        addon
+    };
+    let snapshot = [addon(&ready.url, "movie"), addon(&stalled_url, "series")];
+    let criteria = search_criteria(serde_json::json!({}));
+    let cursors = criteria.continuation.all_cursors.unwrap();
+    let page = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::fetch_all_browse_page(
+            &snapshot,
+            &super::AddonResourceClient::new(),
+            criteria,
+            cursors,
+            true,
+        ),
+    )
+    .await
+    .expect("ready cards should not wait for the series timeout")
+    .unwrap();
+    assert_eq!(ids(&page.items), ["tt1"]);
+    assert_eq!(
+        page.continuation.all_cursors,
+        all_cursors(None, Some(0), None)
+    );
+    assert!(!page.exhausted);
+    assert!(!page.partial);
+    assert_eq!(ready.finish(), ["/catalog/movie/top.json"]);
+}
+
 #[test]
 fn all_browse_wire_cursors_are_typed_and_cannot_mix_request_modes() {
     let request = |value| serde_json::from_value::<super::SearchCatalogRequest>(value).unwrap();
@@ -1947,4 +1998,75 @@ fn browse_year_catalog_serves_only_single_year_genre_free_popular_browse() {
             "{label}"
         );
     }
+}
+
+#[tokio::test]
+async fn filtered_search_prioritizes_exact_title_matches_for_genre_resolution() {
+    let server = TestHttpServer::new(vec![
+        (
+            200,
+            r#"{"meta":{"id":"exact-1","name":"Dune","type":"movie","genres":["Sci-Fi"]}}"#,
+            None,
+        ),
+        (
+            200,
+            r#"{"meta":{"id":"exact-2","name":"Dune","type":"movie","genres":["Sci-Fi"]}}"#,
+            None,
+        ),
+        (
+            200,
+            r#"{"meta":{"id":"exact-3","name":"Dune","type":"movie","genres":["Sci-Fi"]}}"#,
+            None,
+        ),
+        (
+            200,
+            r#"{"meta":{"id":"exact-4","name":"Dune","type":"movie","genres":["Sci-Fi"]}}"#,
+            None,
+        ),
+        (
+            200,
+            r#"{"meta":{"id":"noise","name":"Other Film","type":"movie","genres":["Drama"]}}"#,
+            None,
+        ),
+    ]);
+    let snapshot = [addon_at(&server.url, "meta", "Metadata")];
+    let client = super::AddonResourceClient::new();
+    // Noise leads in provider order; four exact matches fill the concurrency window ahead of it.
+    let mut items = vec![
+        MediaItem {
+            title: "Other Film".into(),
+            poster: Some("https://img.test/noise.jpg".into()),
+            ..test_media_item("noise", "movie")
+        },
+        MediaItem {
+            title: "Dune".into(),
+            poster: Some("https://img.test/exact-1.jpg".into()),
+            ..test_media_item("exact-1", "movie")
+        },
+        MediaItem {
+            title: "Dune".into(),
+            poster: Some("https://img.test/exact-2.jpg".into()),
+            ..test_media_item("exact-2", "movie")
+        },
+        MediaItem {
+            title: "Dune".into(),
+            poster: Some("https://img.test/exact-3.jpg".into()),
+            ..test_media_item("exact-3", "movie")
+        },
+        MediaItem {
+            title: "Dune".into(),
+            poster: Some("https://img.test/exact-4.jpg".into()),
+            ..test_media_item("exact-4", "movie")
+        },
+    ];
+    assert!(
+        !super::resolve_search_genres_for_query(&snapshot, &client, &mut items, None, Some("dune"))
+            .await
+    );
+    assert_eq!(items[0].genres, Some(genres_of(&["Drama"])));
+    assert!(items[1..]
+        .iter()
+        .all(|item| item.genres == Some(genres_of(&["Sci-Fi"]))));
+    let requests = server.finish();
+    assert_ne!(requests[0], "/meta/movie/noise.json");
 }

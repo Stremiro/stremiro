@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -93,12 +94,11 @@ export function WindowVirtualizedGrid<T>({
 
   const columnCount = metrics.columnCount;
   const rowCount = Math.ceil(items.length / columnCount);
-  const rows = Array.from({ length: rowCount }, (_, index) => index);
+  const rows = useMemo(() => Array.from({ length: rowCount }, (_, index) => index), [rowCount]);
   const estimatedItemWidth =
     metrics.containerWidth > 0
       ? (metrics.containerWidth - gap * (columnCount - 1)) / columnCount
       : DEFAULT_FALLBACK_ITEM_WIDTH_PX;
-  const estimatedRowHeight = estimateItemHeight(estimatedItemWidth) + rowGap;
   const gridTemplateColumns = `repeat(${columnCount}, minmax(0, 1fr))`;
 
   return (
@@ -106,19 +106,11 @@ export function WindowVirtualizedGrid<T>({
       containerRef={containerRef}
       items={rows}
       getItemKey={getRowKey}
-      estimateSize={() => estimatedRowHeight}
+      estimatedRowHeight={estimateItemHeight(estimatedItemWidth)}
       virtualize={items.length >= DEFAULT_VIRTUALIZATION_THRESHOLD}
       overscan={DEFAULT_OVERSCAN_ROWS}
-      gap={0}
-      getRowStyle={(index, offset) => ({
-        top: offset === undefined ? undefined : `${offset}px`,
-        transform: undefined,
-        width: '100%',
-        display: 'grid',
-        gap: `${gap}px`,
-        gridTemplateColumns,
-        paddingBottom: offset !== undefined || index < rowCount - 1 ? `${rowGap}px` : undefined,
-      })}
+      gap={rowGap}
+      rowStyle={{ display: 'grid', columnGap: gap, gridTemplateColumns }}
       renderItem={(rowIndex) => {
         const rowStartIndex = rowIndex * columnCount;
         return items.slice(rowStartIndex, rowStartIndex + columnCount).map((item, itemOffset) => {

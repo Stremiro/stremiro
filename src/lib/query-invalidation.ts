@@ -60,6 +60,8 @@ export const SEARCH_CATALOG_QUERY_KEY = ['search-catalog'] as const;
 // Search stays fresh until invalidated; unused catalogs expire after 10 minutes.
 export const SEARCH_CATALOG_GC_TIME_MS = 1000 * 60 * 10;
 export const CALENDAR_EVENTS_STALE_TIME_MS = 1000 * 60 * 60;
+// Partial schedules (missing providers) refresh sooner once the provider cooldown clears.
+export const CALENDAR_PARTIAL_STALE_TIME_MS = 1000 * 60;
 // Home rails key under this prefix; invalidateDiscoveryQueries sweeps by it.
 const TRENDING_QUERY_KEY = ['trending'] as const;
 export function trendingRowQueryKey(row: string, ...coords: string[]) {
@@ -303,14 +305,21 @@ export async function invalidateDiscoveryQueries(queryClient: QueryClient, refre
   ]);
 }
 
-// Background manifest refreshes can change catalog routing; active streams stay attached.
+// Background manifest refreshes can change catalog/metadata/subtitle routing; active streams stay attached.
 // Display-only changes (logo, version) leave loaded catalogs and their in-flight fetches alone.
 export async function invalidateAddonCapabilityQueries(
   queryClient: QueryClient,
   routingChanged: boolean,
 ) {
   const routingKeys = routingChanged
-    ? [BROWSE_GENRES_QUERY_KEY, SEARCH_CATALOG_QUERY_KEY, TRENDING_QUERY_KEY]
+    ? [
+        ADDON_SUBTITLES_QUERY_KEY,
+        BROWSE_GENRES_QUERY_KEY,
+        CALENDAR_EVENTS_QUERY_KEY,
+        DETAILS_QUERY_KEY,
+        SEARCH_CATALOG_QUERY_KEY,
+        TRENDING_QUERY_KEY,
+      ]
     : [];
   await Promise.all(
     [ADDON_CONFIGS_QUERY_KEY, ...routingKeys].map((queryKey) =>

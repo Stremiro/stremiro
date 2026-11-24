@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { getDetailsEpisodeState } from '../src/lib/details-episode-state';
+import { isEpisodeSpoiler } from '../src/lib/episode-stream-target';
 import type { Episode, TitleWatchProgress, WatchProgress } from '../src/lib/api';
 import { episodeProgressKey } from '../src/lib/history-playback';
 
@@ -112,4 +113,34 @@ test('Details episode derivation leaves unavailable history and air states provi
   expect(
     getDetailsEpisodeState({ mediaId, selectedSeason: null, nextUpEpisode: null }).seasonRail,
   ).toEqual([]);
+});
+
+test('isEpisodeSpoiler shows S1E1 by default while protecting later unwatched episodes and specials', () => {
+  const s1e1 = episode(1, 1);
+  const s1e2 = episode(1, 2);
+  const s1e3 = episode(1, 3);
+  const s2e1 = episode(2, 1);
+  const special = episode(0, 1);
+  const started: WatchProgress = {
+    id: mediaId,
+    type_: 'series',
+    title: 'Example',
+    position: 120,
+    duration: 1200,
+    last_watched: 1,
+    has_started_watching: true,
+  };
+
+  expect(isEpisodeSpoiler(s1e1, true, undefined, undefined)).toBe(false);
+  expect(isEpisodeSpoiler(s1e1, true, {}, undefined)).toBe(false);
+
+  expect(isEpisodeSpoiler(s1e2, true, undefined, undefined)).toBe(true);
+  expect(isEpisodeSpoiler(s2e1, true, { 1: 10 }, undefined)).toBe(true);
+  expect(isEpisodeSpoiler(special, true, { 1: 10 }, undefined)).toBe(true);
+
+  expect(isEpisodeSpoiler(s1e2, true, { 1: 2 }, undefined)).toBe(false);
+  expect(isEpisodeSpoiler(s1e3, true, { 1: 2 }, undefined)).toBe(true);
+  expect(isEpisodeSpoiler(s1e3, true, { 1: 2 }, started)).toBe(false);
+  expect(isEpisodeSpoiler(s1e3, true, { 1: 2 }, undefined, true)).toBe(false);
+  expect(isEpisodeSpoiler(s1e3, false, undefined, undefined)).toBe(false);
 });

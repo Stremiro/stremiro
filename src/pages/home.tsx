@@ -4,14 +4,10 @@ import {
   Clapperboard,
   Flame,
   type LucideIcon,
-  Puzzle,
   Sparkles,
   Tv,
   WifiOff,
-  X,
 } from 'lucide-react';
-import { useState } from 'react';
-import { Link } from 'react-router';
 import { Hero } from '@/components/hero';
 import {
   HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
@@ -24,7 +20,6 @@ import { ResumeSection } from '@/components/resume-section';
 import { RetryBanner } from '@/components/retry-banner';
 import { ScrollToTop } from '@/components/scroll-to-top';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api } from '@/lib/api';
@@ -67,52 +62,10 @@ const recentWatchSeedQueryOptions = {
   retry: false,
 };
 
-// Session-scoped: the hint returns on next launch until a stream addon is installed.
-let streamAddonHintDismissed = false;
-
-function StreamAddonHint() {
-  const [dismissed, setDismissed] = useState(streamAddonHintDismissed);
-  const { data: addons, isSuccess } = useAddonConfigs();
-  // Unclassified addons (no resources yet) might serve streams; only a known gap shows the hint.
-  const hasStreamAddon = addons?.some(
-    (addon) =>
-      addon.enabled && (addon.resources === undefined || addon.resources.includes('stream')),
-  );
-  if (dismissed || !isSuccess || hasStreamAddon) return null;
-
-  return (
-    <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
-      <div role='status' className={cn(PAGE_NOTICE_CLASS, 'mb-4')}>
-        <Puzzle aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
-        <p className='min-w-0 flex-1'>
-          Add a stream addon to start watching.{' '}
-          <Link
-            to='/settings?section=addons'
-            className='rounded-xs text-zinc-200 underline underline-offset-4 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-          >
-            Manage addons
-          </Link>
-        </p>
-        <button
-          type='button'
-          aria-label='Dismiss'
-          onClick={() => {
-            streamAddonHintDismissed = true;
-            setDismissed(true);
-          }}
-          className='-mr-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-        >
-          <X aria-hidden='true' className='h-3.5 w-3.5' />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function HomeRowPlaceholder() {
   return (
-    <div aria-hidden='true' className='relative py-5 md:py-6'>
-      <div className={`${HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS} mb-4`}>
+    <div aria-hidden='true' className='relative py-4 md:py-5'>
+      <div className={`${HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS} mb-3`}>
         <div className='flex min-h-10 items-center'>
           <Skeleton className='h-7 w-52 bg-white/[0.06]' />
         </div>
@@ -233,7 +186,6 @@ export function Home() {
             </div>
           </div>
         )}
-        <StreamAddonHint />
         <ResumeSection />
         <WatchlistRail />
 

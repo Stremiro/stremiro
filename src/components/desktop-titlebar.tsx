@@ -107,7 +107,13 @@ export function DesktopTitlebar({ className, historyControls = false }: DesktopT
   };
 
   return (
-    <div className={cn('fixed inset-x-0 top-0 z-80 flex h-8 items-stretch', className)}>
+    <div
+      data-desktop-titlebar
+      className={cn(
+        'pointer-events-auto fixed inset-x-0 top-0 z-80 flex h-8 items-stretch',
+        className,
+      )}
+    >
       {historyControls && <TitlebarHistoryControls />}
 
       {/* Drag region fills remaining space. Tauri's drag script already maximizes

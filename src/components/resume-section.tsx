@@ -28,8 +28,10 @@ export function ResumeSection() {
     isFetching,
     refetch,
   } = resumeRailQuery;
+  const showRetry = queryNeedsRetry(resumeRailQuery) && entries.length === 0;
+  if (!showRetry && !isLoading && entries.length === 0) return null;
 
-  const retryBanner = (
+  const retryBanner = (showRetry || isError) && (
     <RetryBanner
       className='w-full max-w-xl'
       message={
@@ -44,9 +46,9 @@ export function ResumeSection() {
 
   return (
     <section data-resume-section aria-label='Continue Watching' tabIndex={-1}>
-      {queryNeedsRetry(resumeRailQuery) && entries.length === 0 ? (
+      {showRetry ? (
         <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>{retryBanner}</div>
-      ) : !isLoading && entries.length === 0 ? null : (
+      ) : (
         <HorizontalMediaRail
           icon={History}
           title='Continue Watching'

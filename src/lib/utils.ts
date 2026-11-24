@@ -138,6 +138,12 @@ export function applyAccentVars(accent: string, targets: AccentTargets) {
   root.style.setProperty('--accent-seek', targets.seekbar ? accent : '#ffffff');
 }
 
+export function applyProfileAccentTheme(accent: string, targets: AccentTargets, intensity: number) {
+  applyAccentVars(accent, targets);
+  // 0 hides the ambient tint entirely; 100 is the full subtle glow.
+  document.documentElement.style.setProperty('--app-glow', String(clamp(intensity, 0, 100) / 100));
+}
+
 /** Trimmed string, or `undefined` when blank — mirrors Rust `non_blank`. */
 export function nonBlank(value?: string | null): string | undefined {
   return value?.trim() || undefined;
@@ -327,15 +333,4 @@ export function primaryGenrePills(
   max = 2,
 ): string[] {
   return (catalogGenres?.length ? catalogGenres : (detailsGenres ?? [])).slice(0, max);
-}
-
-/** Addon runtimes arrive as bare minutes ("142") or prose ("45 min") — collapse numeric to "2h 22m". */
-export function formatRuntime(runtime?: string | null): string | undefined {
-  const trimmed = runtime?.trim();
-  if (!trimmed) return undefined;
-  const mins = Number(trimmed);
-  if (!Number.isInteger(mins) || mins <= 0) return trimmed;
-  const hours = Math.floor(mins / 60);
-  const rest = mins % 60;
-  return hours === 0 ? `${mins}m` : rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }

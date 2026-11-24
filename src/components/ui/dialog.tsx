@@ -32,6 +32,19 @@ interface DialogContentProps extends React.ComponentProps<typeof DialogPrimitive
   hideCloseButton?: boolean;
 }
 
+function isDesktopTitlebarEvent(event: Event): boolean {
+  const originalTarget =
+    'detail' in event &&
+    typeof event.detail === 'object' &&
+    event.detail !== null &&
+    'originalEvent' in event.detail &&
+    event.detail.originalEvent instanceof Event
+      ? event.detail.originalEvent.target
+      : null;
+  const target = originalTarget ?? event.target;
+  return target instanceof Element && target.closest('[data-desktop-titlebar]') !== null;
+}
+
 function DialogContent({
   className,
   overlayClassName,
@@ -39,6 +52,9 @@ function DialogContent({
   children,
   onOpenAutoFocus,
   onCloseAutoFocus,
+  onPointerDownOutside,
+  onInteractOutside,
+  onFocusOutside,
   ...props
 }: DialogContentProps) {
   // Radix restores focus to the trigger on close — programmatic dialogs have none, so remember the focused element.
@@ -65,6 +81,27 @@ function DialogContent({
             event.preventDefault();
             opener.focus({ preventScroll: true });
           }
+        }}
+        onPointerDownOutside={(event) => {
+          if (isDesktopTitlebarEvent(event)) {
+            event.preventDefault();
+            return;
+          }
+          onPointerDownOutside?.(event);
+        }}
+        onInteractOutside={(event) => {
+          if (isDesktopTitlebarEvent(event)) {
+            event.preventDefault();
+            return;
+          }
+          onInteractOutside?.(event);
+        }}
+        onFocusOutside={(event) => {
+          if (isDesktopTitlebarEvent(event)) {
+            event.preventDefault();
+            return;
+          }
+          onFocusOutside?.(event);
         }}
         {...props}
       >

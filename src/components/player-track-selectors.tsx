@@ -504,7 +504,7 @@ export function SubtitleTrackSelector({
                           <span className='min-w-0 flex-1 text-left'>
                             <span className='flex min-w-0 items-baseline gap-2'>
                               <span className='min-w-0 truncate font-semibold text-current'>
-                                {langCode || subtitle.label}
+                                {langCode || subtitle.label || 'External'}
                               </span>
                               <span
                                 className='ml-auto max-w-[50%] truncate text-[11px] font-normal text-zinc-500'

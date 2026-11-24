@@ -127,8 +127,6 @@ interface PlayerTopChromeProps {
   episodeCountInSeason: number | null;
   /** Playing episode's own title (details.episodes lookup) when known. */
   episodeTitle?: string;
-  /** Live source label — reflects failover swaps, not just the launch pick. */
-  streamSourceName?: string;
   onBack: () => Promise<void>;
   onOpenDetails: () => void;
   isFullscreen: boolean;
@@ -143,7 +141,6 @@ export function PlayerTopChrome({
   episode,
   episodeCountInSeason,
   episodeTitle,
-  streamSourceName,
   onBack,
   onOpenDetails,
   isFullscreen,
@@ -189,7 +186,7 @@ export function PlayerTopChrome({
             {title}
           </button>
         </h1>
-        {(seasonEpisode || episodeTitle || streamSourceName) && (
+        {(seasonEpisode || episodeTitle) && (
           <p className='flex min-w-0 items-center justify-center gap-1.5 text-[12.5px] leading-5'>
             {seasonEpisode && (
               <span className='shrink-0 font-medium tabular-nums tracking-tight text-white/90'>
@@ -202,12 +199,6 @@ export function PlayerTopChrome({
             {seasonEpisode && episodeTitle && separator}
             {episodeTitle && (
               <span className='min-w-0 truncate font-medium text-white/85'>{episodeTitle}</span>
-            )}
-            {(seasonEpisode || episodeTitle) && streamSourceName && separator}
-            {streamSourceName && (
-              <span className='max-w-[40%] shrink-0 truncate text-white/60'>
-                via {streamSourceName}
-              </span>
             )}
           </p>
         )}
@@ -252,7 +243,7 @@ interface PlayerControlsRowProps {
   onTogglePip?: () => Promise<void>;
   isPlaying: boolean;
   onTogglePlay: () => Promise<void>;
-  onSeekRelative: (seconds: number) => Promise<void>;
+  onSeekRelative: (seconds: number) => Promise<unknown>;
   volume: number;
   isMuted: boolean;
   onToggleMute: () => Promise<void>;

@@ -21,7 +21,7 @@ export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
   'pr-6 pl-[84px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
 
 const SCROLL_BUTTON_CLASS_NAME =
-  'h-10 w-10 rounded-md bg-white/[0.03] border border-white/[0.08] text-zinc-300 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-35 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none';
+  'h-10 w-10 rounded-md bg-white/[0.03] border border-white/[0.08] text-zinc-300 shadow-[inset_0_1px_0_rgb(255_255_255/0.05)] not-aria-disabled:hover:border-white/[0.16] not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white not-aria-disabled:active:scale-95 transition-[color,background-color,border-color,transform] duration-150 aria-disabled:cursor-default aria-disabled:opacity-35 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none motion-reduce:active:scale-100';
 const DEFAULT_ITEM_CLASS_NAME = `flex-none ${MEDIA_CARD_SLOT_CLASS_NAME} snap-start`;
 const DEFAULT_SCROLLER_CLASS_NAME =
   'flex overflow-x-auto gap-4 px-1 pt-1 pb-8 scrollbar-hide snap-x snap-proximity';

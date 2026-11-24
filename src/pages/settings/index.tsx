@@ -17,6 +17,7 @@ import {
   Suspense,
   useDeferredValue,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -25,11 +26,11 @@ import { ACCENT_PRESET_LABELS } from '@/components/accent-controls';
 import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAppUpdater } from '@/hooks/use-app-updater';
+import { useFindShortcut } from '@/hooks/use-browse-hotkeys';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { ariaKeyShortcuts, formatBindingKey, PLAYER_ACTIONS } from '@/lib/player-keybindings';
-import { isKeyCaptureTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import {
   SUBTITLE_COLOR_OPTIONS,
   SUBTITLE_EDGE_OPTIONS,
@@ -102,8 +103,12 @@ const NAV_GROUPS = [
         component: AppearanceSettings,
         label: 'Appearance',
         icon: Palette,
-        description: 'Accent color, glow and tint targets.',
+        description: 'Profile, accent color, glow and tint targets.',
         controls: [
+          {
+            label: 'Display name',
+            keywords: 'Profile username identity photo avatar picture',
+          },
           {
             label: 'Accent',
             keywords: `Reset Soft Vivid Custom accent color hex Pick a custom color ${ACCENT_PRESET_LABELS.join(' ')}`,
@@ -170,7 +175,7 @@ const NAV_GROUPS = [
           },
           {
             label: 'Spoiler protection',
-            keywords: 'Blur unwatched episode thumbnails and descriptions.',
+            keywords: 'Blur unwatched episode thumbnails and descriptions after Episode 1.',
           },
           {
             label: 'Trailer previews',
@@ -420,18 +425,26 @@ export function Settings() {
   const navButtons = useRef(new Map<SectionId, HTMLButtonElement>());
   const indicator = useSlidingIndicator(active, navRef, navButtons);
   const keymap = usePlayerKeymap();
-  // Rebindable actions are also found by their current keys ("space", "m", "left").
-  const boundKeyText = new Map(
-    PLAYER_ACTIONS.map((action) => [
-      `setting-shortcut-${action.id}`,
-      `${keymap.keys[action.id].map(formatBindingKey).join(' ')} ${ariaKeyShortcuts(keymap, action.id) ?? ''}`.toLowerCase(),
-    ]),
-  );
   const searchText = query.trim().toLowerCase();
-  const searchWords = searchText.split(/\s+/).filter(Boolean);
-  const matches = searchWords.length
+  const isSearching = searchText.length > 0;
+  // Rebindable actions are also found by their current keys ("space", "m", "left").
+  const boundKeyText = useMemo(
+    () =>
+      isSearching
+        ? new Map(
+            PLAYER_ACTIONS.map((action) => [
+              `setting-shortcut-${action.id}`,
+              `${keymap.keys[action.id].map(formatBindingKey).join(' ')} ${ariaKeyShortcuts(keymap, action.id) ?? ''}`.toLowerCase(),
+            ]),
+          )
+        : undefined,
+    [isSearching, keymap],
+  );
+  const searchWords = searchText.split(/\s+/);
+  const matches = isSearching
     ? SEARCH_ITEMS.filter((item) => {
-        const text = `${item.text} ${(item.target && boundKeyText.get(item.target)) ?? ''}`;
+        const keys = item.target && boundKeyText?.get(item.target);
+        const text = keys ? `${item.text} ${keys}` : item.text;
         return searchWords.every((word) => text.includes(word));
       }).toSorted(
         (a, b) =>
@@ -456,28 +469,7 @@ export function Settings() {
     });
   }, [indicator]);
 
-  // Ctrl/Cmd+F finds a setting instead of opening the WebView find bar.
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key.toLowerCase() !== 'f' ||
-        !(event.ctrlKey || event.metaKey) ||
-        event.altKey ||
-        event.shiftKey ||
-        event.defaultPrevented ||
-        event.isComposing ||
-        isKeyCaptureTarget(event.target, event.key) ||
-        document.querySelector(OPEN_DIALOG_SELECTOR)
-      ) {
-        return;
-      }
-      event.preventDefault();
-      searchInputRef.current?.focus();
-      searchInputRef.current?.select();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  useFindShortcut(() => searchInputRef.current);
 
   // Same-path replaces are skipped by the route scroll manager — land at top.
   const resetSectionScroll = () => {
@@ -620,8 +612,12 @@ export function Settings() {
                           className={cn(
                             'nav-switch-item group relative flex h-10 shrink-0 items-center gap-3 rounded-md px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/35 lg:w-full',
                             isActive
-                              ? 'text-white'
-                              : 'text-zinc-300 hover:bg-white/[0.05] hover:text-white active:bg-white/[0.07]',
+                              ? cn(
+                                  'text-white',
+                                  !indicator &&
+                                    'bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]',
+                                )
+                              : 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100 active:bg-white/[0.07]',
                           )}
                         >
                           <item.icon
@@ -638,7 +634,7 @@ export function Settings() {
                           {item.id === 'updates' && isUpdateAvailable ? (
                             <span
                               aria-hidden='true'
-                              className='ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400'
+                              className='ml-auto mr-1 h-1.5 w-1.5 shrink-0 rounded-full bg-[color-mix(in_srgb,var(--accent-nav)_72%,white)]'
                             />
                           ) : null}
                         </button>
@@ -663,21 +659,19 @@ export function Settings() {
           <div
             ref={sectionRef}
             tabIndex={-1}
-            aria-label={
-              searchWords.length ? 'Settings search results' : `${shownSection.label} settings`
-            }
+            aria-label={isSearching ? 'Settings search results' : `${shownSection.label} settings`}
             role='region'
             className='w-full min-w-0 scroll-mt-48 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25 lg:scroll-mt-16 lg:min-h-0 lg:h-full lg:overflow-y-auto lg:overscroll-contain scrollbar-hide'
           >
-            {!searchWords.length && <h2 className='sr-only'>{shownSection.label}</h2>}
-            {searchWords.length ? (
+            {!isSearching && <h2 className='sr-only'>{shownSection.label}</h2>}
+            {isSearching ? (
               <div className='space-y-3'>
                 <output className='block text-[12px] text-zinc-500'>
                   {pluralize(matches.length, 'setting')} found
                   {matches.length > 0 ? ' · Enter opens the first' : ''}
                 </output>
                 {matches.length > 0 && (
-                  <div className='overflow-hidden rounded-xl border border-white/[0.08] bg-[#121214] divide-y divide-white/[0.07]'>
+                  <SettingsCard className='divide-y divide-white/[0.07]'>
                     {matches.map((item) => (
                       <button
                         key={`${item.section.id}-${item.target ?? 'section'}`}
@@ -706,7 +700,7 @@ export function Settings() {
                         />
                       </button>
                     ))}
-                  </div>
+                  </SettingsCard>
                 )}
                 {matches.length === 0 && (
                   <SettingsCard>

@@ -32,6 +32,7 @@ import {
   registerAppUiPreferenceFlusher,
   useAppUiPreferences,
 } from '@/hooks/use-app-ui-preferences';
+import { useProfileAccent } from '@/hooks/use-local-profile';
 import { api, type AppUiPreferences } from '@/lib/api';
 import { openAppLink } from '@/lib/app-links';
 import { isTauriDesktopRuntime, runAppUpdateCheck } from '@/lib/app-updater';
@@ -46,7 +47,12 @@ import {
 } from '@/lib/player-session';
 import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { routeChunks } from '@/lib/route-chunks';
-import { boundedMapSet, clearTimer, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import {
+  applyProfileAccentTheme,
+  boundedMapSet,
+  clearTimer,
+  SIDEBAR_PAGE_COLUMN_INSETS,
+} from '@/lib/utils';
 import { Home } from '@/pages/home';
 
 function createRoutePages() {
@@ -105,7 +111,6 @@ function AppNavigationBinder() {
 function AppLinkManager() {
   useEffect(() => {
     if (!isTauriDesktopRuntime()) return;
-    let isActive = true;
     const openPendingLink = () => {
       void api
         .takePendingAppLink()
@@ -115,19 +120,12 @@ function AppLinkManager() {
         .catch(() => undefined);
     };
     const listener = listen('app://link', openPendingLink);
-    const settingsListener = listen('app://settings-requested', () => {
-      if (isActive) navigateApp('/settings');
-    });
-    void settingsListener.catch(() => undefined);
     void listener.then(openPendingLink, openPendingLink);
     return () => {
-      isActive = false;
-      for (const pendingListener of [listener, settingsListener]) {
-        void pendingListener.then(
-          (unlisten) => unlisten(),
-          () => undefined,
-        );
-      }
+      void listener.then(
+        (unlisten) => unlisten(),
+        () => undefined,
+      );
     };
   }, []);
 
@@ -417,6 +415,17 @@ function AppUpdateManager() {
   return null;
 }
 
+function ProfileAccentSync() {
+  const { accentColor, accentIntensity, accentTargets } = useProfileAccent();
+
+  // Keep <html> accent vars synced across all routes (including /player) before paint.
+  useLayoutEffect(() => {
+    applyProfileAccentTheme(accentColor, accentTargets, accentIntensity);
+  }, [accentColor, accentIntensity, accentTargets]);
+
+  return null;
+}
+
 function App() {
   const [{ Search, Details, Settings, Profile, Calendar }, setRoutePages] =
     useState(createRoutePages);
@@ -470,6 +479,7 @@ function App() {
       {/* Root-level playback session survives route changes so leaving
           /player minimizes into the mini player instead of tearing down. */}
       <PlayerHost />
+      <ProfileAccentSync />
       <AppNavigationBinder />
       <AppLinkManager />
       <RouteScrollManager />

@@ -108,6 +108,14 @@ test('republishing without supplied notes preserves the existing release body', 
   expect(edit).not.toContain('--notes-file');
 });
 
+test('an unsupported publish flag has no release side effects', () => {
+  const result = runRelease(['publish', '--help']);
+  expect(result.exitCode).toBe(1);
+  expect(result.error).toContain('Usage:');
+  expect(result.calls).toEqual([]);
+  expect(result.manifest).toBeNull();
+});
+
 test.each([['--notes'], ['--notes', '--draft'], ['--notes', 'missing.md']])(
   'invalid release notes %j fail before any command or manifest write',
   (...args) => {

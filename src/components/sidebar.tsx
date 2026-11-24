@@ -33,7 +33,8 @@ interface SidebarNavItem {
 const SETTINGS_HREF = '/settings';
 const PROFILE_HREF = '/profile';
 const SEARCH_HREF = '/search';
-const NAV_ACTIVE_SURFACE_CLASS = 'bg-white/[0.06] shadow-[inset_0_1px_0_rgb(255_255_255/0.08)]';
+const NAV_ACTIVE_SURFACE_CLASS =
+  'bg-white/[0.07] ring-1 ring-inset ring-white/[0.08] shadow-[inset_0_1px_0_rgb(255_255_255/0.1)]';
 
 const PRIMARY_NAV_ITEMS: SidebarNavItem[] = [
   { icon: Home, label: 'Home', href: '/', shortcut: 'Alt+1' },
@@ -157,7 +158,13 @@ export function Sidebar({ className }: SidebarProps) {
           else group.itemRefs.current.delete(item.href);
         }}
         updateAvailable={showUpdate}
-        tooltip={showUpdate ? updateTooltip : undefined}
+        tooltip={
+          showUpdate
+            ? updateTooltip
+            : item.href === PROFILE_HREF && identity?.username && identity.username !== 'Guest User'
+              ? identity.username
+              : undefined
+        }
         onIntent={() => {
           warmRouteChunk(item.href);
           if (item.href === SETTINGS_HREF && !showUpdate) {
@@ -187,7 +194,10 @@ export function Sidebar({ className }: SidebarProps) {
             <ProfileAvatar
               name={identity.username}
               avatar={avatar}
-              className='h-[26px] w-[26px] ring-1 ring-white/15'
+              className={cn(
+                'h-[26px] w-[26px] ring-1 transition-shadow duration-150 motion-reduce:transition-none',
+                isActive ? 'ring-(--accent-nav)/70' : 'ring-white/15',
+              )}
               fallbackClassName='bg-zinc-800 text-[11px] font-bold'
             />
           ) : undefined
@@ -240,7 +250,7 @@ export function Sidebar({ className }: SidebarProps) {
 }
 
 const NAV_DOT_CLASS =
-  'absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-emerald-400 ring-2 ring-black';
+  'absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[color-mix(in_srgb,var(--accent-nav)_72%,white)] shadow-[0_0_8px_color-mix(in_srgb,var(--accent-nav)_65%,white)] ring-2 ring-black';
 
 interface SidebarNavButtonProps {
   icon?: ReactNode;
@@ -281,11 +291,11 @@ function SidebarNavButton({
             variant='ghost'
             size='icon'
             className={cn(
-              'nav-switch-item relative h-11 w-full overflow-hidden rounded-lg [&_svg]:size-[22px]',
+              'nav-switch-item group/nav relative h-11 w-full overflow-hidden rounded-lg [&_svg]:size-[22px] [&_svg]:transition-transform [&_svg]:duration-150 [&_svg]:ease-out active:[&_svg]:scale-[0.92] motion-reduce:active:[&_svg]:scale-100',
               isActive && 'text-(--accent-nav) hover:bg-transparent hover:text-(--accent-nav)',
               isActive && !sharedIndicator && NAV_ACTIVE_SURFACE_CLASS,
               !isActive &&
-                'text-white/45 hover:bg-white/[0.04] hover:text-white/85 focus-visible:bg-white/[0.04] focus-visible:text-white/90',
+                'text-white/50 hover:bg-white/[0.05] hover:text-white/95 focus-visible:bg-white/[0.05] focus-visible:text-white',
             )}
           >
             <Link

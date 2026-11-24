@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 
 import {
   type AppUiPreferences,
@@ -106,11 +106,13 @@ export function usePlayerKeymap(): PlayerKeymap {
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
   });
-  const { bindings, overrides } = preferencesQuery.data ?? {
-    bindings: defaultBindingsQuery.data ?? DEFAULT_APP_UI_PREFERENCES.effectivePlayerKeybindings,
-    overrides: DEFAULT_APP_UI_PREFERENCES.playerKeybindings,
-  };
-  return createPlayerKeymap(bindings, overrides);
+  const bindings =
+    preferencesQuery.data?.bindings ??
+    defaultBindingsQuery.data ??
+    DEFAULT_APP_UI_PREFERENCES.effectivePlayerKeybindings;
+  const overrides =
+    preferencesQuery.data?.overrides ?? DEFAULT_APP_UI_PREFERENCES.playerKeybindings;
+  return useMemo(() => createPlayerKeymap(bindings, overrides), [bindings, overrides]);
 }
 
 export function useAppUiPreferences<T = AppUiPreferences>(

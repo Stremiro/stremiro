@@ -458,6 +458,23 @@ impl PlaybackStateService {
         metadata_work_years(details.year.as_deref(), details.release_date.as_deref())
     }
 
+    pub(crate) fn episode_is_final_season_from_details(
+        details: &MediaDetails,
+        season: Option<u32>,
+    ) -> bool {
+        let Some(season) = season else {
+            return false;
+        };
+        details
+            .episodes
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .map(|episode| episode.season)
+            .max()
+            .is_some_and(|max_season| season >= max_season)
+    }
+
     pub(crate) fn accepted_work_years_from_details(
         details: &MediaDetails,
         season: Option<u32>,

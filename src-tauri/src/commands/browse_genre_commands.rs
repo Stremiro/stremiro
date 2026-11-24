@@ -65,6 +65,12 @@ fn is_year_option(value: &str) -> bool {
     value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// Browse feed catalog ids queried by `search_commands::fetch_browse_results`.
+fn is_browsable_feed_catalog(catalog_id: &str) -> bool {
+    let trimmed = catalog_id.trim();
+    trimmed.eq_ignore_ascii_case("top") || trimmed.eq_ignore_ascii_case("imdbRating")
+}
+
 /// Union of manifest-declared `genre` extra options across enabled addons for one
 /// catalog type, deduped case-insensitively (first spelling wins); Cinemeta is the fallback.
 fn collect_catalog_genres(addons: &[AddonConfig], catalog_type: &str) -> Vec<String> {
@@ -73,9 +79,17 @@ fn collect_catalog_genres(addons: &[AddonConfig], catalog_type: &str) -> Vec<Str
     let catalogs = addons
         .iter()
         .filter_map(|addon| addon.capabilities.as_ref())
-        .flat_map(|manifest| &manifest.catalogs)
-        .filter(|catalog| catalog.type_.trim().eq_ignore_ascii_case(catalog_type));
-    for catalog in catalogs {
+        .flat_map(|manifest| {
+            manifest
+                .catalogs
+                .iter()
+                .map(move |catalog| (manifest, catalog))
+        })
+        .filter(|(_, catalog)| {
+            catalog.type_.trim().eq_ignore_ascii_case(catalog_type)
+                && is_browsable_feed_catalog(&catalog.id)
+        });
+    for (manifest, catalog) in catalogs {
         let genre_options = catalog
             .extras
             .iter()
@@ -83,7 +97,19 @@ fn collect_catalog_genres(addons: &[AddonConfig], catalog_type: &str) -> Vec<Str
             .flat_map(|extra| &extra.options);
         for option in genre_options {
             let option = option.trim();
-            if option.is_empty() || is_year_option(option) {
+            if option.is_empty() || is_year_option(option) || option.eq_ignore_ascii_case("all") {
+                continue;
+            }
+            let extras = catalog_request_extras(
+                Some(manifest),
+                &catalog.type_,
+                &catalog.id,
+                vec![CatalogExtra {
+                    name: "genre".to_string(),
+                    value: option.to_string(),
+                }],
+            );
+            if snapshot_supports_catalog(manifest, &catalog.type_, &catalog.id, &extras).is_err() {
                 continue;
             }
             if seen.insert(option.to_ascii_lowercase()) {
@@ -294,6 +320,39 @@ mod tests {
             options: Vec::new(),
         });
         assert_eq!(build_browse_genres(&[provider]).addon, ["Live"]);
+    }
+
+    #[test]
+    fn typed_genres_ignore_non_feed_and_search_required_catalogs() {
+        let mut provider = addon(vec![("movie", vec!["All", "Drama"])]);
+        let catalogs = &mut provider.capabilities.as_mut().unwrap().catalogs;
+        catalogs[0].id = "imdbRating".to_string();
+        catalogs.push(AddonCatalogCapability {
+            type_: "movie".to_string(),
+            id: "my_movies".to_string(),
+            extras: vec![AddonCatalogExtra {
+                name: "genre".to_string(),
+                is_required: false,
+                options: vec!["Unreachable".to_string()],
+            }],
+        });
+        catalogs.push(AddonCatalogCapability {
+            type_: "movie".to_string(),
+            id: "top".to_string(),
+            extras: vec![
+                AddonCatalogExtra {
+                    name: "genre".to_string(),
+                    is_required: false,
+                    options: vec!["SearchOnly".to_string()],
+                },
+                AddonCatalogExtra {
+                    name: "search".to_string(),
+                    is_required: true,
+                    options: Vec::new(),
+                },
+            ],
+        });
+        assert_eq!(build_browse_genres(&[provider]).movie, ["Drama"]);
     }
 
     #[test]

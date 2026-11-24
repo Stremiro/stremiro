@@ -405,7 +405,7 @@ function DataManager() {
                           clearMutation.mutate(cat);
                       }}
                       disabled={isWorking || cat.count === undefined}
-                      className='h-9 rounded-lg border-0 bg-red-500 px-3 text-[13px] font-semibold text-white hover:bg-red-600'
+                      className='h-9 rounded-lg border border-rose-500/35 bg-rose-600/90 px-3 text-[13px] font-semibold text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.14)] hover:bg-rose-600'
                     >
                       {isPending && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
                       Clear permanently
@@ -423,7 +423,7 @@ function DataManager() {
                       'h-9 rounded-lg px-3 text-[13px] font-medium',
                       isEmpty
                         ? 'cursor-not-allowed opacity-30'
-                        : 'border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-300',
+                        : 'border-rose-500/20 bg-rose-500/[0.06] text-rose-300 hover:border-rose-500/30 hover:bg-rose-500/12 hover:text-rose-200',
                     )}
                   >
                     Clear

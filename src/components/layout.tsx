@@ -1,10 +1,8 @@
-import { Component, useLayoutEffect, type ReactNode } from 'react';
+import { Component, type ReactNode } from 'react';
 import { Outlet, useLocation } from 'react-router';
 import { Button } from '@/components/ui/button';
 import { useBrowseHotkeys } from '@/hooks/use-browse-hotkeys';
-import { useProfileAccent } from '@/hooks/use-local-profile';
 import { navigateApp } from '@/lib/navigation';
-import { applyAccentVars, clamp } from '@/lib/utils';
 import { DesktopTitlebar } from './desktop-titlebar';
 import { Sidebar } from './sidebar';
 
@@ -76,20 +74,9 @@ function RouteOutlet({ onRetry }: { onRetry: () => void }) {
 }
 
 export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
-  const { accentColor: accent, accentIntensity, accentTargets } = useProfileAccent();
-  // 0 hides the ambient tint entirely; 100 is the full premium-subtle glow.
-  const glowScale = clamp(accentIntensity, 0, 100) / 100;
-
   // Browse-page keys: `/`/`Ctrl+K` to search, Esc/Backspace/Alt+← for back.
   // Player routes never mount Layout — its own hotkey map owns the keyboard.
   useBrowseHotkeys();
-
-  // Accent vars must land on <html> before first paint — a passive effect would
-  // flash the white fallback for one frame on launch.
-  useLayoutEffect(() => {
-    applyAccentVars(accent, accentTargets);
-    document.documentElement.style.setProperty('--app-glow', String(glowScale));
-  }, [accent, accentTargets, glowScale]);
 
   return (
     <>

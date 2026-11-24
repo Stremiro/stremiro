@@ -180,7 +180,7 @@ interface PlayerProgressBarProps {
   skipSegments: SkipSegment[];
   /** Stream-scoped reset: clears any in-flight drag preview on source change. */
   resetKey?: string;
-  onSeek: (seconds: number) => void | Promise<void>;
+  onSeek: (seconds: number) => void | Promise<unknown>;
 }
 
 export function PlayerProgressBar({

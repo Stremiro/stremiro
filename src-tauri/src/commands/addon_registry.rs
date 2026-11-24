@@ -32,8 +32,7 @@ const META_HEDGE_DELAY: Duration = Duration::from_millis(400);
 /// primary holds a live fallback for at most this window instead of its full
 /// request timeout.
 const META_FALLBACK_GRACE: Duration = Duration::from_millis(2_500);
-/// Arm only after each catalog group has usable items or exhausts its sources.
-const CATALOG_STRAGGLER_GRACE: Duration = Duration::from_millis(1_500);
+pub(super) const CATALOG_STRAGGLER_GRACE: Duration = Duration::from_millis(1_500);
 const SUBTITLE_STRAGGLER_GRACE: Duration = Duration::from_secs(10);
 /// Failed install-time manifest fetches leave an addon unclassified; the
 /// background retry is throttled so a permanently down addon costs one
@@ -479,7 +478,7 @@ struct CatalogWorkItem {
 
 /// Arm once usable outcomes exist for the request. Fast errors or cached
 /// results in an unrelated group must not cancel its first valid answer.
-async fn collect_with_deadline<S, T>(
+pub(super) async fn collect_with_deadline<S, T>(
     mut outcomes: S,
     grace: Duration,
     mut ready: impl FnMut(&T) -> bool,
@@ -510,18 +509,29 @@ where
     collected
 }
 
+#[derive(Clone, Copy)]
+enum CatalogGraceStart {
+    FirstResults,
+    AllGroupsReady,
+}
+
 async fn collect_catalog_outcomes<S>(
     outcomes: S,
     mut remaining: Vec<usize>,
     grace: Duration,
+    grace_start: CatalogGraceStart,
 ) -> Vec<(usize, usize, Result<CatalogPage, String>)>
 where
     S: stream::Stream<Item = (usize, usize, Result<CatalogPage, String>)> + Unpin,
 {
     let mut succeeded = vec![false; remaining.len()];
     collect_with_deadline(outcomes, grace, |(group, _, result)| {
+        let usable = result.as_ref().is_ok_and(|page| !page.items.is_empty());
+        if matches!(grace_start, CatalogGraceStart::FirstResults) {
+            return usable;
+        }
         remaining[*group] -= 1;
-        succeeded[*group] |= result.as_ref().is_ok_and(|page| !page.items.is_empty());
+        succeeded[*group] |= usable;
         remaining
             .iter()
             .zip(&succeeded)
@@ -539,6 +549,7 @@ async fn run_catalog_work_pool(
     mut work: Vec<CatalogWorkItem>,
     group_count: usize,
     deadline: Option<tokio::time::Instant>,
+    grace_start: CatalogGraceStart,
 ) -> Vec<Vec<(usize, Result<CatalogPage, String>)>> {
     let mut remaining = vec![0; group_count];
     for item in &work {
@@ -573,6 +584,7 @@ async fn run_catalog_work_pool(
         .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
         remaining,
         CATALOG_STRAGGLER_GRACE,
+        grace_start,
     )
     .await;
 
@@ -630,42 +642,48 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
         }
     }
 
-    run_catalog_work_pool(client, work, group_count, deadline)
-        .await
-        .into_iter()
-        .zip(group_errors)
-        .zip(group_skips)
-        .map(|((bucket, (error, supports_skip)), skip)| match error {
-            Some(error) => Err(error),
-            None if supports_skip.is_empty() => Ok(CatalogFetchPage::default()),
-            None if deadline.is_some()
-                && (bucket.len() != supports_skip.len()
-                    || bucket.iter().any(|(_, result)| result.is_err())) =>
-            {
-                Err("Catalog scan incomplete.".into())
-            }
-            None => {
-                // Dropped stragglers have no outcome to carry the partial flag.
-                let incomplete = bucket.len() != supports_skip.len();
-                merge_catalog_pages(
-                    bucket.into_iter().map(|(order, result)| {
-                        result.map(|page| {
-                            let mut page = catalog_fetch_page_from_source(page, skip);
-                            if !supports_skip[order] {
-                                page.next_skip = None;
-                            }
-                            page
-                        })
-                    }),
-                    "Failed to load catalog.",
-                )
-                .map(|mut page| {
-                    page.partial |= incomplete;
-                    page
-                })
-            }
-        })
-        .collect()
+    run_catalog_work_pool(
+        client,
+        work,
+        group_count,
+        deadline,
+        CatalogGraceStart::AllGroupsReady,
+    )
+    .await
+    .into_iter()
+    .zip(group_errors)
+    .zip(group_skips)
+    .map(|((bucket, (error, supports_skip)), skip)| match error {
+        Some(error) => Err(error),
+        None if supports_skip.is_empty() => Ok(CatalogFetchPage::default()),
+        None if deadline.is_some()
+            && (bucket.len() != supports_skip.len()
+                || bucket.iter().any(|(_, result)| result.is_err())) =>
+        {
+            Err("Catalog scan incomplete.".into())
+        }
+        None => {
+            // Dropped stragglers have no outcome to carry the partial flag.
+            let incomplete = bucket.len() != supports_skip.len();
+            merge_catalog_pages(
+                bucket.into_iter().map(|(order, result)| {
+                    result.map(|page| {
+                        let mut page = catalog_fetch_page_from_source(page, skip);
+                        if !supports_skip[order] {
+                            page.next_skip = None;
+                        }
+                        page
+                    })
+                }),
+                "Failed to load catalog.",
+            )
+            .map(|mut page| {
+                page.partial |= incomplete;
+                page
+            })
+        }
+    })
+    .collect()
 }
 
 struct SearchCatalogSource {
@@ -829,9 +847,15 @@ pub(crate) async fn search_catalog_pages_for_genres(
             "catalog",
         ));
     }
+    // A continuation can wait for a missed genre while the first page stays visible.
+    let grace_start = if cursors.is_some_and(|cursors| cursors.iter().any(|cursor| cursor.retry)) {
+        CatalogGraceStart::AllGroupsReady
+    } else {
+        CatalogGraceStart::FirstResults
+    };
     merge_search_catalog_pages(
         sources,
-        run_catalog_work_pool(client, work, genres.len(), None).await,
+        run_catalog_work_pool(client, work, genres.len(), None, grace_start).await,
         cursors.is_none(),
     )
 }

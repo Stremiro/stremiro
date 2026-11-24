@@ -1,12 +1,16 @@
 use super::config_store::addon_configs_generation;
+use super::history_helpers::is_series_like_watch_progress;
 use super::media_commands::{fetch_media_schedules, MediaSchedule, MediaScheduleRequest};
 use super::media_normalization::days_in_month;
 use super::playback_state::PlaybackStateService;
 use super::resume_store::ResumeTitleIdentity;
 use super::store_helpers::{load_library_item_identities, load_watch_statuses_map};
+use super::stream_commands::StreamRequestRegistry;
 use super::watch_history_commands::{
-    build_title_watch_progress_with_priorities, TitleWatchProgress,
+    annotate_watch_progress_list, build_title_episode_progress, build_title_watch_history_rows,
+    build_watched_episode_ceiling,
 };
+use super::WatchProgress;
 use crate::providers::{addon_resource::AddonResourceClient, ttl_cache::TtlCache, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -14,7 +18,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{command, ipc::Channel, AppHandle, State};
+use tauri::{command, ipc::Channel, AppHandle, Manager, State};
 
 // List members usually overlap the library; one full list of headroom keeps
 // list-only titles cached without sizing for every list at its cap.
@@ -83,10 +87,11 @@ impl CalendarScheduleCache {
                 .iter()
                 .filter_map(|key| schedules.get(key).cloned())
                 .collect();
+            let mut last_publish = None;
             if !cached.is_empty() {
                 on_cached(&cached);
+                last_publish = Some(Instant::now());
             }
-            let mut last_publish: Option<Instant> = None;
             if let Err(error) = fetch_media_schedules(app, client, missing, |fetched| {
                 for schedule in fetched {
                     let key = format!("{source_generation}:{}:{}", schedule.type_, schedule.id);
@@ -279,8 +284,31 @@ fn calendar_event_date<'a>(
 }
 
 /// Same watched and spoiler-ceiling rules as the details episode list.
+struct CalendarWatchProgress {
+    movie_watched: bool,
+    episodes: HashMap<String, (bool, bool)>,
+    episode_ceiling: HashMap<u32, u32>,
+}
+
+impl CalendarWatchProgress {
+    fn from_history(rows: Vec<WatchProgress>) -> Self {
+        let history = annotate_watch_progress_list(build_title_watch_history_rows(rows));
+        Self {
+            movie_watched: history
+                .iter()
+                .find(|row| !is_series_like_watch_progress(row))
+                .is_some_and(|row| row.is_watched),
+            episodes: build_title_episode_progress(&history, None)
+                .into_iter()
+                .map(|(key, row)| (key, (row.is_watched, row.has_started_watching)))
+                .collect(),
+            episode_ceiling: build_watched_episode_ceiling(&history),
+        }
+    }
+}
+
 fn episode_progress_flags(
-    progress: Option<&TitleWatchProgress>,
+    progress: Option<&CalendarWatchProgress>,
     media_id: &str,
     season: u32,
     episode: u32,
@@ -288,24 +316,23 @@ fn episode_progress_flags(
     let Some(progress) = progress else {
         return (false, false);
     };
-    let row = progress
-        .episode_progress
-        .get(&format!("{media_id}:{season}:{episode}"));
+    let (watched, started) = progress
+        .episodes
+        .get(&format!("{media_id}:{season}:{episode}"))
+        .copied()
+        .unwrap_or_default();
     let within_ceiling = progress
-        .watched_episode_ceiling
+        .episode_ceiling
         .get(&season)
         .is_some_and(|ceiling| episode <= *ceiling);
-    (
-        row.is_some_and(|row| row.is_watched),
-        within_ceiling || row.is_some_and(|row| row.has_started_watching),
-    )
+    (watched, started || within_ceiling)
 }
 
 fn calendar_events<'a>(
     schedules: impl IntoIterator<Item = &'a MediaSchedule>,
     range: &CalendarRange,
     upcoming: &Range<u32>,
-    progress: &HashMap<String, TitleWatchProgress>,
+    progress: &HashMap<String, CalendarWatchProgress>,
 ) -> Vec<CalendarScheduleEvent> {
     let mut events = Vec::new();
     let mut seen = HashSet::new();
@@ -321,8 +348,7 @@ fn calendar_events<'a>(
             }
             let watched = progress
                 .get(&schedule.id)
-                .and_then(|progress| progress.latest_movie_entry.as_ref())
-                .is_some_and(|row| row.is_watched);
+                .is_some_and(|progress| progress.movie_watched);
             if watched && range.hide_watched {
                 continue;
             }
@@ -440,10 +466,32 @@ pub async fn get_calendar_events(
     cache: State<'_, CalendarScheduleCache>,
     range: CalendarRange,
     on_cached: Channel<CalendarSchedule>,
+    request_id: Option<String>,
+) -> Result<CalendarSchedule, String> {
+    let work = load_calendar_events(&app, &playback_state, &client, &cache, range, on_cached);
+    let Some(request_id) = request_id else {
+        return work.await;
+    };
+    let registry = app.state::<StreamRequestRegistry>();
+    let (_guard, mut cancellation) = registry.register(request_id)?;
+    tokio::select! {
+        biased;
+        _ = cancellation.wait_for(|cancelled| *cancelled) => Err("Calendar request cancelled.".into()),
+        result = work => result,
+    }
+}
+
+async fn load_calendar_events(
+    app: &AppHandle,
+    playback_state: &PlaybackStateService,
+    client: &AddonResourceClient,
+    cache: &CalendarScheduleCache,
+    range: CalendarRange,
+    on_cached: Channel<CalendarSchedule>,
 ) -> Result<CalendarSchedule, String> {
     let upcoming = range.validate()?;
-    let (requests, progress) = playback_state
-        .run_store_op(&app, move |service, app| {
+    let (requests, history_rows) = playback_state
+        .run_store_op(app, move |service, app| {
             let library =
                 load_library_item_identities(&super::open_store(app, super::LIBRARY_STORE_FILE)?)?;
             let statuses =
@@ -461,20 +509,29 @@ pub async fn get_calendar_events(
             let requests = calendar_requests(tracked, history, &statuses);
             // Loaded before fetching so streamed snapshots carry the same spoiler flags as the result.
             let ids: Vec<_> = requests.iter().map(|request| request.id.as_str()).collect();
-            let mut rows_by_id: HashMap<String, Vec<_>> = HashMap::new();
-            for (_, row) in service.load_resume_entries_for_media_ids(app, &ids)? {
-                rows_by_id.entry(row.id.clone()).or_default().push(row);
-            }
-            let progress = rows_by_id
-                .into_iter()
-                .map(|(id, rows)| (id, build_title_watch_progress_with_priorities(rows, None)))
-                .collect();
-            Ok((requests, progress))
+            let history_rows = service.load_resume_entries_for_media_ids(app, &ids)?;
+            Ok((requests, history_rows))
         })
         .await?;
+    let progress = if history_rows.is_empty() {
+        HashMap::new()
+    } else {
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut rows_by_id: HashMap<String, Vec<_>> = HashMap::new();
+            for (_, row) in history_rows {
+                rows_by_id.entry(row.id.clone()).or_default().push(row);
+            }
+            rows_by_id
+                .into_iter()
+                .map(|(id, rows)| (id, CalendarWatchProgress::from_history(rows)))
+                .collect()
+        })
+        .await
+        .map_err(|error| format!("Could not process calendar watch history: {error}"))?
+    };
     let tracked_count = requests.len();
     let schedules = cache
-        .fetch(&app, client.inner(), requests, |cached| {
+        .fetch(app, client, requests, |cached| {
             let _ = on_cached.send(calendar_schedule(
                 tracked_count,
                 tracked_count.saturating_sub(cached.len()),
@@ -842,20 +899,16 @@ mod tests {
         let progress = HashMap::from([
             (
                 "tt1".to_string(),
-                build_title_watch_progress_with_priorities(
-                    vec![
-                        row("tt1", "series", Some(2), 300.0, 2),
-                        row("tt1", "series", Some(1), 1_000.0, 1),
-                    ],
-                    None,
-                ),
+                CalendarWatchProgress::from_history(vec![
+                    row("tt1", "series", Some(2), 300.0, 2),
+                    row("tt1", "series", Some(1), 1_000.0, 1),
+                ]),
             ),
             (
                 "ttmovie".to_string(),
-                build_title_watch_progress_with_priorities(
-                    vec![row("ttmovie", "movie", None, 1_000.0, 1)],
-                    None,
-                ),
+                CalendarWatchProgress::from_history(vec![row(
+                    "ttmovie", "movie", None, 1_000.0, 1,
+                )]),
             ),
         ]);
         let schedules = [
